@@ -1,3 +1,6 @@
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
 use aes::Aes128;
@@ -7,15 +10,25 @@ use futures::StreamExt;
 use md5::{Digest, Md5};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use silk_rs::decode_silk;
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 use crate::channels::wasm::host::{Attachment, ChannelHostState};
 
 const AES_BLOCK_SIZE: usize = 16;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const WECHAT_CHANNEL_NAME: &str = "wechat";
-const WECHAT_SILK_SAMPLE_RATE_HZ: i32 = 24_000;
+const WECHAT_SILK_SAMPLE_RATE_HZ: u32 = 24_000;
 const WECHAT_OUTBOUND_ENVELOPE_MAGIC: &[u8] = b"ICWXENC1";
+
+/// Cap on output WAV bytes accepted from the SILK decoder subprocess. SILK→PCM
+/// expansion is ~25× at 24 kHz mono; 60 s of voice is ~3 MiB. 50 MiB matches
+/// the cap inside the decoder binary and prevents a runaway child from
+/// pushing unbounded data into the host.
+const MAX_DECODED_WAV_BYTES: usize = 50 * 1024 * 1024;
+const SILK_DECODER_TIMEOUT: Duration = Duration::from_secs(15);
+const SILK_DECODER_BIN_NAME: &str = "ironclaw-silk-decoder";
+const SILK_DECODER_ENV_VAR: &str = "IRONCLAW_SILK_DECODER";
 
 #[derive(Debug, Deserialize)]
 struct WechatAttachmentExtras {
@@ -60,7 +73,7 @@ pub(crate) async fn hydrate_attachment_for_channel(
                 if attachment.mime_type.starts_with("image/") {
                     attachment.mime_type = detect_image_mime(&attachment.data).to_string();
                 } else if is_wechat_silk_attachment(attachment)
-                    && let Err(error) = maybe_transcode_wechat_silk_attachment(attachment)
+                    && let Err(error) = maybe_transcode_wechat_silk_attachment(attachment).await
                 {
                     tracing::warn!(
                         channel = %host_state.channel_name(),
@@ -375,20 +388,26 @@ fn detect_image_mime(bytes: &[u8]) -> &'static str {
     }
 }
 
-fn maybe_transcode_wechat_silk_attachment(attachment: &mut Attachment) -> Result<(), String> {
+async fn maybe_transcode_wechat_silk_attachment(attachment: &mut Attachment) -> Result<(), String> {
     if attachment.data.is_empty() {
         return Err("SILK attachment has no data".to_string());
     }
+    let decoder_path = resolve_silk_decoder_command().ok_or_else(|| {
+        format!(
+            "{SILK_DECODER_BIN_NAME} not found (set {SILK_DECODER_ENV_VAR}, install on PATH, or place beside the ironclaw binary)"
+        )
+    })?;
 
-    let pcm = decode_silk(&attachment.data, WECHAT_SILK_SAMPLE_RATE_HZ)
-        .map_err(|error| format!("SILK decode failed: {error}"))?;
-    if pcm.is_empty() {
-        return Err("SILK decoder returned empty PCM".to_string());
+    let wav = run_silk_decoder(&decoder_path, &attachment.data, WECHAT_SILK_SAMPLE_RATE_HZ).await?;
+    if wav.is_empty() {
+        return Err("SILK decoder returned empty WAV".to_string());
+    }
+    if !wav.starts_with(b"RIFF") {
+        return Err("SILK decoder did not produce a RIFF/WAVE stream".to_string());
     }
 
-    let wav = pcm_s16le_to_wav(&pcm, WECHAT_SILK_SAMPLE_RATE_HZ as u32)?;
+    attachment.size_bytes = Some(wav.len() as u64);
     attachment.data = wav;
-    attachment.size_bytes = Some(attachment.data.len() as u64);
     attachment.mime_type = "audio/wav".to_string();
     if let Some(filename) = attachment.filename.as_mut() {
         replace_attachment_extension(filename, "wav");
@@ -396,36 +415,111 @@ fn maybe_transcode_wechat_silk_attachment(attachment: &mut Attachment) -> Result
     Ok(())
 }
 
-fn pcm_s16le_to_wav(pcm: &[u8], sample_rate_hz: u32) -> Result<Vec<u8>, String> {
-    if !pcm.len().is_multiple_of(2) {
-        return Err("PCM buffer length must be even for 16-bit mono audio".to_string());
+/// Locate the optional SILK decoder helper binary. Lookup order:
+///
+/// 1. `IRONCLAW_SILK_DECODER` env var, used verbatim as a path.
+/// 2. Sibling of the running executable (`<exe-dir>/ironclaw-silk-decoder[.exe]`).
+/// 3. Bare `ironclaw-silk-decoder` for `$PATH` resolution by `Command`.
+///
+/// Returns `None` only when no candidate looks viable; callers fall back to
+/// preserving raw SILK and logging that the decoder is not configured.
+fn resolve_silk_decoder_command() -> Option<OsString> {
+    if let Some(path) = std::env::var_os(SILK_DECODER_ENV_VAR)
+        && !path.is_empty()
+    {
+        return Some(path);
     }
 
-    let data_len = u32::try_from(pcm.len())
-        .map_err(|_| "PCM buffer exceeds WAV container size limits".to_string())?;
-    let total_len = 44u32
-        .checked_add(data_len)
-        .ok_or_else(|| "WAV container size overflowed".to_string())?;
-    let byte_rate = sample_rate_hz
-        .checked_mul(2)
-        .ok_or_else(|| "WAV byte rate overflowed".to_string())?;
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let mut candidate: PathBuf = parent.to_path_buf();
+        if cfg!(windows) {
+            candidate.push(format!("{SILK_DECODER_BIN_NAME}.exe"));
+        } else {
+            candidate.push(SILK_DECODER_BIN_NAME);
+        }
+        if candidate.is_file() {
+            return Some(candidate.into_os_string());
+        }
+    }
 
-    let mut wav = Vec::with_capacity(total_len as usize);
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(total_len - 8).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&sample_rate_hz.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    wav.extend_from_slice(pcm);
-    Ok(wav)
+    Some(OsString::from(SILK_DECODER_BIN_NAME))
+}
+
+async fn run_silk_decoder(
+    program: &OsString,
+    silk_bytes: &[u8],
+    sample_rate_hz: u32,
+) -> Result<Vec<u8>, String> {
+    let mut command = Command::new(program);
+    command
+        .arg("--sample-rate")
+        .arg(sample_rate_hz.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = command.spawn().map_err(|e| {
+        format!("failed to spawn {SILK_DECODER_BIN_NAME}: {e} (is the helper binary installed?)")
+    })?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("failed to capture stdin for {SILK_DECODER_BIN_NAME}"))?;
+    let input = silk_bytes.to_vec();
+    let writer = tokio::spawn(async move {
+        stdin
+            .write_all(&input)
+            .await
+            .map_err(|e| format!("failed to send SILK bytes to decoder: {e}"))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|e| format!("failed to close decoder stdin: {e}"))
+    });
+
+    let output_future = child.wait_with_output();
+    let output = match tokio::time::timeout(SILK_DECODER_TIMEOUT, output_future).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return Err(format!("{SILK_DECODER_BIN_NAME} failed: {error}")),
+        Err(_) => {
+            return Err(format!(
+                "{SILK_DECODER_BIN_NAME} timed out after {}s",
+                SILK_DECODER_TIMEOUT.as_secs()
+            ));
+        }
+    };
+    if let Err(error) = writer
+        .await
+        .map_err(|e| format!("decoder stdin task panicked: {e}"))?
+    {
+        return Err(error);
+    }
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        return Err(format!(
+            "{SILK_DECODER_BIN_NAME} exited with {} (stderr: {})",
+            output
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string()),
+            if stderr.is_empty() { "<empty>" } else { stderr }
+        ));
+    }
+
+    if output.stdout.len() > MAX_DECODED_WAV_BYTES {
+        return Err(format!(
+            "{SILK_DECODER_BIN_NAME} produced {} bytes, exceeds {MAX_DECODED_WAV_BYTES} cap",
+            output.stdout.len()
+        ));
+    }
+    Ok(output.stdout)
 }
 
 fn replace_attachment_extension(filename: &mut String, replacement: &str) {
@@ -486,10 +580,11 @@ fn random_bytes(len: usize) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AES_BLOCK_SIZE, Attachment, decrypt_wechat_attachment_bytes, detect_image_mime,
+        AES_BLOCK_SIZE, Attachment, MAX_DECODED_WAV_BYTES, SILK_DECODER_BIN_NAME,
+        SILK_DECODER_ENV_VAR, decrypt_wechat_attachment_bytes, detect_image_mime,
         encrypt_aes_ecb_pkcs7, hydrate_attachment_for_channel,
-        maybe_transcode_wechat_silk_attachment, pcm_s16le_to_wav,
-        prepare_outbound_attachment_for_channel, should_hydrate_wechat_attachment,
+        maybe_transcode_wechat_silk_attachment, prepare_outbound_attachment_for_channel,
+        resolve_silk_decoder_command, should_hydrate_wechat_attachment,
         unpack_prepared_wechat_upload,
     };
     use crate::channels::wasm::{ChannelCapabilities, ChannelHostState};
@@ -614,19 +709,101 @@ mod tests {
     }
 
     #[test]
-    fn pcm_s16le_to_wav_wraps_pcm_with_expected_header() {
-        let wav = pcm_s16le_to_wav(&[0x00, 0x00, 0x01, 0x00], 24_000).expect("wav wrapping");
-        assert!(wav.starts_with(b"RIFF"));
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(&wav[12..16], b"fmt ");
-        assert_eq!(&wav[36..40], b"data");
-        assert_eq!(&wav[40..44], &(4u32).to_le_bytes());
-        assert_eq!(&wav[44..], &[0x00, 0x00, 0x01, 0x00]);
+    fn resolve_silk_decoder_command_prefers_env_var() {
+        // SAFETY: tests are single-threaded by default within a process; this
+        // is the conventional pattern used elsewhere in this file's test
+        // module. Pre-existing value (if any) is restored before exit.
+        let previous = std::env::var_os(SILK_DECODER_ENV_VAR);
+        // SAFETY: see above note on test threading.
+        unsafe {
+            std::env::set_var(SILK_DECODER_ENV_VAR, "/opt/custom/decoder");
+        }
+        let resolved = resolve_silk_decoder_command();
+        // SAFETY: see above note on test threading.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var(SILK_DECODER_ENV_VAR, value),
+                None => std::env::remove_var(SILK_DECODER_ENV_VAR),
+            }
+        }
+        assert_eq!(
+            resolved,
+            Some(std::ffi::OsString::from("/opt/custom/decoder"))
+        );
     }
 
     #[test]
-    fn silk_transcode_failure_preserves_raw_silk_path_for_callers() {
-        let mut attachment = Attachment {
+    fn resolve_silk_decoder_command_falls_back_to_path_lookup() {
+        // SAFETY: see env-var note above.
+        let previous = std::env::var_os(SILK_DECODER_ENV_VAR);
+        unsafe {
+            std::env::remove_var(SILK_DECODER_ENV_VAR);
+        }
+        let resolved = resolve_silk_decoder_command();
+        unsafe {
+            if let Some(value) = previous {
+                std::env::set_var(SILK_DECODER_ENV_VAR, value);
+            }
+        }
+        // Without env var and (almost certainly) no sibling binary in the
+        // cargo-test runner directory, the resolver should still hand back
+        // the bare program name for $PATH resolution. This guarantees
+        // graceful "binary not installed" handling rather than `None`.
+        let value = resolved.expect("resolver should always offer a candidate");
+        assert!(
+            value
+                .to_str()
+                .is_some_and(|s| s.ends_with(SILK_DECODER_BIN_NAME))
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_unix_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).expect("create stub");
+        write!(file, "#!/usr/bin/env bash\nset -eu\n{body}\n").expect("write stub");
+        let mut perms = std::fs::metadata(&path).expect("stat stub").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod stub");
+        path
+    }
+
+    #[cfg(unix)]
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(unix)]
+    impl EnvGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let prior = std::env::var_os(key);
+            // SAFETY: tests in this module are single-threaded by default.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prior }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see EnvGuard::set.
+            unsafe {
+                match self.prior.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn fake_silk_attachment() -> Attachment {
+        Attachment {
             id: "wechat-voice-1".to_string(),
             mime_type: "audio/silk".to_string(),
             filename: Some("wechat-voice-1.silk".to_string()),
@@ -638,14 +815,96 @@ mod tests {
             extras_json: encode_test_extras_json("ZmFrZS1rZXk="),
             data: vec![1, 2, 3],
             duration_secs: Some(1),
-        };
+        }
+    }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silk_transcoder_consumes_decoder_output_and_updates_attachment() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // Stub: emit a minimal valid RIFF/WAVE header (44 bytes is the well-formed
+        // empty WAV). Discards stdin to keep the pipe alive for the writer task.
+        let body = "cat >/dev/null\n\
+            printf 'RIFF\\x24\\x00\\x00\\x00WAVEfmt \\x10\\x00\\x00\\x00\\x01\\x00\\x01\\x00\\xc0]\\x00\\x00\\x80\\xbb\\x00\\x00\\x02\\x00\\x10\\x00data\\x00\\x00\\x00\\x00'";
+        let stub = write_unix_stub(temp.path(), "stub-silk-decoder", body);
+        let _guard = EnvGuard::set(SILK_DECODER_ENV_VAR, &stub);
+
+        let mut attachment = fake_silk_attachment();
+        maybe_transcode_wechat_silk_attachment(&mut attachment)
+            .await
+            .expect("stub decoder should succeed");
+
+        assert_eq!(attachment.mime_type, "audio/wav");
+        assert_eq!(attachment.filename.as_deref(), Some("wechat-voice-1.wav"));
+        assert!(attachment.data.starts_with(b"RIFF"));
+        assert_eq!(attachment.size_bytes, Some(attachment.data.len() as u64));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silk_transcoder_propagates_decoder_failure_for_caller_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let body = "cat >/dev/null\n\
+            echo 'fake decoder failure' >&2\n\
+            exit 3";
+        let stub = write_unix_stub(temp.path(), "stub-silk-decoder", body);
+        let _guard = EnvGuard::set(SILK_DECODER_ENV_VAR, &stub);
+
+        let mut attachment = fake_silk_attachment();
         let original = attachment.data.clone();
-        let error =
-            maybe_transcode_wechat_silk_attachment(&mut attachment).expect_err("invalid SILK");
-        assert!(error.contains("SILK decode failed"));
+
+        let error = maybe_transcode_wechat_silk_attachment(&mut attachment)
+            .await
+            .expect_err("stub decoder failure should bubble");
+        assert!(
+            error.contains(SILK_DECODER_BIN_NAME),
+            "error mentions decoder name: {error}"
+        );
+        assert!(
+            error.contains("fake decoder failure"),
+            "error includes captured stderr: {error}"
+        );
+
+        // Caller-level invariant: the attachment must still be raw SILK so
+        // hydrate_attachment_for_channel's outer warn-and-preserve branch is
+        // valid. Regression coverage for the fallback path.
         assert_eq!(attachment.mime_type, "audio/silk");
         assert_eq!(attachment.filename.as_deref(), Some("wechat-voice-1.silk"));
         assert_eq!(attachment.data, original);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silk_transcoder_rejects_non_riff_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let body = "cat >/dev/null\n\
+            printf 'NOT_A_WAV'";
+        let stub = write_unix_stub(temp.path(), "stub-silk-decoder", body);
+        let _guard = EnvGuard::set(SILK_DECODER_ENV_VAR, &stub);
+
+        let mut attachment = fake_silk_attachment();
+        let error = maybe_transcode_wechat_silk_attachment(&mut attachment)
+            .await
+            .expect_err("non-RIFF output should be rejected");
+        assert!(error.contains("RIFF"), "error mentions RIFF: {error}");
+        assert_eq!(attachment.mime_type, "audio/silk");
+    }
+
+    #[tokio::test]
+    async fn silk_transcoder_errors_when_attachment_data_empty() {
+        let mut attachment = fake_silk_attachment();
+        attachment.data = Vec::new();
+        let error = maybe_transcode_wechat_silk_attachment(&mut attachment)
+            .await
+            .expect_err("empty input should not invoke the decoder");
+        assert!(error.contains("no data"), "error: {error}");
+    }
+
+    #[test]
+    fn decoded_wav_cap_matches_attachment_cap_documentation() {
+        // Sanity-check the documented relationship between input and output caps.
+        // SILK→PCM expansion is ~25× at 24 kHz mono; 50 MiB output cap is
+        // generous compared to the 20 MiB input cap (60 s of voice → ~3 MiB).
+        assert!(MAX_DECODED_WAV_BYTES >= super::MAX_ATTACHMENT_BYTES);
     }
 }

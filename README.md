@@ -136,9 +136,6 @@ Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) insta
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
 
-# If you are building the WeChat voice/SILK path, make sure libclang and a C
-# compiler are installed first because silk-rs uses bindgen at build time.
-
 # Build
 cargo build --release
 
@@ -147,6 +144,14 @@ cargo test
 ```
 
 For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
+
+> **Optional:** WeChat voice notes (`audio/silk`) require the standalone
+> `ironclaw-silk-decoder` helper to be transcribable. It's excluded from the
+> default workspace build because `silk-rs` pulls in `bindgen`/`libclang`.
+> Build it separately with `./crates/ironclaw_silk_decoder/build.sh` (needs
+> libclang + a C toolchain) and put the resulting binary on `$PATH`, beside
+> the `ironclaw` binary, or pointed at by `IRONCLAW_SILK_DECODER`. Without
+> it, voice messages are still delivered — just as raw `audio/silk` blobs.
 
 </details>
 

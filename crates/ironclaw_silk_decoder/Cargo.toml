@@ -1,0 +1,14 @@
+[package]
+name = "ironclaw_silk_decoder"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Standalone helper that decodes WeChat raw SILK v3 voice notes to WAV. Isolated here so the main IronClaw build does not require libclang."
+
+[[bin]]
+name = "ironclaw-silk-decoder"
+path = "src/main.rs"
+
+[dependencies]
+silk-rs = "0.2.0"
