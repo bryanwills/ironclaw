@@ -25,6 +25,7 @@ mod nearai_chat;
 pub mod oauth_helpers;
 pub mod openai_codex_provider;
 pub mod openai_codex_session;
+mod openai_compat;
 mod provider;
 mod reasoning;
 pub mod recording;
@@ -184,7 +185,9 @@ fn create_registry_provider(
     }
 
     match config.protocol {
-        ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
+        ProviderProtocol::OpenAiCompletions => {
+            create_openai_compat_from_registry(config, request_timeout_secs)
+        }
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
         ProviderProtocol::GithubCopilot => {
@@ -252,27 +255,9 @@ async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvid
 
 fn create_openai_compat_from_registry(
     config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    use rig::providers::openai;
-
-    let mut extra_headers = reqwest::header::HeaderMap::new();
-    for (key, value) in &config.extra_headers {
-        let name = match reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(header = %key, error = %e, "Skipping extra header: invalid name");
-                continue;
-            }
-        };
-        let val = match reqwest::header::HeaderValue::from_str(value) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(header = %key, error = %e, "Skipping extra header: invalid value");
-                continue;
-            }
-        };
-        extra_headers.insert(name, val);
-    }
+    let extra_headers = openai_compat::build_extra_headers(&config.extra_headers);
 
     let api_key = config
         .api_key
@@ -288,36 +273,33 @@ fn create_openai_compat_from_registry(
             "no-key".to_string()
         });
 
-    let mut builder = openai::Client::builder().api_key(&api_key);
-    if !config.base_url.is_empty() {
-        let base_url = normalize_openai_base_url(&config.base_url);
-        builder = builder.base_url(&base_url);
-    }
-    if !extra_headers.is_empty() {
-        builder = builder.http_headers(extra_headers);
-    }
-
-    let client: openai::Client = builder.build().map_err(|e| LlmError::RequestFailed {
-        provider: config.provider_id.clone(),
-        reason: format!("Failed to create OpenAI-compatible client: {e}"),
-    })?;
-
-    // Use CompletionsClient (Chat Completions API) instead of the default
-    // Client (Responses API). The Responses API path in rig-core handles
-    // tool results differently, which breaks IronClaw's tool call flow.
-    let client = client.completions_api();
-    let model = client.completion_model(&config.model);
+    let base_url = if config.base_url.is_empty() {
+        // Sensible default for the bare `openai` provider.
+        "https://api.openai.com/v1".to_string()
+    } else {
+        normalize_openai_base_url(&config.base_url)
+    };
 
     tracing::debug!(
         provider = %config.provider_id,
         model = %config.model,
-        base_url = %config.base_url,
+        base_url = %base_url,
         "Using OpenAI-compatible provider"
     );
 
-    let adapter = RigAdapter::new(model, &config.model)
-        .with_unsupported_params(config.unsupported_params.clone());
-    Ok(Arc::new(adapter))
+    // Use IronClaw's custom provider (not rig-core's OpenAI client) so we
+    // round-trip provider-specific extensions like DeepSeek's
+    // `reasoning_content` and Gemini's `thought_signature`. See #3201, #3225.
+    openai_compat::create_provider(
+        config.provider_id.clone(),
+        base_url,
+        api_key,
+        config.model.clone(),
+        request_timeout_secs,
+        extra_headers,
+        config.unsupported_params.clone(),
+        None,
+    )
 }
 
 fn create_anthropic_from_registry(

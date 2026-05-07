@@ -509,6 +509,7 @@ impl LoopDelegate for ContainerDelegate {
         &self,
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
+        reasoning_content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
         {
@@ -527,13 +528,12 @@ impl LoopDelegate for ContainerDelegate {
             .await;
         }
 
-        // Add assistant message with tool_calls (OpenAI protocol)
-        reason_ctx
-            .messages
-            .push(ChatMessage::assistant_with_tool_calls(
-                content,
-                tool_calls.clone(),
-            ));
+        // Add assistant message with tool_calls (OpenAI protocol).
+        // `reasoning_content` round-trips provider-specific thinking artifacts.
+        reason_ctx.messages.push(
+            ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning_content(reasoning_content),
+        );
 
         // Execute tools sequentially (container context — no parallel execution)
         let mut tool_failure_count: usize = 0;

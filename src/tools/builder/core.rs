@@ -770,16 +770,16 @@ Create alongside the .wasm file to grant capabilities:
                 RespondResult::ToolCalls {
                     tool_calls,
                     content,
+                    reasoning_content,
                 } => {
                     tools_executed = true;
 
-                    // Add assistant message with tool_calls (OpenAI protocol)
-                    reason_ctx
-                        .messages
-                        .push(ChatMessage::assistant_with_tool_calls(
-                            content,
-                            tool_calls.clone(),
-                        ));
+                    // Add assistant message with tool_calls (OpenAI protocol).
+                    // Round-trip provider-specific reasoning artifact (#3201).
+                    reason_ctx.messages.push(
+                        ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                            .with_reasoning_content(reasoning_content),
+                    );
 
                     // Execute each tool call
                     for tc in tool_calls {

@@ -425,10 +425,15 @@ pub enum RespondResult {
     Text(String),
     /// The model wants to call tools. Caller should execute them and call back.
     /// Includes the optional content from the assistant message (some models
-    /// include explanatory text alongside tool calls).
+    /// include explanatory text alongside tool calls), and a provider-specific
+    /// `reasoning_content` artifact (e.g. DeepSeek thinking-mode output) that
+    /// the agent must echo back on the next request — without it DeepSeek
+    /// rejects the next call with HTTP 400 (#3201). `None` for providers that
+    /// don't surface reasoning artifacts.
     ToolCalls {
         tool_calls: Vec<ToolCall>,
         content: Option<String>,
+        reasoning_content: Option<String>,
     },
 }
 
@@ -812,6 +817,10 @@ Respond in JSON format:
                 cache_read_input_tokens: response.cache_read_input_tokens,
                 cache_creation_input_tokens: response.cache_creation_input_tokens,
             };
+            // Capture the provider-specific reasoning artifact (DeepSeek's
+            // `reasoning_content`, etc.) so it can be echoed back on the
+            // assistant message in the next turn.
+            let response_reasoning_content = response.reasoning_content.clone();
 
             // If there were tool calls, return them for execution
             if !response.tool_calls.is_empty() {
@@ -845,6 +854,7 @@ Respond in JSON format:
                     result: RespondResult::ToolCalls {
                         tool_calls,
                         content: narrative,
+                        reasoning_content: response_reasoning_content,
                     },
                     usage,
                     finish_reason: response.finish_reason,
@@ -872,6 +882,7 @@ Respond in JSON format:
                         } else {
                             Some(cleaned)
                         },
+                        reasoning_content: response_reasoning_content,
                     },
                     usage,
                     finish_reason: response.finish_reason,
@@ -1640,6 +1651,7 @@ pub(crate) fn recover_tool_calls_from_content(
                     name: name.to_string(),
                     arguments,
                     reasoning: None,
+                    signature: None,
                 });
                 continue;
             }
@@ -1655,6 +1667,7 @@ pub(crate) fn recover_tool_calls_from_content(
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
                     reasoning: None,
+                    signature: None,
                 });
             }
         }
@@ -1693,6 +1706,7 @@ pub(crate) fn recover_tool_calls_from_content(
                         name: name.to_string(),
                         arguments,
                         reasoning: None,
+                        signature: None,
                     });
                     remaining = &args_start[bracket_end + 1..];
                     continue;
@@ -1705,6 +1719,7 @@ pub(crate) fn recover_tool_calls_from_content(
                 name: name.to_string(),
                 arguments: serde_json::Value::Object(Default::default()),
                 reasoning: None,
+                signature: None,
             });
             remaining = after_name;
         }
@@ -3398,6 +3413,7 @@ That's my plan."#;
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning_content: None,
                 })
             }
         }
@@ -3421,6 +3437,95 @@ That's my plan."#;
             }
             RespondResult::ToolCalls { .. } => {
                 panic!("Expected fallback text, not tool calls");
+            }
+        }
+    }
+
+    /// Regression for #3201 / #3225 (caller-level): a thinking-mode provider's
+    /// `reasoning_content` and per-tool-call `signature` must propagate through
+    /// `Reasoning::respond_with_tools` so the dispatcher can attach them to
+    /// the assistant `ChatMessage`. A unit test on `WireMessage::from_chat`
+    /// alone is not sufficient — the bug class is values getting dropped at
+    /// any layer between the provider boundary and the next-turn message
+    /// list. Per `.claude/rules/testing.md`, drive the call site that gates
+    /// the side effect (the next API call).
+    #[tokio::test]
+    async fn test_thinking_mode_reasoning_and_signature_propagate_to_respond_result() {
+        use crate::llm::provider::{
+            FinishReason, LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use async_trait::async_trait;
+        use rust_decimal::Decimal;
+
+        struct ThinkingModeMock;
+
+        #[async_trait]
+        impl LlmProvider for ThinkingModeMock {
+            fn model_name(&self) -> &str {
+                "thinking-mock"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::llm::LlmError> {
+                unreachable!("tool-mode test should not call complete()")
+            }
+            async fn complete_with_tools(
+                &self,
+                _: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, crate::llm::LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call_1".to_string(),
+                        name: "tool_search".to_string(),
+                        arguments: serde_json::json!({"q": "telegram"}),
+                        reasoning: None,
+                        signature: Some("opaque-thought-sig".to_string()),
+                    }],
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    reasoning_content: Some("step 1: think; step 2: search".to_string()),
+                })
+            }
+        }
+
+        let reasoning = Reasoning::new(Arc::new(ThinkingModeMock));
+        let context = ReasoningContext::new()
+            .with_message(ChatMessage::user("find me telegram steps"))
+            .with_tools(vec![ToolDefinition {
+                name: "tool_search".to_string(),
+                description: "Search the registry".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }]);
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        match output.result {
+            RespondResult::ToolCalls {
+                tool_calls,
+                content: _,
+                reasoning_content,
+            } => {
+                assert_eq!(
+                    reasoning_content.as_deref(),
+                    Some("step 1: think; step 2: search"),
+                    "DeepSeek-style reasoning_content must surface on RespondResult::ToolCalls",
+                );
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(
+                    tool_calls[0].signature.as_deref(),
+                    Some("opaque-thought-sig"),
+                    "Gemini-style tool call signature must survive the reasoning layer",
+                );
+            }
+            RespondResult::Text(_) => {
+                panic!("Expected RespondResult::ToolCalls when provider returned tool calls");
             }
         }
     }
@@ -3549,6 +3654,7 @@ That's my plan."#;
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                reasoning_content: _,
             } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].name, "tool_list");
@@ -3582,6 +3688,7 @@ That's my plan."#;
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                reasoning_content: _,
             } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].name, "tool_list");
@@ -3743,12 +3850,14 @@ That's my plan."#;
                     name: "memory_write".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 5000,
                 output_tokens: 1024,
                 finish_reason: self.finish_reason,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning_content: None,
             })
         }
     }

@@ -78,6 +78,14 @@ pub struct ChatMessage {
     /// to appear on the assistant message preceding tool result messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Provider-specific reasoning content from the assistant (e.g. DeepSeek's
+    /// `reasoning_content` field on thinking-mode models). When the upstream
+    /// API requires this to be echoed back in subsequent turns (DeepSeek
+    /// rejects requests without it: "The reasoning_content in the thinking
+    /// mode must be passed back to the API"), the provider must round-trip
+    /// it verbatim. Set on assistant messages only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -90,6 +98,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -102,6 +111,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -116,6 +126,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -128,6 +139,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -147,6 +159,7 @@ impl ChatMessage {
             } else {
                 Some(tool_calls)
             },
+            reasoning_content: None,
         }
     }
 
@@ -163,7 +176,19 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
+            reasoning_content: None,
         }
+    }
+
+    /// Attach provider-specific reasoning content to this message (builder).
+    ///
+    /// Used by providers like DeepSeek that return `reasoning_content` on
+    /// thinking-mode responses and require it to be echoed back in the next
+    /// turn. Most callers do not need this — only the LLM provider that
+    /// receives the field should set it.
+    pub fn with_reasoning_content(mut self, reasoning_content: Option<String>) -> Self {
+        self.reasoning_content = reasoning_content;
+        self
     }
 }
 
@@ -262,6 +287,15 @@ pub struct ToolCall {
     /// or derived from the shared response content as a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Provider-specific signature attached to a tool call that must be
+    /// echoed back when this call is referenced again. Currently used for
+    /// Gemini's `thought_signature` on `functionCall` parts (the OpenAI-compat
+    /// endpoint surfaces this on each tool call); without it the API responds
+    /// HTTP 400 "Function call is missing a thought_signature in functionCall
+    /// parts". Treated as opaque bytes by IronClaw — the provider that
+    /// produces the field is the only one that interprets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -393,6 +427,12 @@ pub struct ToolCompletionResponse {
     pub cache_read_input_tokens: u32,
     /// Tokens written to the provider's server-side prompt cache (Anthropic).
     pub cache_creation_input_tokens: u32,
+    /// Provider-specific reasoning artifact (e.g. DeepSeek's `reasoning_content`)
+    /// returned alongside an assistant message that needs to be echoed back on
+    /// the next turn. The agent layer must persist this onto the resulting
+    /// assistant `ChatMessage` so subsequent iterations include it.
+    /// `None` for providers that don't return reasoning artifacts.
+    pub reasoning_content: Option<String>,
 }
 
 /// Metadata about a model returned by the provider's API.
@@ -805,6 +845,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -849,6 +890,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -875,12 +917,14 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
+            signature: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            signature: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),

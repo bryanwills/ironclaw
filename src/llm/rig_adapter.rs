@@ -376,6 +376,7 @@ fn extract_response(
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
                     reasoning: None,
+                    signature: None,
                 });
             }
             // Reasoning and Image variants are not mapped to IronClaw types
@@ -678,6 +679,7 @@ where
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            reasoning_content: None,
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -1540,6 +1542,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            signature: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
@@ -1568,6 +1571,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            reasoning_content: None,
         }];
         let (_preamble, history) = convert_messages(&messages);
         match &history[0] {
@@ -1730,6 +1734,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            signature: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1762,6 +1767,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            signature: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1796,6 +1802,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            signature: None,
         };
         let assistant_msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let tool_result_msg = ChatMessage {
@@ -1805,6 +1812,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            reasoning_content: None,
         };
         let messages = vec![assistant_msg, tool_result_msg];
         let (_preamble, history) = convert_messages(&messages);
@@ -2116,12 +2124,14 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "rust"}),
             reasoning: None,
+            signature: None,
         };
         let tc2 = IronToolCall {
             id: "call_b".to_string(),
             name: "fetch".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            signature: None,
         };
         let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
         let result_a = ChatMessage::tool_result("call_a", "search", "search results");
@@ -2204,6 +2214,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             content_parts: vec![],
+            reasoning_content: None,
         };
         let non_empty = ChatMessage::user("hi");
         let messages = vec![empty_asst, non_empty];
@@ -2224,6 +2235,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             content_parts: vec![],
+            reasoning_content: None,
         };
         let user2 = ChatMessage::user("");
         let asst = ChatMessage::assistant("response");
