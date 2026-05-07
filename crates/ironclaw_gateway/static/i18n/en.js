@@ -459,6 +459,7 @@ I18n.register('en', {
   'config.useProvider': 'Use',
   'config.configureProvider': 'Configure',
   'config.notConfigured': 'Not Configured',
+  'config.fallbackBannerText': 'Configured provider "{configured}" is unavailable — running on "{active}" as a fallback. Check the API key, then restart to retry.',
   'config.configureToUse': 'Configure the API key before using this provider.',
   'config.baseUrlRequired': 'Base URL is required. Please configure the provider first.',
   'config.modelRequired': 'A model must be configured before using this provider.',

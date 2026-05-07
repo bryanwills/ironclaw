@@ -458,6 +458,7 @@ I18n.register('ko', {
   'config.useProvider': '사용',
   'config.configureProvider': '구성',
   'config.notConfigured': '미구성',
+  'config.fallbackBannerText': '구성된 공급자 "{configured}"를 사용할 수 없어 "{active}"로 대체 실행 중입니다. API 키를 확인한 다음 다시 시작하여 재시도하세요.',
   'config.configureToUse': '이 공급자를 사용하기 전에 API 키를 구성하세요.',
   'config.baseUrlRequired': '베이스 URL이 필요합니다. 먼저 공급자를 구성하세요.',
   'config.modelRequired': '이 공급자를 사용하기 전에 모델을 구성해야 합니다.',

@@ -458,6 +458,7 @@ I18n.register('zh-CN', {
   'config.useProvider': '使用',
   'config.configureProvider': '配置',
   'config.notConfigured': '未配置',
+  'config.fallbackBannerText': '配置的提供商「{configured}」不可用，当前以「{active}」作为后备运行。请检查 API 密钥，然后重启以重试。',
   'config.configureToUse': '请先配置 API 密钥后再使用此提供商。',
   'config.baseUrlRequired': '需要配置基础 URL，请先配置此提供商。',
   'config.modelRequired': '使用此提供商前需要配置模型。',

@@ -391,3 +391,30 @@
   border: 1px solid rgba(248, 113, 113, 0.3);
 }
 
+/* Provider fallback banner — shown above the providers list when the
+ * runtime LLM backend differs from the user's configured backend. The
+ * startup NearAI fallback (#3229) deliberately does not mutate the DB,
+ * so the "active" badge below shows user intent; this banner surfaces
+ * the runtime divergence so users don't think their configured provider
+ * is actually serving requests when it isn't. */
+.fallback-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: var(--warning-subtle);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.fallback-banner-icon {
+  flex-shrink: 0;
+}
+
+.fallback-banner-text {
+  flex: 1;
+}

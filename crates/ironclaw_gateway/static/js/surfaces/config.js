@@ -13,6 +13,12 @@ let _builtinProviders = [];
 let _customProviders = [];
 let _activeLlmBackend = '';
 let _selectedModel = '';
+// The backend the runtime is *actually* using right now. Diverges from
+// `_activeLlmBackend` when the startup NearAI fallback fired because the
+// configured backend was unusable (#3229). Surfaced as a banner so users
+// don't silently keep talking to NearAI while their Settings still show
+// e.g. OpenRouter selected.
+let _runtimeLlmBackend = '';
 let _builtinOverrides = {};
 let _editingProviderId = null;
 let _configuringBuiltinId = null;
@@ -25,11 +31,13 @@ function loadConfig() {
   Promise.all([
     apiFetch('/api/settings/export'),
     apiFetch('/api/llm/providers').catch(function() { return []; }),
+    apiFetch('/api/gateway/status').catch(function() { return null; }),
   ]).then(function(results) {
     const s = (results[0] && results[0].settings) ? results[0].settings : {};
     _builtinProviders = Array.isArray(results[1]) ? results[1] : [];
     _activeLlmBackend = s['llm_backend'] ? String(s['llm_backend']) : 'nearai';
     _selectedModel = s['selected_model'] ? String(s['selected_model']) : '';
+    _runtimeLlmBackend = (results[2] && results[2].llm_backend) ? String(results[2].llm_backend) : '';
     try {
       const val = s['llm_custom_providers'];
       _customProviders = Array.isArray(val) ? val : (val ? JSON.parse(val) : []);
@@ -47,6 +55,7 @@ function loadConfig() {
   }).catch(function() {
     _activeLlmBackend = 'nearai';
     _selectedModel = '';
+    _runtimeLlmBackend = '';
     _builtinProviders = [];
     _customProviders = [];
     _builtinOverrides = {};
@@ -152,6 +161,31 @@ function openProviderConfigDialog(provider) {
   }
 }
 
+// True when the runtime fell back to a different backend than the one
+// stored in `llm_backend`. Case-insensitive compare so DB values like
+// `NearAI` don't trip a false positive against the canonical `nearai`
+// returned by the status endpoint. Empty `_runtimeLlmBackend` means the
+// status endpoint failed or hasn't loaded — don't claim a fallback in
+// that case, the data is just missing.
+function fallbackActive() {
+  if (!_runtimeLlmBackend) return false;
+  if (!_activeLlmBackend) return false;
+  return _runtimeLlmBackend.toLowerCase() !== _activeLlmBackend.toLowerCase();
+}
+
+function renderFallbackBanner() {
+  if (!fallbackActive()) return '';
+  return '<div class="fallback-banner" role="alert">'
+    + '<span class="fallback-banner-icon" aria-hidden="true">⚠️</span>'
+    + '<span class="fallback-banner-text">'
+    +   escapeHtml(I18n.t('config.fallbackBannerText', {
+          configured: _activeLlmBackend,
+          active: _runtimeLlmBackend,
+        }))
+    + '</span>'
+    + '</div>';
+}
+
 function renderProviders() {
   const list = document.getElementById('providers-list');
   const allProviders = [..._builtinProviders, ..._customProviders].sort((a, b) => {
@@ -161,11 +195,11 @@ function renderProviders() {
   });
 
   if (allProviders.length === 0) {
-    list.innerHTML = '<div class="empty-state">No providers</div>';
+    list.innerHTML = renderFallbackBanner() + '<div class="empty-state">No providers</div>';
     return;
   }
 
-  list.innerHTML = allProviders.map((p) => {
+  list.innerHTML = renderFallbackBanner() + allProviders.map((p) => {
     const isActive = p.id === _activeLlmBackend;
     const adapterLabel = ADAPTER_LABELS[p.adapter] || p.adapter;
     const isConfigured = isProviderConfigured(p);
