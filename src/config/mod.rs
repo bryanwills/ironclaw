@@ -542,29 +542,6 @@ impl Config {
         Ok((cfg, image))
     }
 
-    /// Resolve LLM configuration for startup paths without mutating an existing
-    /// [`Config`]. This mirrors [`Config::re_resolve_llm_with_secrets`] but
-    /// returns only the LLM config for call sites/tests that do not need the
-    /// dependent image-tool config.
-    pub(crate) async fn resolve_llm_with_secrets(
-        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
-        user_id: &str,
-        toml_path: Option<&std::path::Path>,
-        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
-        is_operator: bool,
-    ) -> Result<LlmConfig, ConfigError> {
-        let (llm, _image) = Self::resolve_llm_and_image_with_secrets_inner(
-            store,
-            user_id,
-            toml_path,
-            secrets,
-            is_operator,
-            false,
-        )
-        .await?;
-        Ok(llm)
-    }
-
     /// Resolve LLM configuration for hot reload paths that must fail closed on
     /// DB read errors so the caller can roll back the triggering settings write.
     /// Strict mode also disables the NearAI fallback: a broken save produces
@@ -1240,6 +1217,25 @@ mod tests {
             .expect("create temp toml")
     }
 
+    async fn resolve_llm_with_secrets(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        let (llm, _image) = Config::resolve_llm_and_image_with_secrets_inner(
+            store,
+            user_id,
+            toml_path,
+            secrets,
+            is_operator,
+            false,
+        )
+        .await?;
+        Ok(llm)
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn re_resolve_llm_without_store_keeps_toml_overlay() {
@@ -1523,7 +1519,7 @@ mod tests {
             .await;
 
         let toml = empty_toml_path();
-        let cfg = Config::resolve_llm_with_secrets(
+        let cfg = resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "owner-user",
             Some(toml.path()),
