@@ -8,8 +8,10 @@ pub mod driver_registry;
 
 #[cfg(feature = "root-llm-provider")]
 pub mod model_gateway;
+pub mod text_loop_host;
 
 #[cfg(feature = "root-llm-provider")]
 pub use model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, ThreadBackedLoopModelGateway,
 };
+pub use text_loop_host::{TextOnlyLoopHostConfig, TextOnlyLoopHostPorts};
