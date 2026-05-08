@@ -63,7 +63,7 @@ pub mod http_intercept;
 pub(crate) mod image_artifacts;
 #[cfg(feature = "import")]
 pub mod import;
-pub mod llm;
+pub mod llm_host;
 pub mod observability;
 pub mod orchestrator;
 pub mod ownership;
@@ -99,8 +99,8 @@ pub mod prelude {
     pub use crate::config::Config;
     pub use crate::context::{JobContext, JobState};
     pub use crate::error::{Error, Result};
-    pub use crate::llm::LlmProvider;
     pub use crate::tools::{Tool, ToolOutput, ToolRegistry};
     pub use crate::workspace::{MemoryDocument, Workspace};
+    pub use ironclaw_llm::LlmProvider;
     pub use ironclaw_safety::{SanitizedOutput, Sanitizer};
 }
