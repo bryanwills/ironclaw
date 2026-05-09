@@ -2,8 +2,8 @@
 //!
 //! This module keeps the concrete Reborn loop-support wiring out of the root
 //! `/src` app graph while giving callers one small factory for the context,
-//! model, transcript, and empty capability ports needed by the text-only loop
-//! path.
+//! prompt, model, transcript, and empty capability ports needed by the text-only
+//! loop path.
 
 use std::sync::Arc;
 
@@ -12,7 +12,9 @@ use ironclaw_loop_support::{
     ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
-use ironclaw_turns::run_profile::{LoopHostMilestoneSink, LoopRunContext};
+use ironclaw_turns::run_profile::{
+    HostManagedLoopPromptPort, LoopHostMilestoneSink, LoopRunContext,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextOnlyLoopHostConfig {
@@ -29,13 +31,14 @@ impl Default for TextOnlyLoopHostConfig {
     }
 }
 
-#[derive(Clone)]
 pub struct TextOnlyLoopHostPorts<S, G>
 where
     S: SessionThreadService + ?Sized,
     G: HostManagedModelGateway + ?Sized,
 {
-    pub context: ThreadBackedLoopContextPort<S>,
+    pub context: Arc<ThreadBackedLoopContextPort<S>>,
+    pub prompt:
+        HostManagedLoopPromptPort<ThreadBackedLoopContextPort<S>, dyn LoopHostMilestoneSink>,
     pub model: ThreadBackedLoopModelPort<S, G>,
     pub transcript: ThreadBackedLoopTranscriptPort<S>,
     pub capabilities: EmptyLoopCapabilityPort,
@@ -54,13 +57,21 @@ where
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
     ) -> Self {
+        let context = Arc::new(ThreadBackedLoopContextPort::new(
+            Arc::clone(&thread_service),
+            thread_scope.clone(),
+            run_context.clone(),
+            config.max_context_messages,
+        ));
+        let prompt = HostManagedLoopPromptPort::new(
+            run_context.clone(),
+            Arc::clone(&context),
+            Arc::clone(&milestone_sink),
+        )
+        .with_default_message_limit(config.max_context_messages);
         Self {
-            context: ThreadBackedLoopContextPort::new(
-                Arc::clone(&thread_service),
-                thread_scope.clone(),
-                run_context.clone(),
-                config.max_context_messages,
-            ),
+            context,
+            prompt,
             model: ThreadBackedLoopModelPort::with_milestone_sink(
                 Arc::clone(&thread_service),
                 thread_scope.clone(),
