@@ -455,10 +455,20 @@ async fn mission_notification_routes_to_parent_thread_when_set() {
         notify_user: None,
         response: Some("mission result".to_string()),
         is_error: false,
+        gate: None,
     };
 
-    crate::bridge::handle_mission_notification(&notif, &channels, Some(&sse), Some(&store), None)
-        .await;
+    crate::bridge::handle_mission_notification(
+        &notif,
+        &channels,
+        Some(&sse),
+        Some(&store),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
         .await
@@ -539,10 +549,20 @@ async fn mission_notification_v1_history_lands_in_parent_thread_not_assistant_co
         notify_user: None,
         response: Some("the mission result text".to_string()),
         is_error: false,
+        gate: None,
     };
 
-    crate::bridge::handle_mission_notification(&notif, &channels, Some(&sse), Some(&store), None)
-        .await;
+    crate::bridge::handle_mission_notification(
+        &notif,
+        &channels,
+        Some(&sse),
+        Some(&store),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 
     let parent_messages = store
         .list_conversation_messages_paginated(parent.0, None, 50)
@@ -614,10 +634,20 @@ async fn mission_notification_v1_history_falls_back_to_assistant_when_no_parent(
         notify_user: None,
         response: Some("cron output".to_string()),
         is_error: false,
+        gate: None,
     };
 
-    crate::bridge::handle_mission_notification(&notif, &channels, Some(&sse), Some(&store), None)
-        .await;
+    crate::bridge::handle_mission_notification(
+        &notif,
+        &channels,
+        Some(&sse),
+        Some(&store),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 
     let assistant_messages = store
         .list_conversation_messages_paginated(assistant_conv, None, 50)

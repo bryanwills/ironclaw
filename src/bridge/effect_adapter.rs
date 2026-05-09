@@ -768,9 +768,11 @@ impl EffectBridgeAdapter {
                 // has a FK on `conversations(id)` — using the engine thread
                 // would FK-fail and silently fall back to the assistant
                 // conversation, which is the original user-visible bug.
-                let parent_for_routing = context
-                    .source_conversation_thread_id
-                    .or(Some(context.thread_id));
+                // When no originating chat thread exists (cron/system/
+                // learning missions), pass `None` so the downstream skips
+                // the doomed FK-failing write and goes straight to the
+                // assistant-conversation fallback in `handle_mission_notification`.
+                let parent_for_routing = context.source_conversation_thread_id;
                 match mgr
                     .create_mission_with_parent(
                         target_project,
