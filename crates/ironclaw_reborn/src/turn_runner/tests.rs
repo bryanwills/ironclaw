@@ -4,13 +4,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use ironclaw_host_api::{TenantId, ThreadId};
+use ironclaw_host_api::{TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
-    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, EventCursor, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitId, LoopMessageRef, ReplyTargetBindingRef,
-    RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken,
-    TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AllowAllTurnAdmissionPolicy,
+    EventCursor, GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore,
+    InMemoryTurnStateStoreLimits, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId,
+    LoopGateRef, LoopMessageRef, LoopResultRef, ReplyTargetBindingRef, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{AgentLoopDriverHost, AgentLoopHostError, CheckpointSchemaId, LoopDriverId},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -21,7 +24,9 @@ use ironclaw_turns::{
 };
 
 use crate::driver_registry::{DriverKind, DriverRegistry, DriverRequirements};
-use crate::loop_exit_applier::{InMemoryLoopExitEvidencePort, LoopExitApplier};
+use crate::loop_exit_applier::{
+    InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort,
+};
 
 use super::*;
 
@@ -131,6 +136,97 @@ fn test_completed_exit() -> LoopExit {
         usage_summary_ref: None,
         exit_id: LoopExitId::new("exit:test-1").expect("valid"),
     })
+}
+
+#[derive(Clone)]
+struct FixedRunProfileResolver {
+    profile: ironclaw_turns::ResolvedRunProfile,
+}
+
+struct CompletionEvidencePort {
+    expected_scope: TurnScope,
+    expected_run_id: TurnRunId,
+    expected_reply_ref: LoopMessageRef,
+}
+
+#[async_trait]
+impl RunProfileResolver for FixedRunProfileResolver {
+    async fn resolve_run_profile(
+        &self,
+        _request: RunProfileResolutionRequest,
+    ) -> Result<ironclaw_turns::ResolvedRunProfile, RunProfileResolutionError> {
+        Ok(self.profile.clone())
+    }
+}
+
+#[async_trait]
+impl LoopExitEvidencePort for CompletionEvidencePort {
+    async fn verify_completion_refs(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        reply_refs: &[LoopMessageRef],
+        result_refs: &[LoopResultRef],
+    ) -> Result<bool, TurnError> {
+        Ok(scope == &self.expected_scope
+            && run_id == self.expected_run_id
+            && reply_refs == [self.expected_reply_ref.clone()]
+            && result_refs.is_empty())
+    }
+
+    async fn verify_blocked_evidence(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _checkpoint_id: &TurnCheckpointId,
+        _gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        Ok(false)
+    }
+
+    async fn verify_failure_evidence(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<bool, TurnError> {
+        Ok(false)
+    }
+
+    async fn is_cancellation_observed(&self, _run_id: TurnRunId) -> Result<bool, TurnError> {
+        Ok(false)
+    }
+}
+
+async fn submit_test_turn(
+    store: &InMemoryTurnStateStore,
+    profile: ironclaw_turns::ResolvedRunProfile,
+) -> (TurnScope, TurnRunId) {
+    let scope = test_scope();
+    let response = store
+        .submit_turn(
+            SubmitTurnRequest {
+                scope: scope.clone(),
+                actor: TurnActor::new(UserId::new("test-user").expect("valid")),
+                accepted_message_ref: AcceptedMessageRef::new(format!(
+                    "accepted-{}",
+                    TurnRunId::new()
+                ))
+                .expect("valid"),
+                source_binding_ref: SourceBindingRef::new("source-real-store").expect("valid"),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply-real-store")
+                    .expect("valid"),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new(format!("idem-{}", TurnRunId::new()))
+                    .expect("valid"),
+                received_at: chrono::Utc::now(),
+            },
+            &AllowAllTurnAdmissionPolicy,
+            &FixedRunProfileResolver { profile },
+        )
+        .await
+        .expect("submit should succeed");
+    let SubmitTurnResponse::Accepted { run_id, .. } = response;
+    (scope, run_id)
 }
 
 // ─── Mock transition port ───────────────────────────────────────────────────
@@ -271,6 +367,24 @@ impl MockDriver {
         Self {
             descriptor,
             run_result: Mutex::new(Ok(test_completed_exit())),
+            run_delay: Duration::ZERO,
+        }
+    }
+
+    fn completing_with_reply(
+        descriptor: AgentLoopDriverDescriptor,
+        reply_ref: LoopMessageRef,
+    ) -> Self {
+        Self {
+            descriptor,
+            run_result: Mutex::new(Ok(LoopExit::Completed(LoopCompleted {
+                completion_kind: LoopCompletionKind::FinalReply,
+                reply_message_refs: vec![reply_ref],
+                result_refs: vec![],
+                final_checkpoint_id: None,
+                usage_summary_ref: None,
+                exit_id: LoopExitId::new("exit:real-store-complete").expect("valid"),
+            }))),
             run_delay: Duration::ZERO,
         }
     }
@@ -909,6 +1023,140 @@ async fn worker_records_recovery_when_heartbeat_ownership_is_lost() {
 
     let calls = port.calls();
     assert!(calls.contains(&TransitionCall::Heartbeat));
+    assert!(calls.contains(&TransitionCall::RecordRecoveryRequired));
+    assert!(!calls.contains(&TransitionCall::ApplyValidatedLoopExit));
+}
+
+#[tokio::test]
+async fn worker_completes_queued_run_through_real_transition_store() {
+    let desc = test_descriptor();
+    let profile = test_resolved_profile_with_driver(&desc);
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let (scope, run_id) = submit_test_turn(store.as_ref(), profile).await;
+    let reply_ref = LoopMessageRef::new("msg:real-store-reply").expect("valid");
+
+    let driver = Arc::new(MockDriver::completing_with_reply(
+        desc.clone(),
+        reply_ref.clone(),
+    ));
+    let registry = Arc::new(setup_registry(driver));
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let config = TurnRunnerWorkerConfig {
+        heartbeat_interval: Duration::from_secs(60),
+        poll_interval: Duration::from_millis(10),
+        scope_filter: None,
+    };
+    let transition_port: Arc<dyn TurnRunTransitionPort> = store.clone();
+    let evidence = Arc::new(CompletionEvidencePort {
+        expected_scope: scope.clone(),
+        expected_run_id: run_id,
+        expected_reply_ref: reply_ref,
+    });
+    let applier = Arc::new(LoopExitApplier::new(transition_port.clone(), evidence));
+    let worker = TurnRunnerWorker::new(
+        config,
+        transition_port,
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+        applier,
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel.cancel();
+    handle.await.expect("worker task should complete");
+
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .expect("run state should still exist");
+    assert_eq!(state.status, TurnStatus::Completed);
+}
+
+#[tokio::test]
+async fn worker_recovers_expired_heartbeat_lease_with_real_store() {
+    let desc = test_descriptor();
+    let profile = test_resolved_profile_with_driver(&desc);
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            runner_lease_ttl: chrono::Duration::milliseconds(10),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let (scope, run_id) = submit_test_turn(store.as_ref(), profile).await;
+
+    let driver =
+        Arc::new(MockDriver::completing(desc.clone()).with_delay(Duration::from_millis(300)));
+    let registry = Arc::new(setup_registry(driver));
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let config = TurnRunnerWorkerConfig {
+        heartbeat_interval: Duration::from_millis(50),
+        poll_interval: Duration::from_millis(10),
+        scope_filter: None,
+    };
+    let transition_port: Arc<dyn TurnRunTransitionPort> = store.clone();
+    let worker = TurnRunnerWorker::new(
+        config,
+        transition_port.clone(),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+        make_applier(transition_port),
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    cancel.cancel();
+    handle.await.expect("worker task should complete");
+
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .expect("run state should still exist");
+    assert_eq!(state.status, TurnStatus::RecoveryRequired);
+}
+
+#[tokio::test]
+async fn worker_cancel_aborts_active_driver_and_records_recovery() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::completing(desc.clone()).with_delay(Duration::from_secs(60)));
+    let registry = Arc::new(setup_registry(driver));
+    let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(10),
+            scope_filter: None,
+        },
+        port.clone(),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+        make_applier(port.clone()),
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_millis(500), handle)
+        .await
+        .expect("worker should stop promptly after cancellation")
+        .expect("worker task should complete");
+
+    let calls = port.calls();
     assert!(calls.contains(&TransitionCall::RecordRecoveryRequired));
     assert!(!calls.contains(&TransitionCall::ApplyValidatedLoopExit));
 }

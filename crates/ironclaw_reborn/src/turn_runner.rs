@@ -27,7 +27,7 @@ use ironclaw_turns::{
     TurnScope,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordRecoveryRequiredRequest,
-        TurnRunTransitionPort,
+        RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
 };
 
@@ -224,7 +224,7 @@ impl TurnRunnerWorker {
                 break;
             }
 
-            if let Err(err) = self.try_claim_and_run().await {
+            if let Err(err) = self.try_claim_and_run(&cancel).await {
                 warn!(
                     runner_id = ?self.runner_id,
                     error = %err,
@@ -237,7 +237,7 @@ impl TurnRunnerWorker {
     }
 
     /// Attempt one claim-and-run cycle.
-    async fn try_claim_and_run(&self) -> Result<(), TurnRunnerError> {
+    async fn try_claim_and_run(&self, cancel: &CancellationToken) -> Result<(), TurnRunnerError> {
         let lease_token = TurnLeaseToken::new();
         let request = ClaimRunRequest {
             runner_id: self.runner_id,
@@ -266,12 +266,12 @@ impl TurnRunnerWorker {
             "claimed turn run"
         );
 
-        self.execute_claimed_run(claimed).await;
+        self.execute_claimed_run(claimed, cancel).await;
         Ok(())
     }
 
     /// Execute a claimed run: heartbeat, invoke driver, apply exit.
-    async fn execute_claimed_run(&self, claimed: ClaimedTurnRun) {
+    async fn execute_claimed_run(&self, claimed: ClaimedTurnRun, cancel: &CancellationToken) {
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
@@ -299,6 +299,8 @@ impl TurnRunnerWorker {
         ));
 
         let exit_result = tokio::select! {
+            biased;
+
             joined = &mut driver_handle => {
                 heartbeat_cancel.cancel();
                 let _ = heartbeat_handle.await;
@@ -313,16 +315,19 @@ impl TurnRunnerWorker {
                 driver_handle.abort();
                 let _ = driver_handle.await;
                 match heartbeat_joined {
-                    Ok(Ok(())) => Err(DriverInvocationError::HeartbeatFailed {
-                        reason: "heartbeat stopped before driver completed".to_string(),
-                    }),
-                    Ok(Err(err)) => Err(DriverInvocationError::HeartbeatFailed {
-                        reason: err.to_string(),
-                    }),
+                    Ok(Ok(())) => Err(DriverInvocationError::HeartbeatStopped),
+                    Ok(Err(error)) => Err(DriverInvocationError::HeartbeatFailed { error }),
                     Err(err) => Err(DriverInvocationError::HeartbeatTaskFailed {
                         reason: join_error_summary(err),
                     }),
                 }
+            }
+            () = cancel.cancelled() => {
+                heartbeat_cancel.cancel();
+                driver_handle.abort();
+                let _ = driver_handle.await;
+                let _ = heartbeat_handle.await;
+                Err(DriverInvocationError::WorkerCancelled)
             }
         };
 
@@ -338,8 +343,14 @@ impl TurnRunnerWorker {
                     error = %err,
                     "driver invocation failed, recording recovery required"
                 );
-                self.record_recovery(run_id, runner_id, lease_token, &err)
-                    .await;
+                self.record_recovery_or_recover_expired_lease(
+                    &scope,
+                    run_id,
+                    runner_id,
+                    lease_token,
+                    &err,
+                )
+                .await;
             }
         }
     }
@@ -409,7 +420,67 @@ impl TurnRunnerWorker {
         }
     }
 
-    /// Record recovery required for a failed driver invocation.
+    /// Record recovery required for a failed driver invocation, or run the
+    /// lease-expiry recovery sweep when the active lease is already expired.
+    async fn record_recovery_or_recover_expired_lease(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        runner_id: TurnRunnerId,
+        lease_token: TurnLeaseToken,
+        error: &DriverInvocationError,
+    ) {
+        if matches!(
+            error,
+            DriverInvocationError::HeartbeatFailed {
+                error: TurnError::Conflict { .. }
+            }
+        ) {
+            match self
+                .transition_port
+                .recover_expired_leases(RecoverExpiredLeasesRequest {
+                    now: chrono::Utc::now(),
+                    scope_filter: Some(scope.clone()),
+                })
+                .await
+            {
+                Ok(response)
+                    if response
+                        .recovered
+                        .iter()
+                        .any(|state| state.run_id == run_id) =>
+                {
+                    info!(
+                        runner_id = ?runner_id,
+                        run_id = ?run_id,
+                        "expired runner lease recovered"
+                    );
+                }
+                Ok(_) => {
+                    warn!(
+                        runner_id = ?runner_id,
+                        run_id = ?run_id,
+                        "heartbeat reported expired lease but recovery sweep did not recover run"
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        runner_id = ?runner_id,
+                        run_id = ?run_id,
+                        error = %err,
+                        "failed to recover expired runner lease"
+                    );
+                }
+            }
+            return;
+        }
+
+        self.record_recovery(run_id, runner_id, lease_token, error)
+            .await;
+    }
+
+    /// Record recovery required for a failed driver invocation while the
+    /// worker still owns the active lease.
     async fn record_recovery(
         &self,
         run_id: TurnRunId,
@@ -430,8 +501,10 @@ impl TurnRunnerWorker {
                 "driver_failed"
             }
             DriverInvocationError::DriverPanic { .. } => "driver_panic",
-            DriverInvocationError::HeartbeatFailed { .. }
+            DriverInvocationError::HeartbeatStopped
+            | DriverInvocationError::HeartbeatFailed { .. }
             | DriverInvocationError::HeartbeatTaskFailed { .. } => "heartbeat_failed",
+            DriverInvocationError::WorkerCancelled => "worker_cancelled",
         };
 
         let Ok(failure) = sanitized_failure(category) else {
@@ -597,8 +670,10 @@ enum DriverInvocationError {
     HostCreationFailed { reason: String },
     DriverError(AgentLoopDriverError),
     DriverPanic { reason: String },
-    HeartbeatFailed { reason: String },
+    HeartbeatStopped,
+    HeartbeatFailed { error: TurnError },
     HeartbeatTaskFailed { reason: String },
+    WorkerCancelled,
 }
 
 impl std::fmt::Display for DriverInvocationError {
@@ -608,8 +683,10 @@ impl std::fmt::Display for DriverInvocationError {
             Self::HostCreationFailed { reason } => write!(f, "host creation failed: {reason}"),
             Self::DriverError(err) => write!(f, "driver error: {err}"),
             Self::DriverPanic { reason } => write!(f, "driver panic: {reason}"),
-            Self::HeartbeatFailed { reason } => write!(f, "heartbeat failed: {reason}"),
+            Self::HeartbeatStopped => write!(f, "heartbeat stopped before driver completed"),
+            Self::HeartbeatFailed { error } => write!(f, "heartbeat failed: {error}"),
             Self::HeartbeatTaskFailed { reason } => write!(f, "heartbeat task failed: {reason}"),
+            Self::WorkerCancelled => write!(f, "worker cancelled active driver"),
         }
     }
 }
