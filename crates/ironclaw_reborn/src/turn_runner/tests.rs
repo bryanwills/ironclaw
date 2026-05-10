@@ -377,6 +377,16 @@ impl ironclaw_turns::run_profile::LoopContextPort for StubHost {
 }
 
 #[async_trait]
+impl ironclaw_turns::run_profile::LoopPromptPort for StubHost {
+    async fn build_prompt_bundle(
+        &self,
+        _request: ironclaw_turns::run_profile::LoopPromptBundleRequest,
+    ) -> Result<ironclaw_turns::run_profile::LoopPromptBundle, AgentLoopHostError> {
+        unimplemented!("stub host: never called by mock driver")
+    }
+}
+
+#[async_trait]
 impl ironclaw_turns::run_profile::LoopInputPort for StubHost {
     async fn poll_inputs(
         &self,
