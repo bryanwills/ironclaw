@@ -309,6 +309,33 @@ impl AgentLoopDriver for MockDriver {
     }
 }
 
+struct PanickingDriver {
+    descriptor: AgentLoopDriverDescriptor,
+}
+
+#[async_trait]
+impl AgentLoopDriver for PanickingDriver {
+    fn descriptor(&self) -> AgentLoopDriverDescriptor {
+        self.descriptor.clone()
+    }
+
+    async fn run(
+        &self,
+        _request: AgentLoopDriverRunRequest,
+        _host: &(dyn AgentLoopDriverHost + Send + Sync),
+    ) -> Result<LoopExit, AgentLoopDriverError> {
+        panic!("driver panic for test")
+    }
+
+    async fn resume(
+        &self,
+        _request: AgentLoopDriverResumeRequest,
+        _host: &(dyn AgentLoopDriverHost + Send + Sync),
+    ) -> Result<LoopExit, AgentLoopDriverError> {
+        panic!("driver panic for test")
+    }
+}
+
 struct BlockingDriver {
     descriptor: AgentLoopDriverDescriptor,
     started: Arc<tokio::sync::Notify>,
@@ -722,6 +749,47 @@ async fn worker_records_recovery_on_driver_error() {
         port.calls()
             .contains(&TransitionCall::RecordRecoveryRequired)
     );
+}
+
+#[tokio::test]
+async fn worker_records_recovery_when_driver_panics() {
+    let desc = test_descriptor();
+    let driver = Arc::new(PanickingDriver {
+        descriptor: desc.clone(),
+    });
+    let registry = Arc::new(setup_registry(driver));
+    let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let config = TurnRunnerWorkerConfig {
+        heartbeat_interval: Duration::from_secs(60),
+        poll_interval: Duration::from_millis(50),
+        scope_filter: None,
+    };
+
+    let worker = TurnRunnerWorker::new(
+        config,
+        port.clone(),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+        make_applier(port.clone()),
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+    handle
+        .await
+        .expect("worker task should survive driver panic");
+
+    let calls = port.calls();
+    assert!(calls.contains(&TransitionCall::RecordRecoveryRequired));
+    assert!(!calls.contains(&TransitionCall::ApplyValidatedLoopExit));
 }
 
 #[tokio::test]

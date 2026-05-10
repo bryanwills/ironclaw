@@ -13,6 +13,7 @@
 //! This module owns the concrete worker loop, driver registry lookup, host
 //! factory, readiness/config, and worker lifecycle.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ const MIN_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1);
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
@@ -332,7 +334,7 @@ impl TurnRunnerWorker {
             self.config.heartbeat_interval,
             heartbeat_cancel.clone(),
         );
-        let driver = self.invoke_driver(&claimed);
+        let driver = AssertUnwindSafe(self.invoke_driver(&claimed)).catch_unwind();
         tokio::pin!(heartbeat);
         tokio::pin!(driver);
 
@@ -340,7 +342,10 @@ impl TurnRunnerWorker {
         // dropped, the heartbeat future is dropped with it, so no detached task
         // can outlive the claimed run.
         let exit_result = tokio::select! {
-            result = &mut driver => result,
+            result = &mut driver => match result {
+                Ok(result) => result,
+                Err(_) => Err(DriverInvocationError::DriverPanic),
+            },
             heartbeat_result = &mut heartbeat => {
                 match heartbeat_result {
                     Ok(()) => {
@@ -532,6 +537,7 @@ impl TurnRunnerWorker {
             DriverInvocationError::HeartbeatStopped => "heartbeat_stopped",
             DriverInvocationError::HeartbeatFailed(_) => "heartbeat_failed",
             DriverInvocationError::WorkerCancelled => "worker_cancelled",
+            DriverInvocationError::DriverPanic => "driver_panic",
         };
 
         let Some(failure) = sanitized_failure(category) else {
@@ -630,6 +636,7 @@ enum DriverInvocationError {
     HeartbeatStopped,
     HeartbeatFailed(TurnError),
     WorkerCancelled,
+    DriverPanic,
 }
 
 impl std::fmt::Display for DriverInvocationError {
@@ -643,6 +650,7 @@ impl std::fmt::Display for DriverInvocationError {
                 write!(f, "heartbeat failed before driver returned: {err}")
             }
             Self::WorkerCancelled => write!(f, "worker cancelled before driver returned"),
+            Self::DriverPanic => write!(f, "driver panicked before returning loop exit"),
         }
     }
 }
