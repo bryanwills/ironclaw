@@ -1187,8 +1187,8 @@ async fn worker_records_recovery_when_heartbeat_ownership_is_lost() {
 
     let calls = port.calls();
     assert!(calls.contains(&TransitionCall::Heartbeat));
+    assert!(calls.contains(&TransitionCall::RecordRecoveryRequired));
     assert!(calls.contains(&TransitionCall::RecoverExpiredLeases));
-    assert!(!calls.contains(&TransitionCall::RecordRecoveryRequired));
     assert!(!calls.contains(&TransitionCall::ApplyValidatedLoopExit));
 }
 

@@ -341,8 +341,10 @@ impl TurnRunnerWorker {
                     runner_id = ?runner_id,
                     run_id = ?run_id,
                     error = %err,
-                    "heartbeat failed, stopping driver and asking transition port to recover expired leases"
+                    "heartbeat failed, stopping driver and recording recovery before lease sweep"
                 );
+                self.record_recovery(run_id, runner_id, lease_token, &err)
+                    .await;
                 self.recover_after_heartbeat_failure(&scope, &err).await;
             }
             Err(err) => {
