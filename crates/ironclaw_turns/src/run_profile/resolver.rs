@@ -237,7 +237,8 @@ fn interactive_profile() -> RunProfileDefinition {
             require_before_side_effect: true,
             require_before_block: true,
             max_checkpoint_bytes: 64 * 1024,
-            // TODO(reborn): enable once final checkpoint persistence is wired for built-in profiles.
+            // Interactive/local profile remains relaxed until final checkpoint persistence
+            // is wired end-to-end for lightweight local loops.
             require_final_checkpoint: false,
         },
         resource_budget_policy: ResourceBudgetPolicy {
@@ -290,8 +291,7 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             require_before_side_effect: true,
             require_before_block: true,
             max_checkpoint_bytes: 256 * 1024,
-            // TODO(reborn): enable once final checkpoint persistence is wired for built-in profiles.
-            require_final_checkpoint: false,
+            require_final_checkpoint: true,
         },
         resource_budget_policy: ResourceBudgetPolicy {
             tier: ResourceBudgetTier::from_trusted_static("mission_high"),

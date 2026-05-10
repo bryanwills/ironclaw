@@ -87,6 +87,11 @@ pub struct ApplyValidatedLoopExitRequest {
     pub mapping: LoopExitMapping,
 }
 
+/// Legacy helper request for applying a loop exit with a caller-supplied policy.
+///
+/// Production Reborn runner composition should derive this policy inside a
+/// trusted applier from durable evidence stores before calling
+/// `apply_validated_loop_exit`; drivers must not supply these booleans.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyLoopExitRequest {
     pub run_id: TurnRunId,
@@ -145,6 +150,11 @@ pub trait TurnRunTransitionPort: Send + Sync {
     ) -> Result<TurnRunState, TurnError>;
 }
 
+/// Apply a loop exit with a caller-supplied validation policy.
+///
+/// This remains for lower-level state-store contract tests and legacy callers.
+/// New trusted runner paths should prefer a composition-local applier that owns
+/// evidence derivation, then call `TurnRunTransitionPort::apply_validated_loop_exit`.
 pub async fn apply_loop_exit<P>(
     port: &P,
     request: ApplyLoopExitRequest,

@@ -5,11 +5,11 @@ use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, ThreadId};
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, EventCursor, GateRef, LoopBlocked, LoopBlockedKind,
-    LoopCancelled, LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopExitId, LoopExitMapping, LoopFailed, LoopFailureKind, LoopMessageRef,
-    ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SourceBindingRef, TurnCheckpointId,
-    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
-    TurnStatus,
+    LoopCancelled, LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopDiagnosticRef,
+    LoopExit, LoopExitId, LoopExitMapping, LoopFailed, LoopFailureKind, LoopMessageRef,
+    LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SourceBindingRef,
+    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
+    TurnScope, TurnStatus,
     run_profile::*,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -19,7 +19,10 @@ use ironclaw_turns::{
     },
 };
 
-use super::{InMemoryLoopExitEvidencePort, LoopExitApplier};
+use super::{
+    FailClosedLoopExitEvidencePort, InMemoryLoopExitEvidencePort, LoopExitApplier,
+    LoopExitEvidencePort, TerminalLoopExitKind,
+};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -181,6 +184,104 @@ impl TurnRunTransitionPort for CapturingTransitionPort {
     }
 }
 
+// ─── Recording evidence port ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EvidenceCall {
+    FinalCheckpoint {
+        scope: TurnScope,
+        run_id: TurnRunId,
+        expected_exit_kind: TerminalLoopExitKind,
+        checkpoint_id: TurnCheckpointId,
+    },
+    FailureEvidence {
+        scope: TurnScope,
+        run_id: TurnRunId,
+        reason_kind: LoopFailureKind,
+        diagnostic_ref: Option<LoopDiagnosticRef>,
+        usage_summary_ref: Option<LoopUsageSummaryRef>,
+    },
+}
+
+#[derive(Debug, Default)]
+struct RecordingEvidencePort {
+    calls: Mutex<Vec<EvidenceCall>>,
+}
+
+impl RecordingEvidencePort {
+    fn calls(&self) -> Vec<EvidenceCall> {
+        self.calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl LoopExitEvidencePort for RecordingEvidencePort {
+    async fn verify_completion_refs(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _reply_refs: &[LoopMessageRef],
+        _result_refs: &[ironclaw_turns::LoopResultRef],
+    ) -> Result<bool, TurnError> {
+        Ok(true)
+    }
+
+    async fn verify_blocked_evidence(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _kind: LoopBlockedKind,
+        _checkpoint_id: &TurnCheckpointId,
+        _gate_ref: &GateRef,
+    ) -> Result<bool, TurnError> {
+        Ok(true)
+    }
+
+    async fn verify_final_checkpoint(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        expected_exit_kind: TerminalLoopExitKind,
+        checkpoint_id: &TurnCheckpointId,
+    ) -> Result<bool, TurnError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push(EvidenceCall::FinalCheckpoint {
+                scope: scope.clone(),
+                run_id,
+                expected_exit_kind,
+                checkpoint_id: *checkpoint_id,
+            });
+        Ok(true)
+    }
+
+    async fn verify_failure_evidence(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        reason_kind: LoopFailureKind,
+        diagnostic_ref: Option<&LoopDiagnosticRef>,
+        usage_summary_ref: Option<&LoopUsageSummaryRef>,
+    ) -> Result<bool, TurnError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push(EvidenceCall::FailureEvidence {
+                scope: scope.clone(),
+                run_id,
+                reason_kind,
+                diagnostic_ref: diagnostic_ref.cloned(),
+                usage_summary_ref: usage_summary_ref.cloned(),
+            });
+        Ok(true)
+    }
+
+    async fn is_cancellation_observed(&self, _run_id: TurnRunId) -> Result<bool, TurnError> {
+        Ok(true)
+    }
+}
+
 // ─── Test setup ─────────────────────────────────────────────────────────────
 
 struct TestSetup {
@@ -192,7 +293,10 @@ struct TestSetup {
     lease_token: TurnLeaseToken,
 }
 
-fn setup(evidence: InMemoryLoopExitEvidencePort, result_status: TurnStatus) -> TestSetup {
+fn setup<E>(evidence: E, result_status: TurnStatus) -> TestSetup
+where
+    E: LoopExitEvidencePort + 'static,
+{
     let port = Arc::new(CapturingTransitionPort::new(result_status));
     let applier = LoopExitApplier::new(port.clone(), Arc::new(evidence));
     TestSetup {
@@ -319,6 +423,18 @@ fn is_recovery_mapping(mapping: &LoopExitMapping) -> bool {
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn fail_closed_evidence_port_never_trusts_driver_claims() {
+    let s = setup(FailClosedLoopExitEvidencePort, TurnStatus::RecoveryRequired);
+    let profile = test_profile(false);
+
+    s.apply(completed_exit_with_refs(), &profile)
+        .await
+        .expect("should succeed");
+
+    assert!(is_recovery_mapping(&s.captured_mapping()));
+}
 
 #[tokio::test]
 async fn completed_final_reply_verified_refs_trusted() {
@@ -691,5 +807,86 @@ async fn applier_passes_correct_request_fields_to_port() {
     assert_eq!(
         req.mapping,
         LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed)
+    );
+}
+
+#[tokio::test]
+async fn applier_passes_expected_terminal_kind_to_final_checkpoint_evidence() {
+    let transition = Arc::new(CapturingTransitionPort::new(TurnStatus::Completed));
+    let evidence = Arc::new(RecordingEvidencePort::default());
+    let applier = LoopExitApplier::new(transition, evidence.clone());
+    let scope = test_scope();
+    let run_id = TurnRunId::new();
+    let profile = test_profile(true);
+    let checkpoint_id = TurnCheckpointId::new();
+
+    applier
+        .apply(
+            &scope,
+            run_id,
+            TurnRunnerId::new(),
+            TurnLeaseToken::new(),
+            LoopExit::Completed(LoopCompleted {
+                completion_kind: LoopCompletionKind::FinalReply,
+                reply_message_refs: vec![LoopMessageRef::new("msg:test-1").expect("valid")],
+                result_refs: vec![],
+                final_checkpoint_id: Some(checkpoint_id),
+                usage_summary_ref: None,
+                exit_id: LoopExitId::new("exit:completed-kind").expect("valid"),
+            }),
+            &profile,
+        )
+        .await
+        .expect("should succeed");
+
+    assert_eq!(
+        evidence.calls(),
+        vec![EvidenceCall::FinalCheckpoint {
+            scope,
+            run_id,
+            expected_exit_kind: TerminalLoopExitKind::Completed,
+            checkpoint_id,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn applier_passes_exact_failure_claim_to_failure_evidence() {
+    let transition = Arc::new(CapturingTransitionPort::new(TurnStatus::Failed));
+    let evidence = Arc::new(RecordingEvidencePort::default());
+    let applier = LoopExitApplier::new(transition, evidence.clone());
+    let scope = test_scope();
+    let run_id = TurnRunId::new();
+    let profile = test_profile(false);
+    let diagnostic_ref = LoopDiagnosticRef::new("diag:test-1").expect("valid");
+    let usage_summary_ref = LoopUsageSummaryRef::new("usage:test-1").expect("valid");
+
+    applier
+        .apply(
+            &scope,
+            run_id,
+            TurnRunnerId::new(),
+            TurnLeaseToken::new(),
+            LoopExit::Failed(LoopFailed {
+                reason_kind: LoopFailureKind::InvalidModelOutput,
+                checkpoint_id: None,
+                usage_summary_ref: Some(usage_summary_ref.clone()),
+                diagnostic_ref: Some(diagnostic_ref.clone()),
+                exit_id: LoopExitId::new("exit:failed-claim").expect("valid"),
+            }),
+            &profile,
+        )
+        .await
+        .expect("should succeed");
+
+    assert_eq!(
+        evidence.calls(),
+        vec![EvidenceCall::FailureEvidence {
+            scope,
+            run_id,
+            reason_kind: LoopFailureKind::InvalidModelOutput,
+            diagnostic_ref: Some(diagnostic_ref),
+            usage_summary_ref: Some(usage_summary_ref),
+        }]
     );
 }

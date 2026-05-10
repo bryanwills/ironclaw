@@ -13,11 +13,20 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use ironclaw_turns::{
-    GateRef, LoopBlockedKind, LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy,
-    LoopMessageRef, LoopResultRef, ResolvedRunProfile, TurnCheckpointId, TurnError, TurnLeaseToken,
-    TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
+    GateRef, LoopBlockedKind, LoopDiagnosticRef, LoopExit, LoopExitInvalidHandling,
+    LoopExitValidationPolicy, LoopFailureKind, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,
+    ResolvedRunProfile, TurnCheckpointId, TurnError, TurnLeaseToken, TurnRunId, TurnRunState,
+    TurnRunnerId, TurnScope,
     runner::{ApplyValidatedLoopExitRequest, TurnRunTransitionPort},
 };
+
+/// Terminal exit flavor expected for a final checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalLoopExitKind {
+    Completed,
+    Cancelled,
+    Failed,
+}
 
 /// Port for verifying durable evidence backing a driver's `LoopExit` claim.
 ///
@@ -58,15 +67,19 @@ pub trait LoopExitEvidencePort: Send + Sync {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
+        expected_exit_kind: TerminalLoopExitKind,
         checkpoint_id: &TurnCheckpointId,
     ) -> Result<bool, TurnError>;
 
-    /// Verify that failure diagnostic evidence exists durably if required
-    /// by the profile.
+    /// Verify that failure diagnostic evidence exists durably for this exact
+    /// failure claim if required by the profile.
     async fn verify_failure_evidence(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
+        reason_kind: LoopFailureKind,
+        diagnostic_ref: Option<&LoopDiagnosticRef>,
+        usage_summary_ref: Option<&LoopUsageSummaryRef>,
     ) -> Result<bool, TurnError>;
 
     /// Check whether a host cancellation signal was received for this run.
@@ -93,6 +106,11 @@ impl LoopExitApplier {
             transition_port,
             evidence_port,
         }
+    }
+
+    /// Create an applier that fails closed until a durable evidence adapter is wired.
+    pub fn fail_closed(transition_port: Arc<dyn TurnRunTransitionPort>) -> Self {
+        Self::new(transition_port, Arc::new(FailClosedLoopExitEvidencePort))
     }
 
     /// Derive evidence-backed `LoopExitValidationPolicy`, validate the
@@ -158,6 +176,7 @@ impl LoopExitApplier {
                         scope,
                         run_id,
                         profile,
+                        TerminalLoopExitKind::Completed,
                         completed.final_checkpoint_id.as_ref(),
                     )
                     .await?;
@@ -184,6 +203,7 @@ impl LoopExitApplier {
                         scope,
                         run_id,
                         profile,
+                        TerminalLoopExitKind::Cancelled,
                         cancelled.checkpoint_id.as_ref(),
                     )
                     .await?;
@@ -193,13 +213,20 @@ impl LoopExitApplier {
                     profile.checkpoint_policy.require_final_checkpoint;
                 policy.failure_evidence_verified = self
                     .evidence_port
-                    .verify_failure_evidence(scope, run_id)
+                    .verify_failure_evidence(
+                        scope,
+                        run_id,
+                        failed.reason_kind,
+                        failed.diagnostic_ref.as_ref(),
+                        failed.usage_summary_ref.as_ref(),
+                    )
                     .await?;
                 policy.final_checkpoint_verified = self
                     .verify_required_final_checkpoint(
                         scope,
                         run_id,
                         profile,
+                        TerminalLoopExitKind::Failed,
                         failed.checkpoint_id.as_ref(),
                     )
                     .await?;
@@ -214,6 +241,7 @@ impl LoopExitApplier {
         scope: &TurnScope,
         run_id: TurnRunId,
         profile: &ResolvedRunProfile,
+        expected_exit_kind: TerminalLoopExitKind,
         checkpoint_id: Option<&TurnCheckpointId>,
     ) -> Result<bool, TurnError> {
         if !profile.checkpoint_policy.require_final_checkpoint {
@@ -223,8 +251,66 @@ impl LoopExitApplier {
             return Ok(false);
         };
         self.evidence_port
-            .verify_final_checkpoint(scope, run_id, checkpoint_id)
+            .verify_final_checkpoint(scope, run_id, expected_exit_kind, checkpoint_id)
             .await
+    }
+}
+
+/// Production-safe placeholder evidence port.
+///
+/// This adapter deliberately trusts no driver-supplied evidence. It exists so
+/// composition roots can wire the applier without accidentally using a permissive
+/// test double; trusted terminal/blocking outcomes require a store-backed
+/// implementation of `LoopExitEvidencePort`.
+#[derive(Debug, Default)]
+pub struct FailClosedLoopExitEvidencePort;
+
+#[async_trait]
+impl LoopExitEvidencePort for FailClosedLoopExitEvidencePort {
+    async fn verify_completion_refs(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _reply_refs: &[LoopMessageRef],
+        _result_refs: &[LoopResultRef],
+    ) -> Result<bool, TurnError> {
+        Ok(false)
+    }
+
+    async fn verify_blocked_evidence(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _kind: LoopBlockedKind,
+        _checkpoint_id: &TurnCheckpointId,
+        _gate_ref: &GateRef,
+    ) -> Result<bool, TurnError> {
+        Ok(false)
+    }
+
+    async fn verify_final_checkpoint(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _expected_exit_kind: TerminalLoopExitKind,
+        _checkpoint_id: &TurnCheckpointId,
+    ) -> Result<bool, TurnError> {
+        Ok(false)
+    }
+
+    async fn verify_failure_evidence(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _reason_kind: LoopFailureKind,
+        _diagnostic_ref: Option<&LoopDiagnosticRef>,
+        _usage_summary_ref: Option<&LoopUsageSummaryRef>,
+    ) -> Result<bool, TurnError> {
+        Ok(false)
+    }
+
+    async fn is_cancellation_observed(&self, _run_id: TurnRunId) -> Result<bool, TurnError> {
+        Ok(false)
     }
 }
 
@@ -331,6 +417,7 @@ impl LoopExitEvidencePort for InMemoryLoopExitEvidencePort {
         &self,
         _scope: &TurnScope,
         _run_id: TurnRunId,
+        _expected_exit_kind: TerminalLoopExitKind,
         _checkpoint_id: &TurnCheckpointId,
     ) -> Result<bool, TurnError> {
         Ok(self.final_checkpoint_verified)
@@ -340,6 +427,9 @@ impl LoopExitEvidencePort for InMemoryLoopExitEvidencePort {
         &self,
         _scope: &TurnScope,
         _run_id: TurnRunId,
+        _reason_kind: LoopFailureKind,
+        _diagnostic_ref: Option<&LoopDiagnosticRef>,
+        _usage_summary_ref: Option<&LoopUsageSummaryRef>,
     ) -> Result<bool, TurnError> {
         Ok(self.failure_evidence_verified)
     }

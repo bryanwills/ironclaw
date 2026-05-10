@@ -26,6 +26,7 @@ async fn default_interactive_profile_resolves_stable_driver_and_redacted_snapsho
         "interactive_tools"
     );
     assert_eq!(snapshot.context_profile_id.as_str(), "interactive_context");
+    assert!(!snapshot.checkpoint_policy.require_final_checkpoint);
     assert!(snapshot.steering_policy.allow_steering);
     assert!(!snapshot.steering_policy.allow_driver_specific_nudges);
     assert_eq!(snapshot.provenance.sources.len(), 1);
@@ -68,6 +69,7 @@ async fn authorized_long_running_profile_resolves_distinct_driver_and_budget_env
     assert_eq!(snapshot.loop_driver.id.as_str(), "codeact_loop");
     assert_eq!(snapshot.checkpoint_schema_id.as_str(), "durable_mission_v1");
     assert_eq!(snapshot.model_profile_id.as_str(), "mission_model");
+    assert!(snapshot.checkpoint_policy.require_final_checkpoint);
     assert_eq!(
         snapshot.resource_budget_policy.tier.as_str(),
         "mission_standard"
