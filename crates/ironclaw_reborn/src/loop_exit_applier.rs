@@ -155,6 +155,8 @@ impl LoopExitApplier {
                     .await?;
             }
             LoopExit::Cancelled(_) => {
+                policy.require_final_checkpoint =
+                    profile.checkpoint_policy.require_final_checkpoint;
                 policy.host_cancellation_observed =
                     self.evidence_port.is_cancellation_observed(run_id).await?;
             }

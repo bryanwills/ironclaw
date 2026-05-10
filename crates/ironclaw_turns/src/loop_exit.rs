@@ -52,26 +52,42 @@ impl LoopExit {
                 LoopExitViolationKind::UnverifiedBlockedEvidence,
                 policy.invalid_handling,
             ),
-            Self::Cancelled(_exit) if policy.host_cancellation_observed => {
-                LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Cancelled)
-            }
-            Self::Cancelled(_exit) => invalid_exit_decision(
+            Self::Cancelled(_exit) if !policy.host_cancellation_observed => invalid_exit_decision(
                 exit_id,
                 LoopExitViolationKind::CancellationNotObserved,
                 policy.invalid_handling,
             ),
-            Self::Failed(exit) if policy.failure_evidence_verified => {
-                LoopExitValidationDecision::trusted(
+            Self::Cancelled(exit)
+                if policy.require_final_checkpoint && exit.checkpoint_id.is_none() =>
+            {
+                invalid_exit_decision(
                     exit_id,
-                    TurnRunnerOutcome::Failed {
-                        failure: exit.reason_kind.to_sanitized_failure(),
-                    },
+                    LoopExitViolationKind::MissingFinalCheckpoint,
+                    policy.invalid_handling,
                 )
             }
-            Self::Failed(_exit) => invalid_exit_decision(
+            Self::Cancelled(_exit) => {
+                LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Cancelled)
+            }
+            Self::Failed(_exit) if !policy.failure_evidence_verified => invalid_exit_decision(
                 exit_id,
                 LoopExitViolationKind::UnverifiedFailureEvidence,
                 policy.invalid_handling,
+            ),
+            Self::Failed(exit)
+                if policy.require_final_checkpoint && exit.checkpoint_id.is_none() =>
+            {
+                invalid_exit_decision(
+                    exit_id,
+                    LoopExitViolationKind::MissingFinalCheckpoint,
+                    policy.invalid_handling,
+                )
+            }
+            Self::Failed(exit) => LoopExitValidationDecision::trusted(
+                exit_id,
+                TurnRunnerOutcome::Failed {
+                    failure: exit.reason_kind.to_sanitized_failure(),
+                },
             ),
         }
     }

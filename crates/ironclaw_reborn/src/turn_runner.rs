@@ -243,12 +243,19 @@ impl TurnRunnerWorker {
                 break;
             }
 
-            if let Err(err) = self.try_claim_and_run().await {
-                warn!(
-                    runner_id = ?self.runner_id,
-                    error = %err,
-                    "claim-and-run cycle failed"
-                );
+            while !cancel.is_cancelled() {
+                match self.try_claim_and_run().await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(err) => {
+                        warn!(
+                            runner_id = ?self.runner_id,
+                            error = %err,
+                            "claim-and-run cycle failed"
+                        );
+                        break;
+                    }
+                }
             }
         }
 
@@ -256,7 +263,11 @@ impl TurnRunnerWorker {
     }
 
     /// Attempt one claim-and-run cycle.
-    async fn try_claim_and_run(&self) -> Result<(), TurnRunnerError> {
+    ///
+    /// Returns `Ok(true)` when a run was claimed and executed, and `Ok(false)`
+    /// when the queue is empty. The main loop uses this to drain available work
+    /// after each wake/poll tick without waiting for another interval.
+    async fn try_claim_and_run(&self) -> Result<bool, TurnRunnerError> {
         let lease_token = TurnLeaseToken::new();
         let request = ClaimRunRequest {
             runner_id: self.runner_id,
@@ -272,7 +283,7 @@ impl TurnRunnerWorker {
 
         let Some(claimed) = claimed else {
             debug!(runner_id = ?self.runner_id, "no runs available to claim");
-            return Ok(());
+            return Ok(false);
         };
 
         let run_id = claimed.state.run_id;
@@ -286,7 +297,7 @@ impl TurnRunnerWorker {
         );
 
         self.execute_claimed_run(claimed).await;
-        Ok(())
+        Ok(true)
     }
 
     /// Execute a claimed run: heartbeat, invoke driver, apply exit.
@@ -297,28 +308,34 @@ impl TurnRunnerWorker {
         let scope = claimed.state.scope.clone();
         let profile = claimed.resolved_run_profile.clone();
 
-        // Start heartbeat task
         let heartbeat_cancel = CancellationToken::new();
-        let heartbeat_handle = {
-            let port = Arc::clone(&self.transition_port);
-            let interval = self.config.heartbeat_interval;
-            let cancel = heartbeat_cancel.clone();
-            tokio::spawn(heartbeat_loop(
-                port,
-                run_id,
-                runner_id,
-                lease_token,
-                interval,
-                cancel,
-            ))
+        let heartbeat = heartbeat_loop(
+            Arc::clone(&self.transition_port),
+            run_id,
+            runner_id,
+            lease_token,
+            self.config.heartbeat_interval,
+            heartbeat_cancel.clone(),
+        );
+        let driver = self.invoke_driver(&claimed);
+        tokio::pin!(heartbeat);
+        tokio::pin!(driver);
+
+        // Resolve driver while heartbeating in the same task. If this future is
+        // dropped, the heartbeat future is dropped with it, so no detached task
+        // can outlive the claimed run.
+        let exit_result = tokio::select! {
+            result = &mut driver => result,
+            () = &mut heartbeat => {
+                warn!(
+                    runner_id = ?runner_id,
+                    run_id = ?run_id,
+                    "heartbeat loop stopped before driver returned"
+                );
+                Err(DriverInvocationError::HeartbeatStopped)
+            }
         };
-
-        // Resolve driver from registry and invoke it
-        let exit_result = self.invoke_driver(&claimed).await;
-
-        // Stop heartbeat
         heartbeat_cancel.cancel();
-        let _ = heartbeat_handle.await;
 
         // Apply the exit or record recovery
         match exit_result {
@@ -491,6 +508,7 @@ impl TurnRunnerWorker {
             DriverInvocationError::DriverError(AgentLoopDriverError::Failed { .. }) => {
                 "driver_failed"
             }
+            DriverInvocationError::HeartbeatStopped => "heartbeat_stopped",
         };
 
         let Some(failure) = sanitized_failure(category) else {
@@ -514,7 +532,7 @@ impl TurnRunnerWorker {
     }
 }
 
-/// Heartbeat loop that runs in a spawned task for the duration of a driver run.
+/// Heartbeat loop that runs beside a driver invocation for the duration of a run.
 async fn heartbeat_loop(
     port: Arc<dyn TurnRunTransitionPort>,
     run_id: TurnRunId,
@@ -589,6 +607,7 @@ enum DriverInvocationError {
     DriverNotFound { reason: String },
     HostCreationFailed { reason: String },
     DriverError(AgentLoopDriverError),
+    HeartbeatStopped,
 }
 
 impl std::fmt::Display for DriverInvocationError {
@@ -597,6 +616,7 @@ impl std::fmt::Display for DriverInvocationError {
             Self::DriverNotFound { reason } => write!(f, "driver not found: {reason}"),
             Self::HostCreationFailed { reason } => write!(f, "host creation failed: {reason}"),
             Self::DriverError(err) => write!(f, "driver error: {err}"),
+            Self::HeartbeatStopped => write!(f, "heartbeat stopped before driver returned"),
         }
     }
 }

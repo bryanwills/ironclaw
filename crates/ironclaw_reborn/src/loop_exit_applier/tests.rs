@@ -456,6 +456,21 @@ async fn cancelled_observed_trusted() {
 }
 
 #[tokio::test]
+async fn cancelled_missing_checkpoint_when_required_violation() {
+    let s = setup(
+        InMemoryLoopExitEvidencePort::new().with_cancellation_observed(true),
+        TurnStatus::RecoveryRequired,
+    );
+    let profile = test_profile(true);
+
+    s.apply(cancelled_exit(), &profile)
+        .await
+        .expect("should succeed");
+
+    assert!(is_recovery_mapping(&s.captured_mapping()));
+}
+
+#[tokio::test]
 async fn cancelled_not_observed_violation() {
     let s = setup(
         InMemoryLoopExitEvidencePort::new().with_cancellation_observed(false),

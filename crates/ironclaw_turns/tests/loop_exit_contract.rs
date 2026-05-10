@@ -142,6 +142,45 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
 }
 
 #[test]
+fn final_checkpoint_policy_rejects_cancelled_and_failed_terminal_exits_without_checkpoint() {
+    let cancelled = LoopExit::cancelled_for_observed_interrupt(exit_id("exit:cancelled-no-final"))
+        .validate(LoopExitValidationPolicy {
+            require_final_checkpoint: true,
+            host_cancellation_observed: true,
+            invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+            completion_refs_verified: false,
+            blocked_evidence_verified: false,
+            failure_evidence_verified: false,
+        });
+    assert_eq!(
+        cancelled.violation.unwrap().category(),
+        "missing_final_checkpoint"
+    );
+    assert!(matches!(
+        cancelled.mapping,
+        ironclaw_turns::LoopExitMapping::RecoveryRequired { .. }
+    ));
+
+    let failed = LoopExit::failed(LoopFailureKind::DriverBug, exit_id("exit:failed-no-final"))
+        .validate(LoopExitValidationPolicy {
+            require_final_checkpoint: true,
+            host_cancellation_observed: false,
+            invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+            completion_refs_verified: false,
+            blocked_evidence_verified: false,
+            failure_evidence_verified: true,
+        });
+    assert_eq!(
+        failed.violation.unwrap().category(),
+        "missing_final_checkpoint"
+    );
+    assert!(matches!(
+        failed.mapping,
+        ironclaw_turns::LoopExitMapping::RecoveryRequired { .. }
+    ));
+}
+
+#[test]
 fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref() {
     let checkpoint_id = TurnCheckpointId::new();
     let loop_gate_ref = loop_gate_ref("gate:approval-gate");

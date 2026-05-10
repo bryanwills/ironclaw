@@ -830,6 +830,61 @@ async fn worker_continues_when_no_runs_available() {
 }
 
 #[tokio::test]
+async fn wake_signal_drains_available_runs_until_queue_empty() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::completing(desc.clone()));
+    let registry = Arc::new(setup_registry(driver));
+    let first = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    let second = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    let port = Arc::new(
+        MockTransitionPort::new()
+            .with_claim_result(Ok(Some(first)))
+            .with_claim_result(Ok(Some(second))),
+    );
+
+    let (wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let config = TurnRunnerWorkerConfig {
+        heartbeat_interval: Duration::from_secs(60),
+        poll_interval: Duration::from_secs(60),
+        scope_filter: None,
+    };
+
+    let worker = TurnRunnerWorker::new(
+        config,
+        port.clone(),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+        make_applier(port.clone()),
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    wake_sender.wake();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    cancel.cancel();
+    handle.await.expect("worker task should complete");
+
+    let calls = port.calls();
+    let claim_count = calls
+        .iter()
+        .filter(|call| **call == TransitionCall::Claim)
+        .count();
+    let apply_count = calls
+        .iter()
+        .filter(|call| **call == TransitionCall::ApplyValidatedLoopExit)
+        .count();
+    assert_eq!(claim_count, 3, "drain should stop after empty claim");
+    assert_eq!(
+        apply_count, 2,
+        "single wake should process both queued runs"
+    );
+}
+
+#[tokio::test]
 async fn wake_signal_triggers_claim_attempt() {
     let desc = test_descriptor();
     let driver = Arc::new(MockDriver::completing(desc.clone()));
