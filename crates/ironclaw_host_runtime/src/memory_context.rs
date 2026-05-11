@@ -15,7 +15,8 @@ use ironclaw_memory::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, ContextProfileId, LoopContextSnippet,
-    LoopSafeSummary, MemoryPromptContextRequest, MemoryPromptContextService,
+    MemoryPromptContextRequest, MemoryPromptContextService, UntrustedContextKind,
+    untrusted_context_summary,
 };
 
 /// Maximum byte length for a snippet safe summary, matching `LoopSafeSummary`
@@ -24,29 +25,6 @@ const MAX_SAFE_SUMMARY_BYTES: usize = 512;
 
 /// Aggregate byte budget for memory summaries injected into a loop context.
 const MAX_TOTAL_SAFE_SUMMARY_BYTES: usize = 4 * 1024;
-
-/// Prefix every memory snippet with an explicit model-facing trust boundary.
-const UNTRUSTED_MEMORY_PREFIX: &str = "Untrusted memory content: ";
-
-const INSTRUCTION_LIKE_MARKERS: &[&str] = &[
-    "act as",
-    "assistant message",
-    "assistant messages",
-    "developer message",
-    "developer messages",
-    "disregard previous instructions",
-    "disregard prior instructions",
-    "function call",
-    "function calls",
-    "ignore all previous instructions",
-    "ignore previous instructions",
-    "ignore prior instructions",
-    "system prompt",
-    "tool call",
-    "tool calls",
-    "you are chatgpt",
-    "you are now",
-];
 
 /// Production adapter that loads memory snippets via [`MemoryBackend::search`].
 ///
@@ -283,64 +261,8 @@ fn update_hash(hash: &mut u64, value: &str) {
 ///
 /// Returns `None` if the sanitized text fails `LoopSafeSummary` validation.
 fn sanitize_snippet_text(raw: &str) -> Option<String> {
-    let cleaned: String = raw.chars().filter(|ch| !ch.is_control()).collect();
-    let cleaned = cleaned.trim();
-
-    if cleaned.is_empty() || contains_instruction_like_marker(cleaned) {
-        return None;
-    }
-
-    let max_payload_bytes = MAX_SAFE_SUMMARY_BYTES.saturating_sub(UNTRUSTED_MEMORY_PREFIX.len());
-    let truncated = truncate_to_char_boundary(cleaned, max_payload_bytes);
-
-    if truncated.is_empty() {
-        return None;
-    }
-
-    let enveloped = format!("{UNTRUSTED_MEMORY_PREFIX}{truncated}");
-
-    match LoopSafeSummary::new(enveloped) {
-        Ok(summary) => Some(summary.as_str().to_string()),
-        Err(_) => None,
-    }
-}
-
-fn contains_instruction_like_marker(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    INSTRUCTION_LIKE_MARKERS
-        .iter()
-        .any(|marker| contains_marker_phrase(&lower, marker))
-}
-
-fn contains_marker_phrase(lower_value: &str, marker: &str) -> bool {
-    let mut search_start = 0;
-    while let Some(offset) = lower_value[search_start..].find(marker) {
-        let start = search_start + offset;
-        let end = start + marker.len();
-        let before_ok = start == 0 || !lower_value.as_bytes()[start - 1].is_ascii_alphanumeric();
-        let after_ok =
-            end == lower_value.len() || !lower_value.as_bytes()[end].is_ascii_alphanumeric();
-
-        if before_ok && after_ok {
-            return true;
-        }
-
-        search_start = end;
-    }
-
-    false
-}
-
-fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
-    }
-
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end] // safety: `end` is reduced until it reaches a valid UTF-8 char boundary.
+    untrusted_context_summary(UntrustedContextKind::Memory, raw, MAX_SAFE_SUMMARY_BYTES)
+        .map(|summary| summary.as_str().to_string())
 }
 
 #[cfg(test)]

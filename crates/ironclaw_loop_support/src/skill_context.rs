@@ -3,7 +3,7 @@ use ironclaw_skills::{ParsedSkill, SkillTrust, parse_skill_md};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, InstalledSkillSnapshot, LoopContextSnippet,
     LoopRunContext, SkillContextError, SkillContextService, SkillContextSource, SkillRunSnapshot,
-    SkillTrustLevel, SkillVisibility,
+    SkillTrustLevel, SkillVisibility, UntrustedContextKind, untrusted_context_summary,
 };
 pub(crate) use ironclaw_turns::run_profile::{
     is_skill_snippet_model_message_ref as is_snippet_model_message_ref,
@@ -154,7 +154,7 @@ pub fn build_skill_run_snapshot(
             trust,
             visibility,
             candidate.ordering_key,
-        ));
+        )?);
     }
 
     Ok(SkillRunSnapshot::from_entries(entries))
@@ -165,21 +165,26 @@ fn parsed_skill_to_snapshot_entry(
     trust: SkillTrust,
     visibility: SkillVisibility,
     ordering_key: Option<String>,
-) -> InstalledSkillSnapshot {
+) -> Result<InstalledSkillSnapshot, HostSkillContextBuildError> {
     let name = parsed.manifest.name;
     let trust = skill_trust_level(trust);
     let prompt_content = match trust {
-        SkillTrustLevel::Installed => None,
+        SkillTrustLevel::Installed => {
+            let summary =
+                untrusted_context_summary(UntrustedContextKind::Skill, &parsed.prompt_content, 512)
+                    .ok_or(HostSkillContextBuildError::UnsafeModelVisibleContent)?;
+            Some(summary.as_str().to_string())
+        }
         SkillTrustLevel::Trusted => Some(parsed.prompt_content),
     };
-    InstalledSkillSnapshot {
+    Ok(InstalledSkillSnapshot {
         ordering_key: ordering_key.unwrap_or_else(|| name.clone()),
         name,
         trust,
         visibility,
         prompt_content,
         safe_description: parsed.manifest.description,
-    }
+    })
 }
 
 fn skill_trust_level(trust: SkillTrust) -> SkillTrustLevel {

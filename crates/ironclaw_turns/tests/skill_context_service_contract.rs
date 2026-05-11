@@ -39,7 +39,22 @@ fn visible_installed(name: &str, description: &str) -> InstalledSkillSnapshot {
         name: name.to_string(),
         trust: SkillTrustLevel::Installed,
         visibility: SkillVisibility::Visible,
-        prompt_content: Some("secret prompt".to_string()),
+        prompt_content: None,
+        safe_description: description.to_string(),
+        ordering_key: name.to_string(),
+    }
+}
+
+fn visible_installed_with_prompt(
+    name: &str,
+    description: &str,
+    prompt: &str,
+) -> InstalledSkillSnapshot {
+    InstalledSkillSnapshot {
+        name: name.to_string(),
+        trust: SkillTrustLevel::Installed,
+        visibility: SkillVisibility::Visible,
+        prompt_content: Some(prompt.to_string()),
         safe_description: description.to_string(),
         ordering_key: name.to_string(),
     }
@@ -143,17 +158,34 @@ async fn trusted_skill_includes_prompt_content() {
 }
 
 #[tokio::test]
-async fn installed_skill_excludes_prompt_content() {
-    let snapshot =
-        SkillRunSnapshot::from_entries(vec![visible_installed("alpha", "the description")]);
+async fn installed_skill_includes_enveloped_prompt_content() {
+    let snapshot = SkillRunSnapshot::from_entries(vec![visible_installed_with_prompt(
+        "alpha",
+        "the description",
+        "Untrusted skill content: safe installed prompt",
+    )]);
     let service = SkillContextService::new(snapshot.clone());
     let snippets = service.skill_snippets(&snapshot).await.unwrap();
     assert_eq!(snippets.len(), 1);
     assert!(snippets[0].safe_summary.contains("the description"));
     assert!(
-        !snippets[0].safe_summary.contains("secret prompt"),
-        "installed skill must not expose prompt content"
+        snippets[0]
+            .safe_summary
+            .contains("Untrusted skill content: safe installed prompt"),
+        "installed skill prompt content must remain enveloped"
     );
+}
+
+#[tokio::test]
+async fn installed_skill_rejects_unenveloped_prompt_content() {
+    let snapshot = SkillRunSnapshot::from_entries(vec![visible_installed_with_prompt(
+        "alpha",
+        "the description",
+        "raw installed prompt",
+    )]);
+    let service = SkillContextService::new(snapshot.clone());
+    let err = service.skill_snippets(&snapshot).await.unwrap_err();
+    assert_eq!(err, SkillContextError::UnsafeModelVisibleContent);
 }
 
 #[tokio::test]
@@ -428,16 +460,13 @@ async fn mixed_visibility_correct_filtering() {
     assert!(alpha.safe_summary.contains("trusted visible"));
     assert!(alpha.safe_summary.contains("trusted prompt"));
 
-    // Installed excludes prompt
+    // Installed includes description only when no enveloped prompt is supplied.
     let beta = snippets
         .iter()
         .find(|s| s.snippet_ref == "skill:beta")
         .unwrap();
     assert!(beta.safe_summary.contains("installed visible"));
-    assert!(
-        !beta.safe_summary.contains("secret prompt"),
-        "installed skill must not expose prompt content"
-    );
+    assert!(!beta.safe_summary.contains("Untrusted skill content"));
 
     // Hidden and denied are absent
     let refs: Vec<&str> = snippets.iter().map(|s| s.snippet_ref.as_str()).collect();

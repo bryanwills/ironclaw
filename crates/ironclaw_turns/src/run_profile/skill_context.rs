@@ -8,8 +8,8 @@
 //! Every installed skill in a run has two dimensions that gate what the model sees:
 //!
 //! - **Trust level** ([`SkillTrustLevel`]): determines how much content the model receives.
-//!   `Trusted` skills include their full prompt content; `Installed` skills expose only
-//!   a safe description.
+//!   `Trusted` skills include full prompt content; `Installed` skills expose safe
+//!   description plus sanitized prompt content in an explicit untrusted envelope.
 //!
 //! - **Visibility** ([`SkillVisibility`]): determines whether the model sees the skill at all.
 //!   `Visible` skills appear in the context; `Hidden` and `Denied` skills are omitted entirely
@@ -40,6 +40,7 @@ use crate::LoopMessageRef;
 
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopContextSnippetMetadata,
+    UntrustedContextKind, untrusted_context_summary,
 };
 
 // ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ pub enum SkillVisibility {
 /// Mirrors the upstream `SkillTrust` enum without creating a production dependency
 /// on `ironclaw_skills`.
 ///
-/// - `Installed`: read-only context; the model sees only the safe description.
+/// - `Installed`: read-only context; the model sees safe description plus sanitized prompt content in an untrusted envelope.
 /// - `Trusted`: full context; the model sees description and prompt content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,6 +133,7 @@ const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = 8 * 1024;
 const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = 32 * 1024;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x00000100000001B3;
+const UNTRUSTED_SKILL_PREFIX: &str = "Untrusted skill content: ";
 
 /// Byte budgets for model-visible skill context produced by [`SkillContextService`].
 ///
@@ -177,8 +179,7 @@ pub struct InstalledSkillSnapshot {
     pub trust: SkillTrustLevel,
     /// Visibility — determines whether the model sees this skill at all.
     pub visibility: SkillVisibility,
-    /// Full prompt content. Only included in model context when
-    /// `trust == Trusted` and `visibility == Visible`.
+    /// Full trusted prompt content, or sanitized installed prompt content wrapped in an untrusted envelope.
     pub prompt_content: Option<String>,
     /// Sanitized description safe for model consumption.
     pub safe_description: String,
@@ -344,7 +345,16 @@ impl SkillContextSource for SkillContextService {
                         entry.safe_description.clone()
                     }
                 }
-                SkillTrustLevel::Installed => entry.safe_description.clone(),
+                SkillTrustLevel::Installed => {
+                    if let Some(ref content) = entry.prompt_content {
+                        if !content.starts_with(UNTRUSTED_SKILL_PREFIX) {
+                            return Err(SkillContextError::UnsafeModelVisibleContent);
+                        }
+                        format!("{}\n\n{}", entry.safe_description, content)
+                    } else {
+                        entry.safe_description.clone()
+                    }
+                }
             };
 
             if safe_summary.len() > self.budget.max_snippet_bytes {

@@ -19,6 +19,7 @@ mod refs;
 mod resolver;
 mod skill_context;
 mod snapshot;
+mod untrusted_context;
 
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
@@ -74,3 +75,4 @@ pub use skill_context::{
     skill_snippet_model_message_ref,
 };
 pub use snapshot::ResolvedRunProfile;
+pub use untrusted_context::{UntrustedContextKind, untrusted_context_summary};
