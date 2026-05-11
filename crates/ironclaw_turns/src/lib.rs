@@ -60,8 +60,10 @@ pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, Th
 pub use run_profile::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-    CheckpointSchemaId, ConcurrencyClass, ContextProfileId, InMemoryRunProfileRegistry,
-    InMemoryRunProfileResolver, LoopDriverId, ModelProfileId, PrivilegedRunProfileDimension,
+    CheckpointSchemaId, ConcurrencyClass, ContextProfileId, EmptyMemoryPromptContextService,
+    InMemoryRunProfileRegistry, InMemoryRunProfileResolver, LoopDriverId,
+    MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId,
+    PrivilegedRunProfileDimension,
     RedactedRunProfileProvenance, RedactedRunProfileSource, ResolvedRunProfile,
     ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
     RunProfileRequestAuthority, RunProfileResolutionError, RunProfileResolutionRequest,
