@@ -2,6 +2,7 @@ mod driver;
 mod host;
 mod milestones;
 mod model;
+mod model_route;
 mod policy;
 mod refs;
 mod resolver;
@@ -33,6 +34,10 @@ pub use milestones::{
 pub use model::{
     HostManagedLoopModelPort, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
 };
+pub use model_route::{
+    InMemoryModelRouteResolver, ModelRoute, ModelRouteResolutionError, ModelRouteResolver,
+    ModelSelectionPolicy, ModelSlot, ResolvedModelRoute,
+};
 pub use policy::{
     CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,
     RedactedRunProfileProvenance, RedactedRunProfileSource, ResourceBudgetPolicy,
@@ -41,8 +46,9 @@ pub use policy::{
 };
 pub use refs::{
     CapabilitySurfaceProfileId, CheckpointSchemaId, ConcurrencyClass, ContextProfileId,
-    LoopDriverId, ModelProfileId, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-    RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
+    LoopDriverId, ModelId, ModelProfileId, ProviderId, ResourceBudgetTier, RunClassId,
+    RunProfileFingerprint, RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId,
+    SchedulingClass,
 };
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
