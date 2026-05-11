@@ -22,10 +22,12 @@ use uuid::Uuid;
 
 use crate::context::{ActionRecord, JobContext};
 use crate::db::Database;
+use crate::skills::attenuation::is_read_only_tool;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::tool::{ToolError, ToolOutput};
 use crate::tools::{prepare_tool_params, redact_params};
 use ironclaw_safety::SafetyLayer;
+use ironclaw_skills::SkillTrust;
 
 /// Identifies where a tool dispatch originated.
 ///
@@ -41,6 +43,11 @@ pub enum DispatchSource {
     Channel(String),
     /// A routine engine operation.
     Routine { routine_id: Uuid },
+    /// A skill-originated operation with host-approved trust metadata.
+    Skill {
+        skill_name: String,
+        trust: SkillTrust,
+    },
     /// An internal system operation.
     System,
 }
@@ -50,6 +57,7 @@ impl std::fmt::Display for DispatchSource {
         match self {
             Self::Channel(name) => write!(f, "channel:{name}"),
             Self::Routine { routine_id } => write!(f, "routine:{routine_id}"),
+            Self::Skill { skill_name, trust } => write!(f, "skill:{skill_name}:{trust}"),
             Self::System => write!(f, "system"),
         }
     }
@@ -124,6 +132,17 @@ impl ToolDispatcher {
             self.registry.get_resolved(tool_name).await.ok_or_else(|| {
                 ToolError::ExecutionFailed(format!("tool not found: {tool_name}"))
             })?;
+
+        if let DispatchSource::Skill {
+            skill_name,
+            trust: SkillTrust::Installed,
+        } = &source
+            && !is_read_only_tool(&resolved_name)
+        {
+            return Err(ToolError::NotAuthorized(format!(
+                "installed skill `{skill_name}` may only dispatch read-only tools; `{resolved_name}` is not allowed"
+            )));
+        }
 
         // 1. Normalize parameters (coerce types, fill defaults).
         let normalized_params = prepare_tool_params(tool.as_ref(), &params);
@@ -253,6 +272,14 @@ mod tests {
         assert_eq!(
             DispatchSource::Routine { routine_id: id }.to_string(),
             format!("routine:{id}")
+        );
+        assert_eq!(
+            DispatchSource::Skill {
+                skill_name: "alpha".to_string(),
+                trust: SkillTrust::Installed,
+            }
+            .to_string(),
+            "skill:alpha:installed"
         );
         assert_eq!(DispatchSource::System.to_string(), "system");
     }
@@ -529,6 +556,41 @@ mod integration_tests {
         assert!(
             action.output_sanitized.is_some(),
             "output_sanitized should be populated on the audit row"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_installed_skill_source_blocks_mutating_tool() {
+        let (dispatcher, _backend, _db, registry, _dir) = test_dispatcher().await;
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        registry
+            .register(Arc::new(RecordingTool {
+                captured: Arc::clone(&captured),
+            }))
+            .await;
+
+        let result = dispatcher
+            .dispatch(
+                "recording_stub",
+                serde_json::json!({ "message": "blocked" }),
+                "tester",
+                DispatchSource::Skill {
+                    skill_name: "installed-skill".to_string(),
+                    trust: ironclaw_skills::SkillTrust::Installed,
+                },
+            )
+            .await;
+
+        match result {
+            Err(ToolError::NotAuthorized(message)) => {
+                assert!(message.contains("installed skill"));
+                assert!(message.contains("read-only"));
+            }
+            other => panic!("expected installed-skill dispatch denial, got {other:?}"),
+        }
+        assert!(
+            captured.lock().expect("captured lock").is_none(),
+            "tool must not execute after installed-skill ceiling denies dispatch"
         );
     }
 

@@ -40,6 +40,11 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "skill_search",
 ];
 
+/// Return whether a tool is permitted under an Installed-skill read-only ceiling.
+pub fn is_read_only_tool(tool_name: &str) -> bool {
+    READ_ONLY_TOOLS.contains(&tool_name)
+}
+
 /// Result of tool attenuation, including transparency information.
 #[derive(Debug, Clone)]
 pub struct AttenuationResult {
@@ -96,7 +101,7 @@ pub fn attenuate_tools(
             let mut removed = Vec::new();
 
             for tool in tools {
-                if READ_ONLY_TOOLS.contains(&tool.name.as_str()) {
+                if is_read_only_tool(&tool.name) {
                     kept.push(tool.clone());
                 } else {
                     removed.push(tool.name.clone());
