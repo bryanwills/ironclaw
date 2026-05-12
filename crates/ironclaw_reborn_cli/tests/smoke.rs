@@ -23,7 +23,118 @@ fn help_mentions_reborn_commands() {
     );
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
+    assert!(stdout.contains("models"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
+}
+
+#[test]
+fn models_list_reports_reborn_slots_without_reborn_home() {
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("list")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn models list should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn model slots"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("- default"), "stdout: {stdout}");
+    assert!(stdout.contains("- mission"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("routes: not-configured"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+}
+
+#[test]
+fn models_list_json_reports_reborn_slots_without_reborn_home() {
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("list")
+        .arg("--json")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn models list --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let slots = json["slots"].as_array().expect("slots array");
+    assert_eq!(slots.len(), 2);
+    assert!(slots.iter().any(|slot| slot["slot"] == "default"));
+    assert!(slots.iter().any(|slot| slot["slot"] == "mission"));
+    assert_eq!(json["routes"], "not-configured");
+    assert_eq!(json["v1_state"], "not-used");
+}
+
+#[test]
+fn models_status_reports_routes_not_configured() {
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("status")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn models status should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn model status"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("routes: not-configured"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("default: not-configured"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("mission: not-configured"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+}
+
+#[test]
+fn models_status_json_reports_routes_not_configured() {
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("status")
+        .arg("--json")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn models status --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["routes"], "not-configured");
+    assert_eq!(json["slots"]["default"], "not-configured");
+    assert_eq!(json["slots"]["mission"], "not-configured");
+    assert_eq!(json["v1_state"], "not-used");
 }
 
 #[test]

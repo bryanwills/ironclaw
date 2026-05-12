@@ -15,6 +15,10 @@ ironclaw-reborn --help
 ironclaw-reborn completion --shell bash
 ironclaw-reborn completion --shell zsh
 ironclaw-reborn doctor
+ironclaw-reborn models list
+ironclaw-reborn models list --json
+ironclaw-reborn models status
+ironclaw-reborn models status --json
 ironclaw-reborn run
 ```
 
@@ -55,6 +59,26 @@ Expected fields include:
 - `profile`
 - `v1_state: not-used`
 - `driver_registry: initialized`
+
+### `models list` / `models status`
+
+Shows Reborn model purpose slots and route status without resolving Reborn home, reading v1 provider settings, or creating directories.
+
+Routes are not configurable through Reborn CLI yet, so the command currently reports `not-configured` routes for built-in slots:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models list
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models list --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status --json
+```
+
+Expected fields include:
+
+- `default`
+- `mission`
+- `routes: not-configured`
+- `v1_state: not-used`
 
 ### `run`
 
@@ -116,6 +140,7 @@ cargo test -p ironclaw_architecture reborn
 cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >/tmp/ironclaw-reborn.zsh
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run
 ```
