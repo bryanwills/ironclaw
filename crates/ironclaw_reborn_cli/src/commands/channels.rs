@@ -34,14 +34,19 @@ impl ChannelsCommand {
 impl ChannelsListCommand {
     fn execute(self) -> anyhow::Result<()> {
         if self.json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "channels": [],
-                    "status": "not-wired",
-                    "v1_state": "not-used",
-                })
-            );
+            let mut output = serde_json::json!({
+                "configured": 0,
+                "channels": [],
+                "status": "not-wired",
+                "v1_state": "not-used",
+            });
+            if self.verbose {
+                output["details"] = serde_json::json!([
+                    "Reborn channel registry is not wired yet",
+                    "v1 channel configuration is intentionally not read"
+                ]);
+            }
+            println!("{}", output);
             return Ok(());
         }
 
