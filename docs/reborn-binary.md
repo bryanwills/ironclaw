@@ -16,6 +16,9 @@ ironclaw-reborn completion --shell bash
 ironclaw-reborn completion --shell zsh
 ironclaw-reborn doctor
 ironclaw-reborn run
+ironclaw-reborn skills list
+ironclaw-reborn skills list --json
+ironclaw-reborn skills list --verbose
 ```
 
 It intentionally does not yet support:
@@ -75,6 +78,24 @@ Expected fields include:
 - `driver_registry: initialized`
 - `runtime_shell: initialized`
 
+### `skills list`
+
+Reports configured Reborn skills without resolving Reborn home, reading v1 skill discovery paths, or creating directories.
+
+The Reborn skill catalog is not wired yet, so the command currently reports an explicit empty surface:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list --verbose
+```
+
+Expected fields include:
+
+- `configured: 0`
+- `status: not-wired`
+- `v1_state: not-used`
+
 ## State and config root
 
 Reborn must not use the current v1 IronClaw state root by default.
@@ -116,6 +137,7 @@ cargo test -p ironclaw_architecture reborn
 cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >/tmp/ironclaw-reborn.zsh
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run
 ```

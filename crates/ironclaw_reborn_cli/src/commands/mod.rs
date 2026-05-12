@@ -3,6 +3,7 @@ use clap::Subcommand;
 pub(crate) mod completion;
 pub(crate) mod doctor;
 pub(crate) mod run;
+pub(crate) mod skills;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
@@ -12,6 +13,8 @@ pub(crate) enum Command {
     Doctor(doctor::DoctorCommand),
     /// Initialize the minimal Reborn runtime shell and exit.
     Run(run::RunCommand),
+    /// Inspect configured Reborn skills.
+    Skills(skills::SkillsCommand),
 }
 
 impl Command {
@@ -24,6 +27,7 @@ impl Command {
             Self::Run(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
+            Self::Skills(command) => command.execute(),
         }
     }
 }

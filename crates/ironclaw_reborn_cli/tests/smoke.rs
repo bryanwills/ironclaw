@@ -24,6 +24,103 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
+    assert!(stdout.contains("skills"), "stdout: {stdout}");
+}
+
+#[test]
+fn skills_list_reports_unwired_empty_surface_without_reborn_home() {
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn skills list should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn skills"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("configured: 0"), "stdout: {stdout}");
+    assert!(stdout.contains("status: not-wired"), "stdout: {stdout}");
+    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+}
+
+#[test]
+fn skills_list_json_reports_empty_surface_without_reborn_home() {
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .arg("--json")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn skills list --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["configured"], 0);
+    assert_eq!(json["skills"].as_array().expect("skills array").len(), 0);
+    assert_eq!(json["status"], "not-wired");
+    assert_eq!(json["v1_state"], "not-used");
+}
+
+#[test]
+fn skills_list_verbose_explains_missing_reborn_catalog() {
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .arg("--verbose")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn skills list --verbose should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Reborn skill catalog is not wired yet"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn skills_list_json_verbose_includes_status_details() {
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .arg("--json")
+        .arg("--verbose")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn skills list --json --verbose should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let details = json["details"].as_array().expect("details array");
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail == "Reborn skill catalog is not wired yet"),
+        "json: {json}"
+    );
 }
 
 #[test]
