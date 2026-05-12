@@ -40,11 +40,24 @@ use crate::setup::prompts::{
     print_step, print_success, secret_input, select_many, select_one,
 };
 
-// unused const, keep commented for clarity / future use
-// const CHANNEL_INDEX_CLI: usize = 0;
+const CHANNEL_INDEX_CLI: usize = 0;
 const CHANNEL_INDEX_GATEWAY: usize = 1;
 const CHANNEL_INDEX_HTTP: usize = 2;
 const CHANNEL_INDEX_SIGNAL: usize = 3;
+
+/// Labels for the non-WASM channel options shown in Step 6's multi-select,
+/// in the order they appear. Indexed by `CHANNEL_INDEX_*` constants.
+///
+/// Single source of truth: `step_channels` uses this to build the option
+/// list, and `test_non_wasm_channel_labels_match_index_constants` verifies
+/// the index→label mapping. Reorder both together (constant *and* array
+/// entry) or the test fails.
+const NON_WASM_CHANNEL_LABELS: [&str; 4] = [
+    "CLI/TUI (always enabled)",
+    "Web Gateway (browser UI)",
+    "HTTP webhook",
+    "Signal",
+];
 const QUICK_PROFILE_LOCAL: &str = "local";
 const QUICK_PROFILE_LOCAL_SANDBOX: &str = "local-sandbox";
 
@@ -2632,19 +2645,23 @@ impl SetupWizard {
         // Build channel list from registry (if available) + bundled + discovered
         let wasm_channel_names = build_channel_options(&discovered_channels);
 
-        // Build options list dynamically.
-        // Index order is fixed and tracked by CHANNEL_INDEX_* constants.
+        // Build options list dynamically. Labels and indices are pinned
+        // by `NON_WASM_CHANNEL_LABELS` and the `CHANNEL_INDEX_*` constants;
+        // reorder them together or the regression test fails.
         let mut options: Vec<(String, bool)> = vec![
-            ("CLI/TUI (always enabled)".to_string(), true),
+            (NON_WASM_CHANNEL_LABELS[CHANNEL_INDEX_CLI].to_string(), true),
             (
-                "Web Gateway (browser UI)".to_string(),
+                NON_WASM_CHANNEL_LABELS[CHANNEL_INDEX_GATEWAY].to_string(),
                 self.settings.channels.gateway_enabled,
             ),
             (
-                "HTTP webhook".to_string(),
+                NON_WASM_CHANNEL_LABELS[CHANNEL_INDEX_HTTP].to_string(),
                 self.settings.channels.http_enabled,
             ),
-            ("Signal".to_string(), self.settings.channels.signal_enabled),
+            (
+                NON_WASM_CHANNEL_LABELS[CHANNEL_INDEX_SIGNAL].to_string(),
+                self.settings.channels.signal_enabled,
+            ),
         ];
 
         let non_wasm_count = options.len();
@@ -4013,16 +4030,30 @@ mod tests {
     }
 
     #[test]
-    fn test_channel_index_positions_match_option_order() {
-        // The channel multi-select uses fixed indices for the non-WASM options.
-        // If the option order in step_channels() changes, these indices must
-        // change too. This test pins the contract so a silent index drift
-        // (e.g. inserting a new option without updating constants) fails CI
-        // instead of silently turning the wrong setting on/off.
-        let labels = ["CLI/TUI", "Web Gateway", "HTTP webhook", "Signal"];
-        assert_eq!(labels[CHANNEL_INDEX_GATEWAY], "Web Gateway");
-        assert_eq!(labels[CHANNEL_INDEX_HTTP], "HTTP webhook");
-        assert_eq!(labels[CHANNEL_INDEX_SIGNAL], "Signal");
+    fn test_non_wasm_channel_labels_match_index_constants() {
+        // `step_channels` builds its non-WASM options list by indexing
+        // `NON_WASM_CHANNEL_LABELS` with the `CHANNEL_INDEX_*` constants.
+        // Reordering either the constants or the label array without
+        // updating the other would route enable/disable flags to the
+        // wrong channel — a silent and dangerous bug.
+        //
+        // This test pins the const-to-index contract that `step_channels`
+        // actually consumes. Reorder both together or this fails.
+        assert_eq!(
+            NON_WASM_CHANNEL_LABELS[CHANNEL_INDEX_CLI],
+            "CLI/TUI (always enabled)"
+        );
+        assert_eq!(
+            NON_WASM_CHANNEL_LABELS[CHANNEL_INDEX_GATEWAY],
+            "Web Gateway (browser UI)"
+        );
+        assert_eq!(NON_WASM_CHANNEL_LABELS[CHANNEL_INDEX_HTTP], "HTTP webhook");
+        assert_eq!(NON_WASM_CHANNEL_LABELS[CHANNEL_INDEX_SIGNAL], "Signal");
+        assert_eq!(
+            NON_WASM_CHANNEL_LABELS.len(),
+            4,
+            "adding a new non-WASM channel option requires a new CHANNEL_INDEX_* constant and a new array entry"
+        );
     }
 
     #[test]
