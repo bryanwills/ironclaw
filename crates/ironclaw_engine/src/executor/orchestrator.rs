@@ -3515,6 +3515,19 @@ mod tests {
         }
     }
 
+    fn eval_python_string(program: &str) -> String {
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::String(v) => v,
+            other => panic!("Expected string, got: {other:?}"),
+        }
+    }
+
     // ── __regex_match__ host function reachability ───────────────
 
     #[test]
@@ -3533,6 +3546,42 @@ mod tests {
         // Invalid pattern should return false silently (the host function
         // swallows the compile error).
         assert!(!eval_python_bool(r#"bool(__regex_match__("[", "abc"))"#));
+    }
+
+    #[test]
+    fn format_output_summarizes_generated_image_path_for_llm() {
+        let output = eval_python_string(
+            r#"
+result = {
+    "action_results": [{
+        "action_name": "image_generate",
+        "output": {
+            "type": "image_generated",
+            "data": "data:image/jpeg;base64,abc123",
+            "media_type": "image/jpeg",
+            "path": "/Users/sakura/.ironclaw/image-artifacts/default/thread/image.jpg",
+            "event_id": "event-1",
+        },
+        "is_error": False,
+    }]
+}
+FINAL(format_output(result))
+"#,
+        );
+        assert!(
+            output.contains(
+                "saved image artifact path is available at state['image_generate']['path']"
+            )
+        );
+        assert!(
+            output.contains(
+                "use state['image_generate']['path'] as image_path when calling image_edit"
+            )
+        );
+        assert!(output.contains("do not reveal this local path"));
+        assert!(output.contains("image data omitted from LLM context"));
+        assert!(!output.contains("data:image/jpeg;base64"));
+        assert!(!output.contains("/Users/sakura/.ironclaw/image-artifacts"));
     }
 
     // ── True positives (should trigger nudge) ───────────────────

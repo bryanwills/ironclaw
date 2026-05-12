@@ -191,6 +191,35 @@ def signals_execution_intent(text):
     return False
 
 
+def _is_generated_image_output(output):
+    return isinstance(output, dict) and output.get("type") == "image_generated"
+
+
+def _format_generated_image_output_for_llm(action_name, output):
+    """Summarize image output while keeping local artifact paths out of replies."""
+    parts = ["image generated"]
+
+    path = output.get("path", "")
+    if path:
+        state_path = "state['" + str(action_name) + "']['path']"
+        parts.append("saved image artifact path is available at " + state_path)
+        parts.append("use " + state_path + " as image_path when calling image_edit")
+        parts.append("do not reveal this local path or render it as Markdown in the final response")
+
+    media_type = output.get("media_type", "")
+    if media_type:
+        parts.append("media_type: " + str(media_type))
+
+    event_id = output.get("event_id", "")
+    if event_id:
+        parts.append("event_id: " + str(event_id))
+
+    if output.get("data"):
+        parts.append("image data omitted from LLM context")
+
+    return "; ".join(parts)
+
+
 def format_output(result, max_chars=8000):
     """Format code execution result for the next LLM context message."""
     parts = []
@@ -201,7 +230,11 @@ def format_output(result, max_chars=8000):
 
     for r in result.get("action_results", []):
         name = r.get("action_name", "?")
-        output = str(r.get("output", ""))
+        raw_output = r.get("output", "")
+        if _is_generated_image_output(raw_output):
+            output = _format_generated_image_output_for_llm(name, raw_output)
+        else:
+            output = str(raw_output)
         if r.get("is_error"):
             parts.append("[" + name + " ERROR] " + output)
         else:
@@ -229,10 +262,6 @@ def format_output(result, max_chars=8000):
         text = "[code executed, no output]"
 
     return text
-
-
-def _is_generated_image_output(output):
-    return isinstance(output, dict) and output.get("type") == "image_generated"
 
 
 def _persistable_action_result(r, max_output_chars=1000):

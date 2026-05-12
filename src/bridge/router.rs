@@ -1,5 +1,6 @@
 //! Engine v2 router — handles user messages via the engine when enabled.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -48,8 +49,6 @@ pub enum BridgeOutcome {
     Pending,
 }
 
-use std::collections::HashSet;
-
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
 pub fn is_engine_v2_enabled() -> bool {
     std::env::var("ENGINE_V2")
@@ -63,6 +62,117 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
         id: uuid::Uuid::nil(),
         reason: format!("engine v2 {context}: {e}"),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImageArtifactContextHint {
+    path: String,
+    media_type: Option<String>,
+}
+
+fn image_artifact_hints_from_tool_calls(content: &str) -> Vec<ImageArtifactContextHint> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Vec::new();
+    };
+    let calls = match &value {
+        serde_json::Value::Array(calls) => Some(calls),
+        serde_json::Value::Object(obj) => obj.get("calls").and_then(|calls| calls.as_array()),
+        _ => None,
+    };
+    let Some(calls) = calls else {
+        return Vec::new();
+    };
+
+    calls
+        .iter()
+        .filter_map(|call| call.get("result"))
+        .filter_map(GeneratedImageSentinel::from_value)
+        .filter_map(|sentinel| {
+            let path = sentinel.path()?.trim();
+            if path.is_empty() {
+                return None;
+            }
+            Some(ImageArtifactContextHint {
+                path: path.to_string(),
+                media_type: sentinel.media_type().map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+async fn recent_image_artifact_context_hints(
+    db: &Arc<dyn Database>,
+    conversation_id: uuid::Uuid,
+    limit: usize,
+) -> Vec<ImageArtifactContextHint> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let messages = match db.list_conversation_messages(conversation_id).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            debug!(
+                conversation_id = %conversation_id,
+                error = %error,
+                "engine v2: failed to load conversation images for context"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut hints = Vec::new();
+    let mut seen_paths = HashSet::new();
+    for message in messages.iter().rev() {
+        if message.role != "tool_calls" {
+            continue;
+        }
+        for hint in image_artifact_hints_from_tool_calls(&message.content)
+            .into_iter()
+            .rev()
+        {
+            if !seen_paths.insert(hint.path.clone()) {
+                continue;
+            }
+            hints.push(hint);
+            if hints.len() >= limit {
+                return hints;
+            }
+        }
+    }
+
+    hints
+}
+
+fn append_image_artifact_context_for_engine(
+    content: &str,
+    hints: &[ImageArtifactContextHint],
+) -> String {
+    if hints.is_empty() {
+        return content.to_string();
+    }
+
+    let mut image_context = String::from(
+        "<available_image_artifacts>\n\
+         These paths are internal tool inputs only. Do not reveal, quote, link, or render them in the user-facing final response.\n\
+         If the user asks to edit the current or previous image, call image_edit with the matching image_path.\n",
+    );
+    for (index, hint) in hints.iter().enumerate() {
+        let media_type = hint.media_type.as_deref().unwrap_or("image");
+        image_context.push_str(&format!(
+            "{}. media_type=\"{}\" image_path=\"{}\"\n",
+            index + 1,
+            media_type,
+            hint.path
+        ));
+    }
+    image_context.push_str("</available_image_artifacts>");
+
+    if content.trim().is_empty() {
+        image_context
+    } else {
+        format!("{content}\n\n{image_context}")
+    }
 }
 
 /// Build the `BridgeOutcome` for a `ThreadOutcome::Failed`.
@@ -4225,6 +4335,24 @@ async fn handle_with_engine_inner(
         .as_ref()
         .map(|result| result.text.as_str())
         .unwrap_or(content);
+    let scope = message.conversation_scope();
+    let engine_content = if let Some(ref db) = state.db {
+        let v1_conv_id = if let Some(tid) = scope {
+            uuid::Uuid::parse_str(tid).ok()
+        } else {
+            db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+                .await
+                .ok()
+        };
+        if let Some(v1_conv_id) = v1_conv_id {
+            let hints = recent_image_artifact_context_hints(db, v1_conv_id, 3).await;
+            append_image_artifact_context_for_engine(effective_content, &hints)
+        } else {
+            effective_content.to_string()
+        }
+    } else {
+        effective_content.to_string()
+    };
 
     // Fire any active OnEvent missions whose pattern (and optional channel
     // filter) match this inbound message. Mission firings here are side
@@ -4256,7 +4384,6 @@ async fn handle_with_engine_inner(
     // use it as part of the channel key so each v1 thread maps to a distinct
     // engine conversation. Without this, all threads share one conversation
     // and messages appear in the wrong place.
-    let scope = message.conversation_scope();
     let channel_key = match scope {
         Some(tid) => format!("{}:{}", message.channel, tid),
         None => message.channel.clone(),
@@ -4321,7 +4448,7 @@ async fn handle_with_engine_inner(
         .conversation_manager
         .handle_user_message(
             conv_id,
-            effective_content,
+            &engine_content,
             project_id,
             &message.user_id,
             thread_config,
@@ -4543,6 +4670,9 @@ fn spawn_post_park_continuation(
                                 let skip_verbose = !sse.has_verbose_receivers();
                                 let leak_detector = effect_adapter.safety().leak_detector();
                                 for mut app_event in thread_event_to_app_events(evt, &visible_thread_id) {
+                                    if app_event_is_already_forwarded_by_gateway_channel(&channel_name, &app_event) {
+                                        continue;
+                                    }
                                     if skip_verbose && app_event.is_verbose_only() {
                                         continue;
                                     }
@@ -4958,6 +5088,12 @@ async fn await_thread_outcome(
                             let skip_verbose = !sse.has_verbose_receivers();
                             let leak_detector = state.effect_adapter.safety().leak_detector();
                             for mut app_event in thread_event_to_app_events(evt, &tid_str) {
+                                if app_event_is_already_forwarded_by_gateway_channel(
+                                    channel_name,
+                                    &app_event,
+                                ) {
+                                    continue;
+                                }
                                 if skip_verbose && app_event.is_verbose_only() {
                                     continue;
                                 }
@@ -5653,14 +5789,34 @@ fn generated_image_info_from_result(
     }
 }
 
+fn v2_tool_call_dedupe_key(
+    action_name: &str,
+    call_id: Option<&str>,
+    result: &serde_json::Value,
+) -> String {
+    if let Some(call_id) = call_id.filter(|call_id| !call_id.is_empty()) {
+        return format!("{action_name}\u{1f}{call_id}");
+    }
+    format!(
+        "{action_name}\u{1f}{}",
+        tool_result_preview_for_v2_persistence(result)
+    )
+}
+
 fn append_persisted_v2_tool_call(
     calls: &mut Vec<serde_json::Value>,
     generated_images: &mut Vec<GeneratedImageInfo>,
+    seen: &mut HashSet<String>,
     action_name: &str,
     call_id: Option<&str>,
     result: &serde_json::Value,
     fallback_event_id: String,
 ) {
+    let dedupe_key = v2_tool_call_dedupe_key(action_name, call_id, result);
+    if !seen.insert(dedupe_key) {
+        return;
+    }
+
     let preview = tool_result_preview_for_v2_persistence(result);
     let mut obj = serde_json::json!({
         "name": action_name,
@@ -5796,6 +5952,7 @@ async fn persist_v2_tool_calls(
     // LLM-facing transcript on resume.
     let mut calls = Vec::new();
     let mut generated_images = Vec::new();
+    let mut seen_calls = HashSet::new();
     for (result_index, msg) in thread.internal_messages.iter().enumerate() {
         if msg.role != ironclaw_engine::MessageRole::ActionResult {
             continue;
@@ -5806,6 +5963,7 @@ async fn persist_v2_tool_calls(
         append_persisted_v2_tool_call(
             &mut calls,
             &mut generated_images,
+            &mut seen_calls,
             action_name,
             msg.action_call_id.as_deref(),
             &result,
@@ -5829,6 +5987,7 @@ async fn persist_v2_tool_calls(
             append_persisted_v2_tool_call(
                 &mut calls,
                 &mut generated_images,
+                &mut seen_calls,
                 action_name,
                 result_entry.get("call_id").and_then(|value| value.as_str()),
                 result_entry
@@ -6158,6 +6317,21 @@ fn redact_secrets_in_json(
         }
         _ => {}
     }
+}
+
+fn app_event_is_already_forwarded_by_gateway_channel(
+    channel_name: &str,
+    app_event: &AppEvent,
+) -> bool {
+    channel_name == GATEWAY_CHANNEL_NAME
+        && matches!(
+            app_event,
+            AppEvent::Thinking { .. }
+                | AppEvent::ToolStarted { .. }
+                | AppEvent::ToolCompleted { .. }
+                | AppEvent::Status { .. }
+                | AppEvent::SkillActivated { .. }
+        )
 }
 
 /// Convert a `ThreadEvent` to `AppEvent`s for the web gateway SSE stream.
@@ -7821,6 +7995,51 @@ mod tests {
     use super::test_support::ENGINE_STATE_TEST_LOCK;
     static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
+    #[test]
+    fn image_artifact_hints_parse_wrapped_tool_calls() {
+        let content = serde_json::json!({
+            "calls": [{
+                "name": "image_generate",
+                "result": serde_json::json!({
+                    "type": "image_generated",
+                    "data_omitted": true,
+                    "media_type": "image/png",
+                    "path": "/Users/sakura/.ironclaw/image-artifacts/default/thread/cat.png"
+                }).to_string()
+            }]
+        })
+        .to_string();
+
+        let hints = image_artifact_hints_from_tool_calls(&content);
+
+        assert_eq!(
+            hints,
+            vec![ImageArtifactContextHint {
+                path: "/Users/sakura/.ironclaw/image-artifacts/default/thread/cat.png".into(),
+                media_type: Some("image/png".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn image_artifact_context_is_engine_only_tool_guidance() {
+        let content = append_image_artifact_context_for_engine(
+            "make it black and white",
+            &[ImageArtifactContextHint {
+                path: "/Users/sakura/.ironclaw/image-artifacts/default/thread/cat.png".into(),
+                media_type: Some("image/png".into()),
+            }],
+        );
+
+        assert!(content.starts_with("make it black and white\n\n"));
+        assert!(content.contains("<available_image_artifacts>"));
+        assert!(content.contains(
+            "image_path=\"/Users/sakura/.ironclaw/image-artifacts/default/thread/cat.png\""
+        ));
+        assert!(content.contains("Do not reveal"));
+        assert!(content.contains("call image_edit"));
+    }
+
     // ──────────────────────────────────────────────────────────────────
     // `bridge_outcome_for_failed_thread` — caller-level coverage.
     //
@@ -8967,6 +9186,39 @@ mod tests {
                 && !success
                 && duration_ms == &Some(17)
                 && thread_id.as_deref() == Some("thread-123")
+        ));
+    }
+
+    #[test]
+    fn gateway_channel_skips_direct_sse_for_channel_forwarded_tool_events() {
+        let tool_event = AppEvent::ToolCompleted {
+            name: "image_generate".to_string(),
+            success: true,
+            error: None,
+            parameters: None,
+            call_id: Some("call-image-1".to_string()),
+            duration_ms: Some(42),
+            thread_id: Some("thread-123".to_string()),
+        };
+        assert!(app_event_is_already_forwarded_by_gateway_channel(
+            GATEWAY_CHANNEL_NAME,
+            &tool_event
+        ));
+        assert!(!app_event_is_already_forwarded_by_gateway_channel(
+            "telegram",
+            &tool_event
+        ));
+
+        let code_event = AppEvent::CodeExecuted {
+            code: "print('hello')".to_string(),
+            stdout: String::new(),
+            return_value: None,
+            duration_ms: 1,
+            thread_id: Some("thread-123".to_string()),
+        };
+        assert!(!app_event_is_already_forwarded_by_gateway_channel(
+            GATEWAY_CHANNEL_NAME,
+            &code_event
         ));
     }
 
@@ -12441,6 +12693,74 @@ mod tests {
             .expect("image result should be persisted");
         assert!(persisted_result.contains("\"type\":\"image_generated\""));
         assert!(persisted_result.contains("data:image/png;base64,code123"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_deduplicates_internal_and_metadata_results() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "code_call_1",
+            "image_generate",
+            r#"{"type":"image_generated","data":"data:image/png;base64,code123","media_type":"image/png","path":"workspace/code.png"}"#,
+        ));
+        thread.metadata = serde_json::json!({
+            (ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY): [{
+                "call_id": "code_call_1",
+                "action_name": "image_generate",
+                "output": {
+                    "type": "image_generated",
+                    "data": "data:image/png;base64,code123",
+                    "media_type": "image/png",
+                    "path": "workspace/code.png"
+                },
+                "is_error": false,
+                "duration": 10
+            }]
+        });
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "draw").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        let generated_images = persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+        assert_eq!(generated_images.len(), 1);
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "image_generate");
+        assert_eq!(calls[0]["tool_call_id"], "code_call_1");
     }
 
     #[cfg(feature = "libsql")]
