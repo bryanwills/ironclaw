@@ -63,8 +63,8 @@ use ironclaw_turns::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopRunContext,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopHostMilestoneKind, LoopRunContext,
+        RunScopedHookMilestoneSink, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -481,6 +481,83 @@ async fn non_matching_invocation_passes_through_to_inner_port() {
         invocations[0].as_str(),
         "cap.allowed",
         "inner port invoked with wrong capability"
+    );
+}
+
+#[tokio::test]
+async fn hook_dispatch_emits_milestones_into_host_sink() {
+    // Build a dispatcher with a run-scoped milestone sink attached *before*
+    // wrapping in Arc (per the documented composition order). Verify that
+    // hook activity surfaces in the host's milestone backend via the
+    // RunScopedHookMilestoneSink adapter.
+    let fixture = Fixture::new().await;
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let surface_version = fixture.surface_version.clone();
+
+    let hook_id = HookId::for_builtin(
+        "tests::hooks_integration::milestone_selective_deny",
+        HookVersion::ONE,
+    );
+    let binding = HookBinding {
+        hook_id,
+        hook_version: HookVersion::ONE,
+        trust_class: HookTrustClass::Builtin,
+        phase: HookPhase::Policy,
+        point: HookPointSpec::BeforeCapability,
+        poisoned: false,
+    };
+    let mut registry = HookRegistry::new();
+    registry.insert(binding).expect("registry insert succeeds");
+    let mut dispatcher = HookDispatcher::new(registry);
+    dispatcher.install_before_capability(
+        hook_id,
+        BeforeCapabilityHookImpl::Privileged(Box::new(SelectiveDenyHook {
+            target: "cap.blocked".to_string(),
+        })),
+    );
+    let hook_milestone_sink: Arc<RunScopedHookMilestoneSink> =
+        Arc::new(RunScopedHookMilestoneSink::new(
+            fixture.context.clone(),
+            Arc::clone(&fixture.milestone_sink) as _,
+        ));
+    dispatcher = dispatcher.with_milestone_sink(hook_milestone_sink);
+    let dispatcher = Arc::new(dispatcher);
+
+    let host = fixture
+        .factory()
+        .with_hook_dispatcher(dispatcher)
+        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
+        .await
+        .expect("host builds with hook dispatcher + telemetry installed");
+
+    let _ = host
+        .invoke_capability(invocation(&surface_version, "cap.blocked"))
+        .await
+        .expect("invoke returns an outcome");
+
+    let milestones = fixture.milestone_sink.milestones();
+    let mut saw_dispatched = false;
+    let mut saw_deny_decision = false;
+    for m in &milestones {
+        match &m.kind {
+            LoopHostMilestoneKind::HookDispatched { point, .. } if point == "before_capability" => {
+                saw_dispatched = true;
+            }
+            LoopHostMilestoneKind::HookDecisionEmitted { decision, .. } => {
+                if decision.kind_name() == "deny" {
+                    saw_deny_decision = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_dispatched,
+        "expected HookDispatched milestone in {milestones:?}"
+    );
+    assert!(
+        saw_deny_decision,
+        "expected deny decision milestone in {milestones:?}"
     );
 }
 
