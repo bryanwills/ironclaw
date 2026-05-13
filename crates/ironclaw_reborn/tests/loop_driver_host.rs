@@ -79,12 +79,12 @@ use ironclaw_turns::{
         FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopContextRequest, LoopDriverId, LoopDriverNoteKind,
-        LoopHostMilestone, LoopInlineMessage, LoopInlineMessageRole, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
-        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
-        ParentLoopOutput, PromptMode, SkillVisibility, StageCheckpointPayloadRequest,
-        VisibleCapabilityRequest,
+        LoopHostMilestone, LoopInlineMessage, LoopInlineMessageRole, LoopInputAckToken,
+        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
+        LoopModelGatewayError, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot,
+        LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopSafeSummary, ModelCallOutcome, ParentLoopOutput, PromptMode, SkillVisibility,
+        StageCheckpointPayloadRequest, VisibleCapabilityRequest,
     },
     runner::ClaimedTurnRun,
 };
@@ -112,7 +112,10 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         .await
         .unwrap();
     assert!(input.inputs.is_empty());
-    host_dyn.ack_inputs(input.next_cursor).await.unwrap();
+    host_dyn
+        .ack_inputs(input.input_acks.into_iter().map(|ack| ack.token).collect())
+        .await
+        .unwrap();
 
     let surface = host_dyn
         .visible_capabilities(VisibleCapabilityRequest)
@@ -2262,25 +2265,24 @@ async fn no_extra_loop_input_port_rejects_foreign_cursor() {
 }
 
 #[tokio::test]
-async fn no_extra_loop_input_port_ack_rejects_foreign_cursor() {
+async fn no_extra_loop_input_port_accepts_empty_ack_batch() {
     let fixture = HostFixture::new("thread-host-input-ack", "hello").await;
     let host = fixture.build_host().await;
-    let other_context = LoopRunContext::new(
-        fixture.context.scope.clone(),
-        fixture.context.turn_id,
-        TurnRunId::new(),
-        fixture.context.resolved_run_profile.clone(),
-    );
+
+    host.ack_inputs(Vec::new()).await.unwrap();
+}
+
+#[tokio::test]
+async fn no_extra_loop_input_port_rejects_unissued_ack_token() {
+    let fixture = HostFixture::new("thread-host-input-ack-forged", "hello").await;
+    let host = fixture.build_host().await;
 
     let error = host
-        .ack_inputs(LoopInputCursor::from_host_token(
-            &other_context,
-            LoopInputCursorToken::new("input-cursor:foreign-ack").unwrap(),
-        ))
+        .ack_inputs(vec![LoopInputAckToken::new("input-ack:forged").unwrap()])
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
 }
 
 #[tokio::test]

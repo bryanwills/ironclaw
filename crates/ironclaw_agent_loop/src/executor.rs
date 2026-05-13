@@ -13,8 +13,9 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityCallCandidate, CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome,
         CapabilityResultMessage, FinalizeAssistantMessage, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopInput, LoopInputCursor, LoopModelRequest, ParentLoopOutput,
-        StageCheckpointPayloadRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCheckpointRequest, LoopInput, LoopInputAckToken, LoopInputBatch, LoopModelRequest,
+        ParentLoopOutput, StageCheckpointPayloadRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -106,21 +107,23 @@ enum BatchStep {
 
 #[derive(Debug, Default)]
 struct PendingInputAck {
-    cursor: Option<LoopInputCursor>,
+    tokens: Vec<LoopInputAckToken>,
 }
 
 impl PendingInputAck {
     fn is_empty(&self) -> bool {
-        self.cursor.is_none()
+        self.tokens.is_empty()
     }
 
-    fn replace(&mut self, cursor: Option<LoopInputCursor>) -> Result<(), AgentLoopExecutorError> {
-        if cursor.is_some() && self.cursor.is_some() {
+    fn replace(&mut self, tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopExecutorError> {
+        if !tokens.is_empty() && !self.tokens.is_empty() {
             return Err(AgentLoopExecutorError::PlannerContract {
                 detail: "input ack was advanced before prior ack became durable",
             });
         }
-        self.cursor = cursor.or_else(|| self.cursor.take());
+        if !tokens.is_empty() {
+            self.tokens = tokens;
+        }
         Ok(())
     }
 
@@ -128,10 +131,11 @@ impl PendingInputAck {
         &mut self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<(), AgentLoopExecutorError> {
-        let Some(cursor) = self.cursor.take() else {
+        if self.tokens.is_empty() {
             return Ok(());
-        };
-        host.ack_inputs(cursor)
+        }
+        let tokens = std::mem::take(&mut self.tokens);
+        host.ack_inputs(tokens)
             .await
             .map_err(|_| AgentLoopExecutorError::HostUnavailable {
                 stage: HostStage::Input,
@@ -143,7 +147,7 @@ impl PendingInputAck {
 struct DrainedInputs {
     state: LoopExecutionState,
     drained: bool,
-    ack_cursor: Option<LoopInputCursor>,
+    ack_tokens: Vec<LoopInputAckToken>,
 }
 
 impl CanonicalAgentLoopExecutor {
@@ -171,7 +175,7 @@ impl CanonicalAgentLoopExecutor {
             if pending_input_ack.is_empty() && planner.drain().drain_steering(&state).await {
                 let drained = self.drain_user_inputs(host, state).await?;
                 state = drained.state;
-                pending_input_ack.replace(drained.ack_cursor)?;
+                pending_input_ack.replace(drained.ack_tokens)?;
             }
 
             let context_request = planner.context().plan_context_request(&state).await;
@@ -251,7 +255,7 @@ impl CanonicalAgentLoopExecutor {
                             if planner.drain().drain_followup(&state).await {
                                 let drained_inputs = self.drain_followup(host, state).await?;
                                 state = drained_inputs.state;
-                                pending_input_ack.replace(drained_inputs.ack_cursor)?;
+                                pending_input_ack.replace(drained_inputs.ack_tokens)?;
                                 if drained_inputs.drained {
                                     state.iteration = state.iteration.saturating_add(1);
                                     continue;
@@ -792,19 +796,12 @@ impl CanonicalAgentLoopExecutor {
             .map_err(|_| AgentLoopExecutorError::HostUnavailable {
                 stage: HostStage::Input,
             })?;
-        let consumed = input_batch_can_ack_user_facing_prefix(
-            &batch.inputs,
-            UserFacingInputDrainMode::Steering,
-        );
-        let mut ack_cursor = None;
-        if consumed {
-            ack_cursor = Some(batch.next_cursor.clone());
-            state.input_cursor = batch.next_cursor;
-        }
+        let (drained, ack_tokens) =
+            consume_user_facing_prefix(&batch, UserFacingInputDrainMode::Steering, &mut state)?;
         Ok(DrainedInputs {
             state,
-            drained: consumed,
-            ack_cursor,
+            drained,
+            ack_tokens,
         })
     }
 
@@ -819,19 +816,12 @@ impl CanonicalAgentLoopExecutor {
             .map_err(|_| AgentLoopExecutorError::HostUnavailable {
                 stage: HostStage::Input,
             })?;
-        let consumed = input_batch_can_ack_user_facing_prefix(
-            &batch.inputs,
-            UserFacingInputDrainMode::FollowUp,
-        );
-        let mut ack_cursor = None;
-        if consumed {
-            ack_cursor = Some(batch.next_cursor.clone());
-            state.input_cursor = batch.next_cursor;
-        }
+        let (drained, ack_tokens) =
+            consume_user_facing_prefix(&batch, UserFacingInputDrainMode::FollowUp, &mut state)?;
         Ok(DrainedInputs {
             state,
-            drained: consumed,
-            ack_cursor,
+            drained,
+            ack_tokens,
         })
     }
 }
@@ -842,19 +832,34 @@ enum UserFacingInputDrainMode {
     FollowUp,
 }
 
-fn input_batch_can_ack_user_facing_prefix(
-    inputs: &[LoopInput],
+fn consume_user_facing_prefix(
+    batch: &LoopInputBatch,
     mode: UserFacingInputDrainMode,
-) -> bool {
-    let prefix_len = inputs
+    state: &mut LoopExecutionState,
+) -> Result<(bool, Vec<LoopInputAckToken>), AgentLoopExecutorError> {
+    let prefix_len = batch
+        .inputs
         .iter()
         .take_while(|input| user_facing_input_matches_drain_mode(input, mode))
         .count();
 
-    // LoopInputBatch only exposes a cursor for the whole returned batch. If a
-    // control input appears after the user-facing prefix, do not ack a cursor
-    // that would skip over the unhandled control input.
-    prefix_len > 0 && prefix_len == inputs.len()
+    if prefix_len == 0 {
+        return Ok((false, Vec::new()));
+    }
+    if batch.input_acks.len() < prefix_len {
+        return Err(AgentLoopExecutorError::PlannerContract {
+            detail: "input batch omitted ack metadata for consumed inputs",
+        });
+    }
+    let last_ack = &batch.input_acks[prefix_len - 1];
+    state.input_cursor = last_ack.cursor.clone();
+    let ack_tokens = batch
+        .input_acks
+        .iter()
+        .take(prefix_len)
+        .map(|ack| ack.token.clone())
+        .collect();
+    Ok((true, ack_tokens))
 }
 
 fn user_facing_input_matches_drain_mode(input: &LoopInput, mode: UserFacingInputDrainMode) -> bool {
@@ -1143,14 +1148,14 @@ mod tests {
             CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceProfileId,
             CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
             ContextProfileId, LoopCancelReasonKind, LoopCheckpointRequest, LoopCheckpointStateRef,
-            LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputBatch, LoopInputCursor,
-            LoopInputCursorToken, LoopInterruptKind, LoopModelMessage, LoopModelResponse,
-            LoopProcessRef, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-            LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
-            ProcessHandleSummary, RedactedRunProfileProvenance, ResolvedRunProfile,
-            ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-            RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest,
-            SteeringPolicy,
+            LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken,
+            LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInterruptKind,
+            LoopModelMessage, LoopModelResponse, LoopProcessRef, LoopPromptBundle,
+            LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
+            ModelProfileId, ModelStreamChunk, ProcessHandleSummary, RedactedRunProfileProvenance,
+            ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+            RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+            StageCheckpointPayloadRequest, SteeringPolicy,
         },
     };
 
@@ -1170,7 +1175,7 @@ mod tests {
         model_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
         model_requests: Arc<Mutex<Vec<LoopModelRequest>>>,
         input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
-        acked_input_cursors: Arc<Mutex<Vec<LoopInputCursor>>>,
+        acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
         batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
         single_outcomes: Arc<Mutex<VecDeque<CapabilityOutcome>>>,
         checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
@@ -1190,7 +1195,7 @@ mod tests {
                 model_errors: Arc::new(Mutex::new(VecDeque::new())),
                 model_requests: Arc::new(Mutex::new(Vec::new())),
                 input_batches: Arc::new(Mutex::new(VecDeque::new())),
-                acked_input_cursors: Arc::new(Mutex::new(Vec::new())),
+                acked_input_tokens: Arc::new(Mutex::new(Vec::new())),
                 batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
                 single_outcomes: Arc::new(Mutex::new(VecDeque::new())),
                 checkpoints: Arc::new(Mutex::new(Vec::new())),
@@ -1250,8 +1255,8 @@ mod tests {
             self.model_requests.lock().expect("lock").clone()
         }
 
-        fn acked_input_cursors(&self) -> Vec<LoopInputCursor> {
-            self.acked_input_cursors.lock().expect("lock").clone()
+        fn acked_input_tokens(&self) -> Vec<LoopInputAckToken> {
+            self.acked_input_tokens.lock().expect("lock").clone()
         }
 
         fn staged_payloads(&self) -> Vec<StageCheckpointPayloadRequest> {
@@ -1325,16 +1330,20 @@ mod tests {
             }
             Ok(LoopInputBatch {
                 inputs: Vec::new(),
+                input_acks: Vec::new(),
                 next_cursor: after,
             })
         }
 
-        async fn ack_inputs(&self, cursor: LoopInputCursor) -> Result<(), AgentLoopHostError> {
+        async fn ack_inputs(
+            &self,
+            tokens: Vec<LoopInputAckToken>,
+        ) -> Result<(), AgentLoopHostError> {
             self.events
                 .lock()
                 .expect("lock")
                 .push("ack_inputs".to_string());
-            self.acked_input_cursors.lock().expect("lock").push(cursor);
+            self.acked_input_tokens.lock().expect("lock").extend(tokens);
             Ok(())
         }
     }
@@ -1602,8 +1611,9 @@ mod tests {
     #[tokio::test]
     async fn steering_drain_does_not_ack_cancel_before_user_message() {
         let host = MockHost::new(Vec::new());
-        let initial_cursor = LoopInputCursor::origin_for_run(host.run_context());
-        let next_cursor = input_cursor(host.run_context(), "input-cursor:after-cancel");
+        let run_context = host.run_context().clone();
+        let initial_cursor = LoopInputCursor::origin_for_run(&run_context);
+        let next_cursor = input_cursor(&run_context, "input-cursor:after-cancel");
         let host = host.with_input_batches(vec![LoopInputBatch {
             inputs: vec![
                 LoopInput::Cancel {
@@ -1612,6 +1622,14 @@ mod tests {
                 LoopInput::UserMessage {
                     message_ref: message_ref("msg:after-cancel"),
                 },
+            ],
+            input_acks: vec![
+                input_ack(&run_context, "input-cursor:cancel", "input-ack:cancel"),
+                input_ack(
+                    &run_context,
+                    "input-cursor:after-cancel",
+                    "input-ack:after-cancel",
+                ),
             ],
             next_cursor,
         }]);
@@ -1625,15 +1643,16 @@ mod tests {
 
         assert_eq!(next.state.input_cursor, initial_cursor);
         assert!(!next.drained);
-        assert!(next.ack_cursor.is_none());
-        assert!(host.acked_input_cursors().is_empty());
+        assert!(next.ack_tokens.is_empty());
+        assert!(host.acked_input_tokens().is_empty());
     }
 
     #[tokio::test]
     async fn followup_drain_does_not_ack_interrupt_before_followup() {
         let host = MockHost::new(Vec::new());
-        let initial_cursor = LoopInputCursor::origin_for_run(host.run_context());
-        let next_cursor = input_cursor(host.run_context(), "input-cursor:after-interrupt");
+        let run_context = host.run_context().clone();
+        let initial_cursor = LoopInputCursor::origin_for_run(&run_context);
+        let next_cursor = input_cursor(&run_context, "input-cursor:after-interrupt");
         let host = host.with_input_batches(vec![LoopInputBatch {
             inputs: vec![
                 LoopInput::Interrupt {
@@ -1642,6 +1661,18 @@ mod tests {
                 LoopInput::FollowUp {
                     message_ref: message_ref("msg:after-interrupt"),
                 },
+            ],
+            input_acks: vec![
+                input_ack(
+                    &run_context,
+                    "input-cursor:interrupt",
+                    "input-ack:interrupt",
+                ),
+                input_ack(
+                    &run_context,
+                    "input-cursor:after-interrupt",
+                    "input-ack:after-interrupt",
+                ),
             ],
             next_cursor,
         }]);
@@ -1652,18 +1683,24 @@ mod tests {
 
         assert!(!next.drained);
         assert_eq!(next.state.input_cursor, initial_cursor);
-        assert!(next.ack_cursor.is_none());
-        assert!(host.acked_input_cursors().is_empty());
+        assert!(next.ack_tokens.is_empty());
+        assert!(host.acked_input_tokens().is_empty());
     }
 
     #[tokio::test]
     async fn steering_drain_acks_only_after_cursor_checkpoint_is_durable() {
         let host = MockHost::new(vec![reply_response()]);
-        let next_cursor = input_cursor(host.run_context(), "input-cursor:after-user");
+        let run_context = host.run_context().clone();
+        let next_cursor = input_cursor(&run_context, "input-cursor:after-user");
         let host = host.with_input_batches(vec![LoopInputBatch {
             inputs: vec![LoopInput::UserMessage {
                 message_ref: message_ref("msg:user-drained"),
             }],
+            input_acks: vec![input_ack(
+                &run_context,
+                "input-cursor:after-user",
+                "input-ack:after-user",
+            )],
             next_cursor: next_cursor.clone(),
         }]);
         let executor = CanonicalAgentLoopExecutor;
@@ -1675,7 +1712,10 @@ mod tests {
             .expect("execute");
 
         assert!(matches!(exit, LoopExit::Completed(_)));
-        assert_eq!(host.acked_input_cursors(), vec![next_cursor]);
+        assert_eq!(
+            host.acked_input_tokens(),
+            vec![LoopInputAckToken::new("input-ack:after-user").expect("valid")]
+        );
         assert_eq!(
             host.events(),
             vec![
@@ -2009,6 +2049,13 @@ mod tests {
             context,
             LoopInputCursorToken::new(token).expect("valid input cursor token"),
         )
+    }
+
+    fn input_ack(context: &LoopRunContext, cursor_token: &str, ack_token: &str) -> LoopInputAck {
+        LoopInputAck {
+            cursor: input_cursor(context, cursor_token),
+            token: LoopInputAckToken::new(ack_token).expect("valid input ack token"),
+        }
     }
 
     fn message_ref(value: &str) -> LoopMessageRef {

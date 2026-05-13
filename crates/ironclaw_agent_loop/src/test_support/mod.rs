@@ -22,13 +22,13 @@ use ironclaw_turns::{
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage,
         LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-        LoopContextRequest, LoopDriverId, LoopInput, LoopInputBatch, LoopInputCursor,
-        LoopModelMessage, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
-        ModelProfileId, ModelStreamChunk, ParentLoopOutput, RedactedRunProfileProvenance,
-        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
+        ParentLoopOutput, RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
+        ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
+        SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
 };
@@ -548,13 +548,33 @@ impl ironclaw_turns::run_profile::LoopInputPort for MockAgentLoopDriverHost {
             .pending_inputs
             .pop_front()
             .unwrap_or_default();
+        let mut input_acks = Vec::with_capacity(inputs.len());
+        for (index, _) in inputs.iter().enumerate() {
+            let sequence = index + 1;
+            let cursor_token = LoopInputCursorToken::new(format!("input-cursor:script-{sequence}"))
+                .map_err(|reason| {
+                    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, reason)
+                })?;
+            let token = LoopInputAckToken::new(format!("input-ack:script-{sequence}")).map_err(
+                |reason| AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, reason),
+            )?;
+            input_acks.push(LoopInputAck {
+                cursor: LoopInputCursor::from_host_token(&self.run_context, cursor_token),
+                token,
+            });
+        }
+        let next_cursor = input_acks
+            .last()
+            .map(|ack| ack.cursor.clone())
+            .unwrap_or(after);
         Ok(LoopInputBatch {
             inputs,
-            next_cursor: after,
+            input_acks,
+            next_cursor,
         })
     }
 
-    async fn ack_inputs(&self, _cursor: LoopInputCursor) -> Result<(), AgentLoopHostError> {
+    async fn ack_inputs(&self, _tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError> {
         self.record_call(MockHostCall::AckInputs);
         Ok(())
     }
