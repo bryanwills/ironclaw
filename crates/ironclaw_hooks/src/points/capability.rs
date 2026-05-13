@@ -128,8 +128,17 @@ impl SanitizedArguments {
         value_to_decimal(target)
     }
 
-    /// Construct an unresolved view. Sealed to this crate.
-    pub(crate) fn unresolved() -> Self {
+    /// Construct an unresolved view. This is the safe default — predicates
+    /// that need to inspect arguments must fail closed against it, so
+    /// exposing the constructor cannot weaken any trust property. External
+    /// hook authors call this when building `BeforeCapabilityHookContext`
+    /// values for testing their own predicates without standing up the
+    /// full resolver wiring.
+    ///
+    /// The mirror constructor `from_json` stays sealed: that one performs
+    /// the sanitization (depth + size bounds) that is the trust boundary,
+    /// and external callers must not be able to bypass it.
+    pub fn unresolved() -> Self {
         Self {
             inner: SanitizedArgumentsInner::Unresolved,
         }
