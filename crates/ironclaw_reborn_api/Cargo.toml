@@ -1,0 +1,51 @@
+[package]
+name = "ironclaw_reborn_api"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Shared HTTP API infrastructure for IronClaw Reborn product surfaces (#3031)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Compile in-memory fakes for downstream consumer tests (WebChat v2, OpenAI-compat,
+# etc.). Off by default so production binaries don't carry the fake machinery.
+test-support = [
+    "ironclaw_product_adapters/test-support",
+    "ironclaw_product_workflow/test-support",
+]
+
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+http = "1"
+ironclaw_event_projections = { path = "../ironclaw_event_projections", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+tokio-stream = "0.1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "catch-panic"] }
+tracing = "0.1"
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+ironclaw_reborn_api = { path = ".", features = ["test-support"] }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
