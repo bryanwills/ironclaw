@@ -1464,13 +1464,34 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
         &self,
         request: LoopCheckpointRequest,
     ) -> Result<TurnCheckpointId, AgentLoopHostError> {
+        // `stage_checkpoint_payload` returns a run-scoped ref of the form
+        // `checkpoint:{run_id}:{token}`. The underlying store indexed the payload
+        // under the original `checkpoint:{token}` key (which `new_state_ref()`
+        // generated). Unwrap to the store key so the look-up succeeds, then pass
+        // the caller-supplied (run-scoped) ref through to the loop-checkpoint
+        // record so `is_for_run` validators see the correct form.
+        let run_scoped_prefix = format!("checkpoint:{}:", self.run_context.run_id);
+        let store_ref = if let Some(token) =
+            request.state_ref.as_str().strip_prefix(&run_scoped_prefix)
+        {
+            // Run-scoped ref → rebuild the store's original `checkpoint:{token}`.
+            LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    format!("could not rebuild store key from run-scoped checkpoint ref: {reason}"),
+                )
+            })?
+        } else {
+            request.state_ref.clone()
+        };
+
         let loaded = self
             .checkpoint_state_store
             .get_checkpoint_state(GetCheckpointStateRequest {
                 scope: self.run_context.scope.clone(),
                 turn_id: self.run_context.turn_id,
                 run_id: self.run_context.run_id,
-                state_ref: request.state_ref.clone(),
+                state_ref: store_ref,
                 schema_id: self.run_context.checkpoint_schema_id.clone(),
                 schema_version: self.run_context.checkpoint_schema_version,
                 kind: request.kind,
@@ -1531,7 +1552,24 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
             ))
             .await
             .map_err(turn_error_to_host_error)?;
-        Ok(record.state_ref)
+
+        // The store produces `checkpoint:{uuid}` refs. Wrap into the run-scoped
+        // form `checkpoint:{run_id}:{token}` so that `LoopCheckpointStateRef::
+        // is_for_run` validators accept the returned ref without treating it as
+        // a cross-run ref. The token is the opaque UUID the store already minted.
+        let raw = record.state_ref.as_str();
+        let token = raw.strip_prefix("checkpoint:").ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "checkpoint state store returned ref without expected `checkpoint:` prefix",
+            )
+        })?;
+        LoopCheckpointStateRef::for_run(&self.run_context, token).map_err(|reason| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("could not build run-scoped checkpoint state ref: {reason}"),
+            )
+        })
     }
 }
 

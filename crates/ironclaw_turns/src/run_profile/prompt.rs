@@ -291,8 +291,8 @@ mod tests {
     use crate::{
         RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            InMemoryLoopHostMilestoneSink, LoopInlineMessage, LoopInlineMessageRole,
-            LoopSafeSummary, ResolvedRunProfile,
+            InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+            LoopInlineMessage, LoopInlineMessageRole, LoopSafeSummary, ResolvedRunProfile,
         },
     };
 
@@ -337,6 +337,139 @@ mod tests {
             error.safe_summary,
             "inline_messages not yet supported by this prompt builder"
         );
+    }
+
+    /// A context port that returns configurable identity and body messages.
+    struct StubContextPort {
+        identity_messages: Vec<LoopContextMessage>,
+        messages: Vec<LoopContextMessage>,
+    }
+
+    impl StubContextPort {
+        fn new(
+            identity_messages: Vec<LoopContextMessage>,
+            messages: Vec<LoopContextMessage>,
+        ) -> Self {
+            Self {
+                identity_messages,
+                messages,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LoopContextPort for StubContextPort {
+        async fn load_loop_context(
+            &self,
+            _request: LoopContextRequest,
+        ) -> Result<LoopContextBundle, AgentLoopHostError> {
+            Ok(LoopContextBundle {
+                identity_messages: self.identity_messages.clone(),
+                messages: self.messages.clone(),
+                instruction_snippets: vec![],
+                memory_snippets: vec![],
+            })
+        }
+    }
+
+    /// `LoopContextMessage { message_ref: None, ... }` is a summary-only entry.
+    /// `HostManagedLoopPromptPort` must materialize a stable model message ref
+    /// from `safe_summary` instead of silently dropping the entry.
+    #[tokio::test]
+    async fn host_managed_prompt_port_materializes_summary_only_identity_messages() {
+        let context = test_context();
+        let summary_text = "You are a helpful assistant acting on behalf of the user.";
+        let identity_msg = LoopContextMessage {
+            message_ref: None,
+            role: "system".to_string(),
+            safe_summary: summary_text.to_string(),
+        };
+        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+        let port = HostManagedLoopPromptPort::new(
+            context.clone(),
+            Arc::new(StubContextPort::new(vec![identity_msg], vec![])),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .with_instruction_materialization_store(store.clone());
+
+        let bundle = port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(8),
+                inline_messages: vec![],
+            })
+            .await
+            .expect("bundle should succeed for summary-only identity message");
+
+        assert_eq!(
+            bundle.messages.len(),
+            1,
+            "summary-only identity message must appear in the bundle (not be dropped)"
+        );
+        let msg = &bundle.messages[0];
+        assert_eq!(msg.role, "system");
+        assert!(
+            msg.content_ref.as_str().starts_with("msg:identity-summary."),
+            "summary-only identity ref must use the msg:identity-summary. prefix, got: {}",
+            msg.content_ref.as_str()
+        );
+        let materialized = store
+            .get_materialized_message(&context, &msg.content_ref)
+            .unwrap()
+            .expect("summary-only identity message should be materialized");
+        assert_eq!(materialized.safe_content, summary_text);
+    }
+
+    /// A summary-only entry in the main messages list (not just identity_messages)
+    /// must also be materialized, not dropped.
+    #[tokio::test]
+    async fn host_managed_prompt_port_materializes_summary_only_body_messages() {
+        let context = test_context();
+        let summary_only = LoopContextMessage {
+            message_ref: None,
+            role: "user".to_string(),
+            safe_summary: "What is the capital of France?".to_string(),
+        };
+        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+        let port = HostManagedLoopPromptPort::new(
+            context.clone(),
+            Arc::new(StubContextPort::new(vec![], vec![summary_only])),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .with_instruction_materialization_store(store.clone());
+
+        let bundle = port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(8),
+                inline_messages: vec![],
+            })
+            .await
+            .expect("bundle should succeed for summary-only body message");
+
+        assert_eq!(
+            bundle.messages.len(),
+            1,
+            "summary-only body message must appear in the bundle (not be dropped)"
+        );
+        assert!(
+            bundle.messages[0]
+                .content_ref
+                .as_str()
+                .starts_with("msg:context-summary."),
+            "summary-only ref must use the msg:context-summary. prefix"
+        );
+        let materialized = store
+            .get_materialized_message(&context, &bundle.messages[0].content_ref)
+            .unwrap()
+            .expect("summary-only body message should be materialized");
+        assert_eq!(materialized.safe_content, "What is the capital of France?");
     }
 
     fn test_context() -> LoopRunContext {

@@ -93,50 +93,23 @@ impl LoopExecutionState {
 
     /// Rehydrates state from a checkpoint payload's bytes.
     ///
-    /// The bytes come from `LoopCheckpointPort::load_checkpoint_payload(...)`
-    /// (defined in WS-10) — checkpoint storage is byte-oriented, not
-    /// `serde_json::Value`-oriented. Schema validation lives here: the
-    /// payload's `schema_id` must match [`CHECKPOINT_SCHEMA_ID`] and the
-    /// payload's recorded checkpoint kind must match the `kind` argument,
-    /// which is the boundary the checkpoint was taken at (carried in metadata
-    /// recorded alongside the bytes).
+    /// The bytes are the raw JSON-serialized `LoopExecutionState` — i.e. what
+    /// the executor produced via `serde_json::to_vec(&state)` before passing
+    /// the bytes to `LoopCheckpointPort::stage_checkpoint_payload`. The payload
+    /// contains **no outer envelope**: schema-id and kind live in store-side
+    /// metadata, validated by `CheckpointStateStore::get_checkpoint_state`
+    /// before the bytes ever reach this function. The `kind` argument is
+    /// accepted for API symmetry (the call site can document what boundary the
+    /// checkpoint belongs to) but is not used to authenticate the bytes.
     pub fn from_checkpoint_payload(
         payload: &[u8],
-        kind: CheckpointKind,
+        _kind: CheckpointKind,
     ) -> Result<Self, CheckpointPayloadError> {
-        let envelope: CheckpointPayloadEnvelope =
-            serde_json::from_slice(payload).map_err(|error| {
-                CheckpointPayloadError::InvalidField {
-                    field: "payload",
-                    reason: error.to_string(),
-                }
-            })?;
-        if envelope.schema_id != CHECKPOINT_SCHEMA_ID {
-            return Err(CheckpointPayloadError::SchemaMismatch {
-                expected: CHECKPOINT_SCHEMA_ID.to_string(),
-                actual: envelope.schema_id,
-            });
-        }
-        if envelope.kind != kind {
-            return Err(CheckpointPayloadError::KindMismatch {
-                expected: kind,
-                actual: envelope.kind,
-            });
-        }
-        serde_json::from_value(envelope.state).map_err(|error| {
-            CheckpointPayloadError::InvalidField {
-                field: "state",
-                reason: error.to_string(),
-            }
+        serde_json::from_slice(payload).map_err(|error| CheckpointPayloadError::InvalidField {
+            field: "payload",
+            reason: error.to_string(),
         })
     }
-}
-
-#[derive(serde::Deserialize)]
-struct CheckpointPayloadEnvelope {
-    schema_id: String,
-    kind: CheckpointKind,
-    state: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -259,17 +232,12 @@ mod tests {
         LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile)
     }
 
-    fn encode_payload(
-        kind: CheckpointKind,
-        state: &LoopExecutionState,
-        schema_id: &str,
-    ) -> Vec<u8> {
-        serde_json::to_vec(&json!({
-            "schema_id": schema_id,
-            "kind": kind,
-            "state": state,
-        }))
-        .expect("encode payload")
+    /// Encode a checkpoint payload the same way the executor does:
+    /// `serde_json::to_vec(&state)` — no outer envelope.
+    /// Schema-id and kind are stored as side-channel metadata by
+    /// `CheckpointStateStore::put_checkpoint_state`, not inside the bytes.
+    fn encode_payload(state: &LoopExecutionState) -> Vec<u8> {
+        serde_json::to_vec(state).expect("encode payload")
     }
 
     #[test]
@@ -463,41 +431,15 @@ mod tests {
         assert_eq!(gate_restored, gate);
     }
 
+    /// Schema-id and kind validation now live in the store layer
+    /// (`CheckpointStateStore::get_checkpoint_state`) — not in the payload
+    /// bytes. `from_checkpoint_payload` therefore succeeds for any
+    /// well-formed `LoopExecutionState` regardless of what kind is passed.
     #[test]
-    fn checkpoint_payload_rejects_schema_mismatch() {
+    fn checkpoint_payload_round_trips_raw_state_bytes() {
         let context = test_run_context();
         let state = LoopExecutionState::initial_for_run(&context);
-        let payload = encode_payload(CheckpointKind::BeforeModel, &state, "reborn:other-loop-v1");
-
-        assert_eq!(
-            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeModel),
-            Err(CheckpointPayloadError::SchemaMismatch {
-                expected: CHECKPOINT_SCHEMA_ID.to_string(),
-                actual: "reborn:other-loop-v1".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn checkpoint_payload_rejects_kind_mismatch() {
-        let context = test_run_context();
-        let state = LoopExecutionState::initial_for_run(&context);
-        let payload = encode_payload(CheckpointKind::BeforeModel, &state, CHECKPOINT_SCHEMA_ID);
-
-        assert_eq!(
-            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::Final),
-            Err(CheckpointPayloadError::KindMismatch {
-                expected: CheckpointKind::Final,
-                actual: CheckpointKind::BeforeModel,
-            })
-        );
-    }
-
-    #[test]
-    fn checkpoint_payload_round_trips() {
-        let context = test_run_context();
-        let state = LoopExecutionState::initial_for_run(&context);
-        let payload = encode_payload(CheckpointKind::BeforeModel, &state, CHECKPOINT_SCHEMA_ID);
+        let payload = encode_payload(&state);
 
         let restored =
             LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeModel)
@@ -506,7 +448,40 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_payload_kind_arg_is_accepted_for_any_valid_state() {
+        // kind is metadata — passing Final for bytes encoded without a kind
+        // label must still succeed, because kind authentication happens at the
+        // store boundary before bytes are handed to from_checkpoint_payload.
+        let context = test_run_context();
+        let state = LoopExecutionState::initial_for_run(&context);
+        let payload = encode_payload(&state);
+
+        let result = LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::Final);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), state);
+    }
+
+    #[test]
+    fn checkpoint_payload_rejects_malformed_bytes() {
+        // Non-JSON bytes must still fail with InvalidField { field: "payload" }.
+        let result = LoopExecutionState::from_checkpoint_payload(
+            b"not json at all",
+            CheckpointKind::BeforeModel,
+        );
+
+        assert!(matches!(
+            result,
+            Err(CheckpointPayloadError::InvalidField {
+                field: "payload",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn checkpoint_payload_rejects_bounded_ring_over_capacity() {
+        // Raw state bytes with an over-capacity BoundedRing must fail on
+        // deserialization (the BoundedRing Deserialize impl enforces capacity).
         let context = test_run_context();
         let mut state =
             serde_json::to_value(LoopExecutionState::initial_for_run(&context)).unwrap();
@@ -525,19 +500,18 @@ mod tests {
                 .unwrap()
             ));
         }
-        let bytes = serde_json::to_vec(&json!({
-            "schema_id": CHECKPOINT_SCHEMA_ID,
-            "kind": CheckpointKind::BeforeModel,
-            "state": state,
-        }))
-        .unwrap();
+        // Encode as raw state bytes (no envelope).
+        let bytes = serde_json::to_vec(&state).unwrap();
 
         let result =
             LoopExecutionState::from_checkpoint_payload(&bytes, CheckpointKind::BeforeModel);
 
         assert!(matches!(
             result,
-            Err(CheckpointPayloadError::InvalidField { field: "state", .. })
+            Err(CheckpointPayloadError::InvalidField {
+                field: "payload",
+                ..
+            })
         ));
     }
 }
