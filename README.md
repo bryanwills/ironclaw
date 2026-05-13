@@ -293,6 +293,82 @@ External content passes through multiple security layers:
 | **Workspace** | Persistent memory with hybrid search |
 | **Safety Layer** | Prompt injection defense and content sanitization |
 
+### Reborn Crate Map
+
+IronClaw Reborn splits the host into 45 narrow Rust crates under [`crates/`](crates/). Authority, persistence, runtime dispatch, and product surfaces each own their own boundary. See [`crates/README.md`](crates/README.md) for the full map; the groups below summarize where to look.
+
+**Core vocabulary and shared contracts**
+
+| Crate | Role |
+| --- | --- |
+| [`ironclaw_common`](crates/ironclaw_common) | Shared workspace types and utilities (kept small). |
+| [`ironclaw_host_api`](crates/ironclaw_host_api) | Canonical Reborn authority vocabulary: actors, scopes, policies, capability requests, decisions, obligations. |
+| [`ironclaw_runtime_policy`](crates/ironclaw_runtime_policy) | Resolves runtime profiles from host configuration and policy inputs. |
+| [`ironclaw_architecture`](crates/ironclaw_architecture) | Workspace architecture contract tests; fails builds when crate-dependency boundaries drift. |
+
+**Authority, safety, and policy gates**
+
+| Crate | Role |
+| --- | --- |
+| [`ironclaw_authorization`](crates/ironclaw_authorization) | Evaluates host-API authority contracts before capability execution. |
+| [`ironclaw_approvals`](crates/ironclaw_approvals) | Durable approval requests and scoped authorization leases. |
+| [`ironclaw_trust`](crates/ironclaw_trust) | Host-controlled trust-class policy engine. |
+| [`ironclaw_resources`](crates/ironclaw_resources) | Resource reservation governor (budgets, reservations). |
+| [`ironclaw_safety`](crates/ironclaw_safety) | Prompt-injection defense, input validation, secret-leak detection. |
+| [`ironclaw_secrets`](crates/ironclaw_secrets) | Tenant-scoped secret storage and leasing via opaque `SecretHandle`. |
+| [`ironclaw_network`](crates/ironclaw_network) | Network policy and HTTP egress boundary (DNS, allowlists, host-mediated outbound). |
+| [`ironclaw_filesystem`](crates/ironclaw_filesystem) | Scoped filesystem service for host-controlled path access. |
+
+**Capability execution and runtime lanes**
+
+| Crate | Role |
+| --- | --- |
+| [`ironclaw_capabilities`](crates/ironclaw_capabilities) | Caller-facing capability invocation host. Coordinates authorization, approvals, run-state, and dispatch. |
+| [`ironclaw_dispatcher`](crates/ironclaw_dispatcher) | Composition-only runtime dispatch contracts; wires validated descriptors to runtime lanes. |
+| [`ironclaw_processes`](crates/ironclaw_processes) | Host-tracked background process lifecycle. |
+| [`ironclaw_scripts`](crates/ironclaw_scripts) | Script/CLI capability runner contracts. |
+| [`ironclaw_mcp`](crates/ironclaw_mcp) | Adapts manifest-declared MCP tools into IronClaw capabilities. |
+| [`ironclaw_wasm`](crates/ironclaw_wasm) | Reborn WASM component runtime lane (component model / WIT). |
+| [`ironclaw_wasm_product_adapters`](crates/ironclaw_wasm_product_adapters) | WASM-side adapters bridging guest components into product-facing shapes. |
+| [`ironclaw_extensions`](crates/ironclaw_extensions) | Extension manifest, lifecycle, and registration contracts. |
+| [`ironclaw_host_runtime`](crates/ironclaw_host_runtime) | Narrow `HostRuntime` facade and production composition around capability hosting. |
+
+**Durable state, eventing, and read models**
+
+| Crate | Role |
+| --- | --- |
+| [`ironclaw_events`](crates/ironclaw_events) | Redacted runtime/audit vocabulary plus durable append-log traits. |
+| [`ironclaw_reborn_event_store`](crates/ironclaw_reborn_event_store) | Concrete Reborn event/audit store backends and backend-profile validation. |
+| [`ironclaw_event_projections`](crates/ironclaw_event_projections) | Product-facing read models over durable runtime and audit logs. |
+| [`ironclaw_run_state`](crates/ironclaw_run_state) | Current lifecycle state for host-managed invocations. |
+| [`ironclaw_threads`](crates/ironclaw_threads) | Canonical session-thread and transcript service contracts. |
+| [`ironclaw_conversations`](crates/ironclaw_conversations) | Conversation binding tying product conversations to Reborn threads. |
+| [`ironclaw_memory`](crates/ironclaw_memory) | Memory document service adapters (workspace/memory semantics). |
+| [`ironclaw_outbound`](crates/ironclaw_outbound) | Metadata-only outbound state: notification policy, subscription cursors, delivery status. |
+| [`ironclaw_storage`](crates/ironclaw_storage) | Shared storage primitives used by event/state backends. |
+
+**Reborn composition, agent loop, and product surfaces**
+
+| Crate | Role |
+| --- | --- |
+| [`ironclaw_reborn`](crates/ironclaw_reborn) | Standalone Reborn composition and adapters (package: `llm_gateway`). |
+| [`ironclaw_reborn_composition`](crates/ironclaw_reborn_composition) | Wiring layer that assembles Reborn services for the host runtime. |
+| [`ironclaw_reborn_config`](crates/ironclaw_reborn_config) | Reborn boot-config boundary: typed config, profiles, and validation. |
+| [`ironclaw_reborn_cli`](crates/ironclaw_reborn_cli) | Reborn-first CLI surface (command modules, completion, shell). |
+| [`ironclaw_loop_support`](crates/ironclaw_loop_support) | Adapts durable Reborn boundaries into the narrow agent-loop host port. |
+| [`ironclaw_turns`](crates/ironclaw_turns) | Host-layer turn coordination contracts. |
+| [`ironclaw_product_adapters`](crates/ironclaw_product_adapters) | Product-adapter contracts mapping Reborn state/events into product shapes. |
+| [`ironclaw_product_workflow`](crates/ironclaw_product_workflow) | Product workflow facade: inbound turn service, idempotency ledger, binding resolution. |
+| [`ironclaw_engine`](crates/ironclaw_engine) | Unified thread / capability / CodeAct execution engine. |
+| [`ironclaw_llm`](crates/ironclaw_llm) | LLM provider routing and abstraction. |
+| [`ironclaw_skills`](crates/ironclaw_skills) | Skill selection, scoring, and management. |
+| [`ironclaw_gateway`](crates/ironclaw_gateway) | Browser gateway frontend assets, layout, and widget extension system. |
+| [`ironclaw_tui`](crates/ironclaw_tui) | Modular Ratatui-based terminal UI. |
+| [`ironclaw_telegram_v2_adapter`](crates/ironclaw_telegram_v2_adapter) | Telegram v2 channel adapter for the Reborn product surface. |
+| [`ironclaw_silk_decoder`](crates/ironclaw_silk_decoder) | Standalone WeChat `audio/silk` decoder helper (built separately; needs `libclang`). |
+
+Rule of thumb: if a change adds new authority or persistence, put it in the crate that owns that boundary instead of threading it through a UI or runtime crate.
+
 ## Usage
 
 Engine v2 is opt-in right now. If you want to run the new engine instead of the legacy agent loop, start IronClaw with `ENGINE_V2=true`. See [Engine v2 architecture](docs/internal/engine-v2-architecture.md#enabling-engine-v2) for more details.
