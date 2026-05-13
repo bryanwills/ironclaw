@@ -38,7 +38,7 @@ use ironclaw_hooks::installed_hook::PredicateBackedBeforeCapabilityHook;
 use ironclaw_hooks::ordering::HookPhase;
 use ironclaw_hooks::points::BeforeCapabilityHookContext;
 use ironclaw_hooks::predicate::{CapabilityPredicate, HookPredicateSpec};
-use ironclaw_hooks::registry::HookRegistry;
+use ironclaw_hooks::registry::{HookBindingScope, HookRegistry};
 use ironclaw_hooks::sink::{
     PrivilegedBeforeCapabilityHook, PrivilegedGateSink, RestrictedBeforeCapabilityHook,
     RestrictedGateSink,
@@ -221,6 +221,8 @@ fn pause_approval_dispatcher() -> Arc<HookDispatcher> {
         .install_installed_before_capability(
             hook_id,
             HookPhase::Policy,
+            ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
+            HookBindingScope::Global,
             Box::new(PauseApprovalHook),
         )
         .expect("install pause-approval hook");
@@ -250,7 +252,13 @@ fn predicate_deny_dispatcher() -> Arc<HookDispatcher> {
 
     let mut dispatcher = HookDispatcher::new(HookRegistry::new());
     dispatcher
-        .install_installed_before_capability(hook_id, HookPhase::Policy, Box::new(hook))
+        .install_installed_before_capability(
+            hook_id,
+            HookPhase::Policy,
+            ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
+            HookBindingScope::Global,
+            Box::new(hook),
+        )
         .expect("Installed-tier predicate hook installs at policy phase");
     Arc::new(dispatcher)
 }
@@ -637,4 +645,74 @@ async fn pause_approval_hook_surfaces_as_approval_required_with_real_gate_ref() 
         "inner port must NOT be invoked when a hook pauses; got {:?}",
         inner.invocations()
     );
+}
+
+/// C3 regression: a deny hook authored by ext-A and scoped to
+/// `OwnCapabilities` must NOT intercept invocations whose provider is unknown
+/// (or belongs to a different extension). The conservative default for an
+/// unresolved provider is "do not fire", so the inner port runs and completes
+/// the call normally — proving manifest-declared scope is enforced at
+/// dispatch time, not just parsed at install.
+#[tokio::test]
+async fn installed_hook_with_own_scope_does_not_fire_on_other_provider_capabilities() {
+    let fixture = Fixture::new().await;
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let surface_version = fixture.surface_version.clone();
+
+    // Build a dispatcher with an Installed-tier always-deny hook authored by
+    // ext-A and scoped to OwnCapabilities. With the default null provider
+    // resolver in the factory, every invocation surfaces as
+    // `ctx.provider == None`, which never satisfies OwnCapabilities.
+    let hook_id = HookId::derive(
+        &ExtensionId("ext-a".to_string()),
+        "0.0.1",
+        &HookLocalId("c3-own-scope-deny".to_string()),
+        HookVersion::ONE,
+    );
+    struct AlwaysDeny;
+    #[async_trait]
+    impl RestrictedBeforeCapabilityHook for AlwaysDeny {
+        async fn evaluate(
+            &self,
+            _ctx: &BeforeCapabilityHookContext,
+            sink: &mut dyn RestrictedGateSink,
+        ) {
+            sink.deny("c3-own-scope-deny-fired");
+        }
+    }
+    let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+    dispatcher
+        .install_installed_before_capability(
+            hook_id,
+            HookPhase::Policy,
+            ironclaw_host_api::ExtensionId::new("ext-a").expect("valid ext id"),
+            HookBindingScope::OwnCapabilities,
+            Box::new(AlwaysDeny),
+        )
+        .expect("install installed hook with own-scope");
+
+    let host = fixture
+        .factory()
+        .with_hook_dispatcher(Arc::new(dispatcher))
+        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
+        .await
+        .expect("host builds with hook dispatcher installed");
+
+    let outcome = host
+        .invoke_capability(invocation(&surface_version, "cap.blocked"))
+        .await
+        .expect("invoke_capability returns an outcome");
+
+    assert!(
+        matches!(outcome, CapabilityOutcome::Completed(_)),
+        "OwnCapabilities-scoped ext-A hook must not fire when the provider \
+         is unknown; the inner port must complete the call. Got {outcome:?}"
+    );
+    let invocations = inner.invocations();
+    assert_eq!(
+        invocations.len(),
+        1,
+        "inner port should have been invoked exactly once; got {invocations:?}"
+    );
+    assert_eq!(invocations[0].as_str(), "cap.blocked");
 }

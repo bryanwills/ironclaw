@@ -24,7 +24,8 @@ use crate::error::HookError;
 use crate::evaluator::PredicateEvaluator;
 use crate::identity::{ExtensionId, HookId, HookVersion};
 use crate::installed_hook::PredicateBackedBeforeCapabilityHook;
-use crate::manifest::{HookManifestBody, HookManifestEntry, HookManifestKind};
+use crate::manifest::{HookManifestBody, HookManifestEntry, HookManifestKind, HookManifestScope};
+use crate::registry::HookBindingScope;
 
 /// Converts validated [`HookManifestEntry`] values into installed bindings +
 /// dispatcher impls. One registrar per run; the shared
@@ -46,14 +47,26 @@ impl HookRegistrar {
     /// semantics should build into a scratch dispatcher first.
     pub fn install(
         &self,
-        extension: ExtensionId,
+        extension: ironclaw_host_api::ExtensionId,
         extension_version: String,
         entries: Vec<HookManifestEntry>,
         dispatcher: &mut HookDispatcher,
     ) -> Result<Vec<HookId>, HookError> {
+        // Mirror the host-validated `ExtensionId` into the content-addressed
+        // identity wrapper used by `HookId::derive`. The two types coexist:
+        // `ironclaw_host_api::ExtensionId` is the authority-bearing identifier
+        // (validated, comparable across the host); `crate::identity::ExtensionId`
+        // is a transparent string newtype the hash derivation consumes.
+        let identity_extension = ExtensionId(extension.as_str().to_string());
         let mut installed = Vec::with_capacity(entries.len());
         for entry in entries {
-            let hook_id = self.install_one(&extension, &extension_version, entry, dispatcher)?;
+            let hook_id = self.install_one(
+                &extension,
+                &identity_extension,
+                &extension_version,
+                entry,
+                dispatcher,
+            )?;
             installed.push(hook_id);
         }
         Ok(installed)
@@ -61,7 +74,8 @@ impl HookRegistrar {
 
     fn install_one(
         &self,
-        extension: &ExtensionId,
+        owning_extension: &ironclaw_host_api::ExtensionId,
+        identity_extension: &ExtensionId,
         extension_version: &str,
         entry: HookManifestEntry,
         dispatcher: &mut HookDispatcher,
@@ -74,7 +88,13 @@ impl HookRegistrar {
         })?;
 
         let hook_version = HookVersion::ONE;
-        let hook_id = HookId::derive(extension, extension_version, &entry.id, hook_version);
+        let hook_id = HookId::derive(
+            identity_extension,
+            extension_version,
+            &entry.id,
+            hook_version,
+        );
+        let binding_scope = manifest_scope_to_binding_scope(entry.scope);
 
         match entry.body {
             HookManifestBody::Predicate { spec } => match entry.kind {
@@ -87,6 +107,8 @@ impl HookRegistrar {
                     dispatcher.install_installed_before_capability(
                         hook_id,
                         entry.phase,
+                        owning_extension.clone(),
+                        binding_scope,
                         Box::new(hook),
                     )?;
                 }
@@ -111,6 +133,16 @@ impl HookRegistrar {
     }
 }
 
+/// Map the manifest-declared scope to the dispatcher's runtime scope. The
+/// manifest enum is parsed at install time; the dispatcher consults the
+/// runtime enum on every invocation, so we eagerly translate here.
+fn manifest_scope_to_binding_scope(scope: HookManifestScope) -> HookBindingScope {
+    match scope {
+        HookManifestScope::OwnCapabilities => HookBindingScope::OwnCapabilities,
+        HookManifestScope::SameTenant => HookBindingScope::SameTenant,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,8 +153,12 @@ mod tests {
     use crate::predicate::{CapabilityPredicate, HookPredicateSpec};
     use crate::registry::HookRegistry;
 
-    fn extension() -> ExtensionId {
-        ExtensionId("polymarket-trader".to_string())
+    fn extension() -> ironclaw_host_api::ExtensionId {
+        ironclaw_host_api::ExtensionId::new("polymarket-trader").expect("valid extension id")
+    }
+
+    fn identity_extension() -> ExtensionId {
+        ExtensionId(extension().as_str().to_string())
     }
 
     fn predicate_entry(local: &str) -> HookManifestEntry {
@@ -159,12 +195,17 @@ mod tests {
             .expect("install ok");
         assert_eq!(ids.len(), 1);
 
-        // Dispatch and confirm the registered predicate fires.
+        // Dispatch and confirm the registered predicate fires. The default
+        // manifest scope is `OwnCapabilities`, so the dispatch ctx must
+        // include a `provider` matching the registrar's extension or the hook
+        // is filtered out as out-of-scope.
         let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
-        let ctx = BeforeCapabilityHookContext::new_unresolved(
+        let ctx = BeforeCapabilityHookContext::new(
             tenant,
             "shell.exec".to_string(),
             [0u8; 32],
+            crate::points::SanitizedArguments::unresolved(),
+            Some(extension()),
         );
         let outcome = dispatcher.dispatch_before_capability(&ctx).await;
         assert!(!outcome.decision.permits());
@@ -233,12 +274,69 @@ mod tests {
         ];
         let expected: Vec<HookId> = entries
             .iter()
-            .map(|e| HookId::derive(&extension(), "0.4.2", &e.id, HookVersion::ONE))
+            .map(|e| HookId::derive(&identity_extension(), "0.4.2", &e.id, HookVersion::ONE))
             .collect();
 
         let actual = registrar
             .install(extension(), "0.4.2".to_string(), entries, &mut dispatcher)
             .expect("install ok");
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn installer_propagates_owning_extension_and_scope_from_manifest() {
+        // Two entries, distinct manifest scopes; assert each is reflected in
+        // the resulting `HookBinding`.
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+
+        let mut own = predicate_entry("own-scope");
+        own.scope = HookManifestScope::OwnCapabilities;
+
+        let mut tenant_scope = predicate_entry("tenant-scope");
+        tenant_scope.scope = HookManifestScope::SameTenant;
+        tenant_scope.requires_grant = Some("cross_extension_observation".to_string());
+
+        let ids = registrar
+            .install(
+                extension(),
+                "0.4.2".to_string(),
+                vec![own.clone(), tenant_scope.clone()],
+                &mut dispatcher,
+            )
+            .expect("install ok");
+        assert_eq!(ids.len(), 2);
+
+        let registry = dispatcher
+            .registry_for_test()
+            .lock()
+            .expect("registry mutex");
+        let bindings: Vec<_> = registry
+            .active_at(crate::registry::HookPointSpec::BeforeCapability)
+            .cloned()
+            .collect();
+        assert_eq!(bindings.len(), 2);
+
+        let own_binding = bindings
+            .iter()
+            .find(|b| b.hook_id == ids[0])
+            .expect("own-scope binding present");
+        assert_eq!(
+            own_binding.scope,
+            HookBindingScope::OwnCapabilities,
+            "manifest OwnCapabilities must map to binding OwnCapabilities"
+        );
+        assert_eq!(
+            own_binding.owning_extension.as_ref(),
+            Some(&extension()),
+            "binding must carry the installer's extension id"
+        );
+
+        let tenant_binding = bindings
+            .iter()
+            .find(|b| b.hook_id == ids[1])
+            .expect("tenant-scope binding present");
+        assert_eq!(tenant_binding.scope, HookBindingScope::SameTenant);
+        assert_eq!(tenant_binding.owning_extension.as_ref(), Some(&extension()));
     }
 }
