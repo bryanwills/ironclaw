@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_hooks::dispatch::HookDispatcher;
+use ironclaw_hooks::dispatch::{HookDispatcher, HookDispatcherBuilder};
 use ironclaw_hooks::middleware::{HookedLoopCapabilityPort, HookedLoopPromptPort};
 use ironclaw_host_api::{
     CapabilityId, CorrelationId, ExecutionContext, ExtensionId, InvocationId, ResourceEstimate,
@@ -987,6 +987,16 @@ where
     pub fn with_hook_dispatcher(mut self, dispatcher: Arc<HookDispatcher>) -> Self {
         self.hook_dispatcher = Some(dispatcher);
         self
+    }
+
+    /// Install a [`HookDispatcherBuilder`], deferring `.build_arc()` until
+    /// the factory finalizes wiring. This is the preferred entry point for
+    /// callers that construct the dispatcher inline alongside the factory:
+    /// it lets the factory own the Arc-wrap, which in turn prepares the
+    /// path toward FU8's per-build dispatcher pattern (one dispatcher per
+    /// run/tenant) without forcing every call site to be rewritten today.
+    pub fn with_hook_dispatcher_builder(self, builder: HookDispatcherBuilder) -> Self {
+        self.with_hook_dispatcher(builder.build_arc())
     }
 
     pub fn with_model_route_resolver<R>(mut self, resolver: Arc<R>) -> Self
