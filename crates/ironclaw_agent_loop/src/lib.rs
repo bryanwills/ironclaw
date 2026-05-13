@@ -4,14 +4,18 @@
 //! architecture is `docs/reborn/agent-loop-skeleton.md`; workstream briefs live
 //! under `docs/reborn/agent-loop-briefs/`.
 
+pub mod default_planner;
+pub mod planner;
 pub mod state;
 pub mod strategies;
 
+pub use default_planner::DefaultPlanner;
+pub use planner::{AgentLoopPlanner, PlannerId, PlannerIdError};
 pub use strategies::{
-    BatchPolicy, BatchPolicyStrategy, BudgetStrategy, CapabilityCallSummary,
-    CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
-    ConcurrencyHint, ContextStrategy, GateHandlingStrategy, GateKind, GateOutcome, GateSummary,
-    InputDrainStrategy, ModelErrorClass, ModelErrorSummary, ModelPreference, ModelStrategy,
-    RecoveryOutcome, RecoveryStrategy, RetryAlteration, StopConditionStrategy, StopKind,
-    StopOutcome, TurnEndKind, TurnSummary, UnlimitedBudget,
+    BatchPolicy, BatchPolicyStrategy, BudgetStrategy, CapabilityCallSummary, CapabilityErrorClass,
+    CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy, ConcurrencyHint, ContextStrategy,
+    GateHandlingStrategy, GateKind, GateOutcome, GateSummary, InputDrainStrategy, ModelErrorClass,
+    ModelErrorSummary, ModelPreference, ModelStrategy, RecoveryOutcome, RecoveryStrategy,
+    RetryAlteration, StopConditionStrategy, StopKind, StopOutcome, TurnEndKind, TurnSummary,
+    UnlimitedBudget,
 };

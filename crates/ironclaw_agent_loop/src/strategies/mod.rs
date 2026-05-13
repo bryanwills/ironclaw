@@ -11,23 +11,23 @@
 //! `Default*` impls land in WS-5; the executor body that consumes these
 //! outcomes lands in WS-6.
 
-mod capability;
-mod context;
-mod model;
 pub mod batch;
 pub mod budget;
+mod capability;
+mod context;
 pub mod drain;
 pub mod gate;
+mod model;
 pub mod recovery;
 pub mod stop;
 
-pub use capability::{CapabilityFilter, CapabilityStrategy};
-pub use context::ContextStrategy;
-pub use model::{ModelPreference, ModelStrategy};
 pub use batch::{BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary, ConcurrencyHint};
 pub use budget::{BudgetStrategy, UnlimitedBudget};
+pub use capability::{CapabilityFilter, CapabilityStrategy};
+pub use context::ContextStrategy;
 pub use drain::InputDrainStrategy;
 pub use gate::{GateHandlingStrategy, GateKind, GateOutcome, GateSummary};
+pub use model::{ModelPreference, ModelStrategy};
 pub use recovery::{
     CapabilityErrorClass, CapabilityErrorSummary, ModelErrorClass, ModelErrorSummary,
     RecoveryOutcome, RecoveryStrategy, RetryAlteration,
