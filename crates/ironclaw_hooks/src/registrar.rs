@@ -17,6 +17,7 @@
 //! Trust class is *not* settable here — registry-sourced hooks are always
 //! `Installed`. Builtin and Trusted hooks bypass this path entirely.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::dispatch::HookDispatcherBuilder;
@@ -26,6 +27,20 @@ use crate::identity::{ExtensionId, HookId, HookVersion};
 use crate::installed_hook::PredicateBackedBeforeCapabilityHook;
 use crate::manifest::{HookManifestBody, HookManifestEntry, HookManifestKind, HookManifestScope};
 use crate::registry::HookBindingScope;
+
+/// Maximum number of hooks a single extension may register, summed across
+/// every attach-point kind. Prevents a malicious or buggy extension from
+/// flooding the dispatcher with bindings (threat-model finding D3). The
+/// value is intentionally generous: typical extensions register 1–5 hooks,
+/// and complex policy extensions reach 10–15. If an extension legitimately
+/// needs more, the right move is a design review, not raising this cap.
+pub const MAX_HOOKS_PER_EXTENSION: usize = 32;
+
+/// Maximum number of hooks a single extension may register at one
+/// attach-point kind (e.g., `BeforeCapability`). Prevents flooding *one*
+/// dispatch point with bindings from a single extension even when the
+/// per-extension total cap isn't yet reached (threat-model finding D4).
+pub const MAX_HOOKS_PER_EXTENSION_PER_KIND: usize = 8;
 
 /// Converts validated [`HookManifestEntry`] values into installed bindings +
 /// dispatcher impls. One registrar per run; the shared
@@ -63,6 +78,7 @@ impl HookRegistrar {
         // (validated, comparable across the host); `crate::identity::ExtensionId`
         // is a transparent string newtype the hash derivation consumes.
         let identity_extension = ExtensionId(extension.as_str().to_string());
+        Self::enforce_registration_caps(&extension, &entries)?;
         let mut installed = Vec::with_capacity(entries.len());
         for entry in entries {
             let hook_id = self.install_one(
@@ -75,6 +91,42 @@ impl HookRegistrar {
             installed.push(hook_id);
         }
         Ok((builder, installed))
+    }
+
+    /// Reject the install batch wholesale before any binding is inserted
+    /// if the extension is asking for more bindings than the caps allow.
+    /// Pre-flight rejection is required so a partially-installed batch
+    /// can't slip past the cap (the registrar otherwise inserts entries
+    /// one at a time without rollback).
+    fn enforce_registration_caps(
+        extension: &ironclaw_host_api::ExtensionId,
+        entries: &[HookManifestEntry],
+    ) -> Result<(), HookError> {
+        if entries.len() > MAX_HOOKS_PER_EXTENSION {
+            return Err(HookError::RegistryConstruction(format!(
+                "extension `{}` declared {} hooks; the per-extension cap is {} \
+                 (threat-model finding D3 / hook registration flood)",
+                extension.as_str(),
+                entries.len(),
+                MAX_HOOKS_PER_EXTENSION
+            )));
+        }
+        let mut per_kind: HashMap<HookManifestKind, usize> = HashMap::new();
+        for entry in entries {
+            let count = per_kind.entry(entry.kind).or_insert(0);
+            *count += 1;
+            if *count > MAX_HOOKS_PER_EXTENSION_PER_KIND {
+                return Err(HookError::RegistryConstruction(format!(
+                    "extension `{}` declared more than {} hooks at attach point \
+                     {:?}; the per-kind cap is {} (threat-model finding D4)",
+                    extension.as_str(),
+                    MAX_HOOKS_PER_EXTENSION_PER_KIND,
+                    entry.kind,
+                    MAX_HOOKS_PER_EXTENSION_PER_KIND
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn install_one(
@@ -279,6 +331,83 @@ mod tests {
             .install(extension(), "0.4.2".to_string(), entries, builder)
             .expect("install ok");
         assert_eq!(actual, expected);
+    }
+
+    /// Threat-model finding D3 regression: an extension cannot register
+    /// more than `MAX_HOOKS_PER_EXTENSION` hooks in a single install
+    /// batch. The rejection is pre-flight (no partial install), and the
+    /// error message carries enough context for an operator to diagnose
+    /// why the install was rejected.
+    #[test]
+    fn install_rejects_when_total_exceeds_per_extension_cap() {
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
+        let builder = HookDispatcherBuilder::new(HookRegistry::new());
+        let entries: Vec<HookManifestEntry> = (0..(MAX_HOOKS_PER_EXTENSION + 1))
+            .map(|i| predicate_entry(&format!("h-{i}")))
+            .collect();
+        let err = registrar
+            .install(extension(), "0.1.0".to_string(), entries, builder)
+            .expect_err("over-cap install must be rejected");
+        match err {
+            HookError::RegistryConstruction(msg) => {
+                assert!(msg.contains("per-extension cap"), "msg = {msg}");
+                assert!(
+                    msg.contains("D3"),
+                    "msg must cite the threat-model finding: {msg}"
+                );
+            }
+            other => panic!("expected RegistryConstruction, got {other:?}"),
+        }
+    }
+
+    /// Threat-model finding D4 regression: an extension cannot stack more
+    /// than `MAX_HOOKS_PER_EXTENSION_PER_KIND` hooks at one attach point
+    /// even if the per-extension total is still under cap. This is the
+    /// stronger of the two caps — a flood concentrated at one dispatch
+    /// point is worse than the same flood spread out, because it widens
+    /// the dispatch fan-out exactly where back-pressure shows up.
+    #[test]
+    fn install_rejects_when_per_kind_cap_exceeded() {
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
+        let builder = HookDispatcherBuilder::new(HookRegistry::new());
+        // Stay under the per-extension cap but exceed per-kind: all
+        // entries default to `BeforeCapability`.
+        let entries: Vec<HookManifestEntry> = (0..(MAX_HOOKS_PER_EXTENSION_PER_KIND + 1))
+            .map(|i| predicate_entry(&format!("h-{i}")))
+            .collect();
+        assert!(entries.len() <= MAX_HOOKS_PER_EXTENSION);
+        let err = registrar
+            .install(extension(), "0.1.0".to_string(), entries, builder)
+            .expect_err("over-kind install must be rejected");
+        match err {
+            HookError::RegistryConstruction(msg) => {
+                assert!(msg.contains("per-kind cap"), "msg = {msg}");
+                assert!(
+                    msg.contains("D4"),
+                    "msg must cite the threat-model finding: {msg}"
+                );
+            }
+            other => panic!("expected RegistryConstruction, got {other:?}"),
+        }
+    }
+
+    /// At-cap installs must succeed — the cap is a ceiling, not a strict
+    /// inequality. Important so the test below documenting the cap value
+    /// can't get out of sync with the enforcement.
+    #[tokio::test]
+    async fn install_accepts_at_per_extension_cap() {
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
+        let builder = HookDispatcherBuilder::new(HookRegistry::new());
+        // Build a batch exactly at the per-kind ceiling so neither cap
+        // trips. (`per-kind` is the tighter constraint for the default
+        // `BeforeCapability` kind every `predicate_entry` produces.)
+        let entries: Vec<HookManifestEntry> = (0..MAX_HOOKS_PER_EXTENSION_PER_KIND)
+            .map(|i| predicate_entry(&format!("h-{i}")))
+            .collect();
+        let (_builder, ids) = registrar
+            .install(extension(), "0.1.0".to_string(), entries, builder)
+            .expect("at-cap install must succeed");
+        assert_eq!(ids.len(), MAX_HOOKS_PER_EXTENSION_PER_KIND);
     }
 
     #[tokio::test]

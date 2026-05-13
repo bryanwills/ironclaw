@@ -21,6 +21,24 @@
 //! Failures bubble up as `AgentLoopHostError` so the middleware can fail
 //! closed (mapping the suspension back to `Denied`) rather than silently
 //! producing an unresolvable gate ref.
+//!
+//! # Security properties
+//!
+//! Minted gate refs must be **unguessable** so that an Installed-tier hook
+//! that requests a `PauseApproval` cannot also forge a gate ref that
+//! short-circuits the approval gateway. `UuidHookGateRefFactory` derives
+//! its randomness from `uuid::Uuid::new_v4()`, which gives 122 bits of
+//! entropy per ref (RFC 4122 §4.4). The `gate_refs_are_v4_uuids` and
+//! `gate_refs_have_no_collisions_across_many_calls` tests document and
+//! pin this property.
+//!
+//! **One-shot consumption** of a gate ref — the property that an attacker
+//! who observes a legitimately-issued ref cannot replay it to bypass a
+//! second approval — is *not* the factory's responsibility. The factory's
+//! contract ends at minting an unguessable identifier. One-shot
+//! consumption is enforced by the host's approval gateway when the
+//! gate-resolution event arrives. See the threat-model (`S1`) for the
+//! split.
 
 use async_trait::async_trait;
 use ironclaw_turns::LoopGateRef;
@@ -105,5 +123,80 @@ mod tests {
         let a = factory.mint_approval_ref("r").await.expect("mints");
         let b = factory.mint_approval_ref("r").await.expect("mints");
         assert_ne!(a.as_str(), b.as_str());
+    }
+
+    /// Pins the unguessability source: every minted ref must contain a
+    /// parseable v4 UUID. If the factory ever moves to a non-random source
+    /// (counter, deterministic derivation, weaker UUID version), this test
+    /// fails — that's the design-time guardrail. Threat-model finding S1.
+    #[tokio::test]
+    async fn gate_refs_are_v4_uuids() {
+        let factory = UuidHookGateRefFactory;
+        for prefix in ["hook-approval-", "hook-auth-"] {
+            let r = if prefix == "hook-approval-" {
+                factory.mint_approval_ref("r").await.expect("mints")
+            } else {
+                factory.mint_auth_ref("r").await.expect("mints")
+            };
+            let suffix = r
+                .as_str()
+                .strip_prefix("gate:")
+                .and_then(|s| s.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("unexpected gate-ref shape: {}", r.as_str()));
+            let parsed = uuid::Uuid::parse_str(suffix)
+                .unwrap_or_else(|e| panic!("ref suffix `{suffix}` not a uuid: {e}"));
+            assert_eq!(
+                parsed.get_version(),
+                Some(uuid::Version::Random),
+                "gate-ref `{}` must be v4 (122 random bits); got version {:?}",
+                r.as_str(),
+                parsed.get_version()
+            );
+        }
+    }
+
+    /// Statistical unguessability proxy: 20_000 distinct refs from one
+    /// factory must produce zero collisions. With 122 random bits the
+    /// expected collision count over 20k draws is ~2.4e-32, so any
+    /// collision here indicates the entropy source has regressed
+    /// catastrophically. Threat-model finding S1.
+    #[tokio::test]
+    async fn gate_refs_have_no_collisions_across_many_calls() {
+        const N: usize = 20_000;
+        let factory = UuidHookGateRefFactory;
+        let mut seen = std::collections::HashSet::with_capacity(N);
+        for _ in 0..N {
+            let r = factory.mint_approval_ref("r").await.expect("mints");
+            assert!(
+                seen.insert(r.as_str().to_string()),
+                "duplicate gate-ref minted within {N} calls: {}",
+                r.as_str()
+            );
+        }
+        for _ in 0..N {
+            let r = factory.mint_auth_ref("r").await.expect("mints");
+            assert!(
+                seen.insert(r.as_str().to_string()),
+                "auth-ref collided with approval-ref space: {}",
+                r.as_str()
+            );
+        }
+        assert_eq!(seen.len(), 2 * N);
+    }
+
+    /// Cross-namespace separation: a `hook-approval-` and a `hook-auth-`
+    /// ref with the same suffix would still be distinct strings, but the
+    /// prefix is the routing key for the approval gateway. Confirm the
+    /// two namespaces don't share format-level overlap that could let an
+    /// attacker forge one from the other.
+    #[tokio::test]
+    async fn approval_and_auth_namespaces_do_not_overlap() {
+        let factory = UuidHookGateRefFactory;
+        let approval = factory.mint_approval_ref("r").await.expect("mints");
+        let auth = factory.mint_auth_ref("r").await.expect("mints");
+        assert!(approval.as_str().starts_with("gate:hook-approval-"));
+        assert!(auth.as_str().starts_with("gate:hook-auth-"));
+        assert!(!approval.as_str().starts_with("gate:hook-auth-"));
+        assert!(!auth.as_str().starts_with("gate:hook-approval-"));
     }
 }
