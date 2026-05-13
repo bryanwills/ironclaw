@@ -232,7 +232,13 @@ impl ProductWorkflow for DefaultProductWorkflow {
             ProductInboundPayload::SubscriptionRequest(req) => {
                 (req.thread_id_hint.clone(), req.after_cursor.clone())
             }
-            _ => (None, None),
+            _ => {
+                return Err(ProductAdapterError::from(
+                    ProductWorkflowError::UnsupportedActionKind {
+                        kind: "non_subscription_payload_for_resolution".into(),
+                    },
+                ));
+            }
         };
 
         let request = ProjectionSubscriptionAuthorityRequest {
@@ -463,12 +469,13 @@ impl DefaultProductWorkflow {
                 submitted_run_id: run_id,
             }),
             MissionFireOutcome::DeferredBusy {
-                mission_fire_ref, ..
-            } => Ok(ProductInboundAck::MissionSuppressed {
+                mission_fire_ref,
+                active_run_id,
+            } => Ok(ProductInboundAck::MissionDeferred {
                 mission_fire_ref: ironclaw_product_adapters::MissionFireRef::from_uuid(
                     mission_fire_ref.as_uuid(),
                 ),
-                reason: ironclaw_product_adapters::MissionFireSuppressionReason::BusyThread,
+                active_run_id,
             }),
             MissionFireOutcome::Suppressed {
                 mission_fire_ref,
@@ -552,12 +559,20 @@ fn dispatch_kind_from_ack(
         } => Ok(ActionDispatchKind::UserMessageTurn {
             run_id: *submitted_run_id,
         }),
+        ProductInboundAck::MissionDeferred { active_run_id, .. } => {
+            Ok(ActionDispatchKind::UserMessageTurn {
+                run_id: *active_run_id,
+            })
+        }
         _ => ActionDispatchKind::try_from_payload(payload),
     }
 }
 
 fn is_terminal_success_ack(ack: &ProductInboundAck) -> bool {
-    !matches!(ack, ProductInboundAck::DeferredBusy { .. })
+    !matches!(
+        ack,
+        ProductInboundAck::DeferredBusy { .. } | ProductInboundAck::MissionDeferred { .. }
+    )
 }
 
 fn turn_error_is_retryable(error: &TurnError) -> bool {
@@ -612,8 +627,13 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
                 format!("turn resume rejected: {reason}"),
             )))
         }
+        ProductWorkflowError::TurnSubmissionRejected { reason } => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::PolicyDenied,
+                format!("turn submission rejected: {reason}"),
+            )))
+        }
         ProductWorkflowError::BindingResolutionFailed { .. }
-        | ProductWorkflowError::TurnSubmissionRejected { .. }
         | ProductWorkflowError::TurnSubmissionFailed { .. }
         | ProductWorkflowError::Transient { .. }
         | ProductWorkflowError::DuplicateAction { .. } => None,

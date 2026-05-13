@@ -8,13 +8,15 @@ use chrono::Utc;
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, ParsedProductInbound, ProductAdapterId, ProductInboundEnvelope,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
-    UserMessagePayload,
+    ExternalEventId, ParsedProductInbound, ProductAdapterId, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejectionDisposition,
+    ProductRejectionKind, ProductTriggerReason, ProductWorkflow, ProtocolAuthEvidence,
+    TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product_workflow::{
-    DefaultInboundTurnService, FakeBeforeInboundPolicy, FakeConversationBindingService,
-    InboundTurnOutcome, InboundTurnService, ProductWorkflowError,
+    DefaultInboundTurnService, DefaultProductWorkflow, FakeBeforeInboundPolicy,
+    FakeConversationBindingService, FakeIdempotencyLedger, InboundTurnOutcome, InboundTurnService,
+    ProductWorkflowError,
 };
 use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
@@ -683,5 +685,89 @@ async fn before_inbound_continue_without_rewrite_passes_text_through() {
         policy_handle.evaluate_count(),
         1,
         "BeforeInbound policy must still be evaluated when it returns Continue"
+    );
+}
+
+#[tokio::test]
+async fn before_inbound_rejection_settles_terminal_rejection_in_ledger() {
+    // Regression: when BeforeInboundPolicy returns Reject the workflow must
+    // SETTLE the ledger with a permanent PolicyDenied rejection — NOT
+    // release the action (which would let the next retry re-create a fresh
+    // action and re-evaluate the policy). Previously TurnSubmissionRejected
+    // fell into the transient catch-all and the action was released; see
+    // gemini-code-assist's review on PR #3558 / serrrfirat fork PR #3.
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let policy = Arc::new(FakeBeforeInboundPolicy::new());
+    policy.program_reject("test policy denied");
+    let policy_handle = policy.clone();
+    let inbound_service = Arc::new(
+        DefaultInboundTurnService::new(binding_service, thread_service, coordinator)
+            .with_before_inbound_policy(policy),
+    );
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let workflow = DefaultProductWorkflow::new(inbound_service, ledger.clone());
+
+    let envelope = sample_user_message_envelope_with_text("reject-ledger-evt", "blocked content");
+
+    // accept_inbound surfaces the rejection as Err (the dispatch result
+    // bubbles up even though the ledger was settled with a permanent
+    // Rejected ack — mirroring the existing
+    // mission_action_without_configured_service_settles_unsupported
+    // pattern). The terminal ack is observable via the duplicate replay
+    // below.
+    let err = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("BeforeInbound rejection must surface as an error");
+    assert!(
+        !err.is_retryable(),
+        "BeforeInbound rejection must be non-retryable"
+    );
+
+    // Critical invariant: the ledger must be SETTLED, not released. Released
+    // would let a retry re-enter dispatch and re-evaluate the policy.
+    assert_eq!(
+        ledger.settled_count(),
+        1,
+        "BeforeInbound rejection must settle the ledger as a permanent rejection"
+    );
+    assert_eq!(
+        ledger.in_flight_count(),
+        0,
+        "BeforeInbound rejection must clear the in-flight reservation"
+    );
+    assert_eq!(
+        policy_handle.evaluate_count(),
+        1,
+        "policy must be evaluated exactly once on the first envelope"
+    );
+
+    // Duplicate replay: the same envelope must surface the prior rejection
+    // as Duplicate { prior: Rejected(..) } and MUST NOT re-evaluate the
+    // BeforeInbound policy.
+    let replay = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("duplicate must replay prior rejection");
+    let ProductInboundAck::Duplicate { prior } = replay else {
+        panic!("expected Duplicate replay, got {replay:?}");
+    };
+    let ProductInboundAck::Rejected(prior_rejection) = *prior else {
+        panic!("expected prior to be Rejected, got prior outcome");
+    };
+    assert_eq!(prior_rejection.kind, ProductRejectionKind::PolicyDenied);
+    assert_eq!(
+        prior_rejection.disposition(),
+        ProductRejectionDisposition::Permanent
+    );
+    // The policy must NOT have been called a second time — the ledger
+    // replays the prior settled outcome.
+    assert_eq!(
+        policy_handle.evaluate_count(),
+        1,
+        "BeforeInbound policy must not be re-evaluated on duplicate replay"
     );
 }

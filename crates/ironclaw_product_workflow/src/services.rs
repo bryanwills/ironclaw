@@ -180,9 +180,10 @@ pub trait LinkedThreadActionService: Send + Sync {
 // Mission service (per issue #3278)
 // ---------------------------------------------------------------------------
 
-/// Stable handle to a durable mission-fire record. Mints from the workflow
-/// before delegating to a real `MissionService` so retries replay the same
-/// reference even if the service implementation is unreachable.
+/// Stable handle to a durable mission-fire record. Minted by the
+/// [`MissionService`] implementation as part of [`MissionFireOutcome`];
+/// the same ref must be returned for retries of the same logical mission
+/// fire so adapters can correlate retries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MissionFireRef(Uuid);

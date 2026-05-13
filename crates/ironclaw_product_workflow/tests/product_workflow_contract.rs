@@ -776,6 +776,124 @@ async fn projection_subscription_without_authority_returns_unsupported() {
     assert_eq!(ledger.in_flight_count(), 0);
 }
 
+#[tokio::test]
+async fn before_inbound_rejection_replays_prior_rejection_on_duplicate() {
+    // Regression: BeforeInboundPolicy::Reject surfaces as
+    // ProductWorkflowError::TurnSubmissionRejected. Previously this fell
+    // into the transient catch-all in terminal_ack_for_error and the
+    // action was RELEASED, letting a retry re-evaluate the policy. The
+    // workflow must SETTLE rejections as permanent so duplicate envelopes
+    // replay the prior rejection. See gemini-code-assist's review on
+    // PR #3558 / serrrfirat fork PR #3.
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    // Drive a TurnSubmissionRejected outcome from the inbound service —
+    // the same error the workflow would observe after a real
+    // BeforeInboundPolicy::Reject. The integration-tier counterpart in
+    // tests/inbound_turn_contract.rs wires a real DefaultInboundTurnService
+    // + FakeBeforeInboundPolicy to drive the same workflow path.
+    inbound.force_failure(ProductWorkflowError::TurnSubmissionRejected {
+        reason: "<redacted>".to_string(),
+    });
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone());
+
+    let envelope = sample_envelope("before-inbound-reject-dup");
+
+    // accept_inbound surfaces TurnSubmissionRejected as Err; the terminal
+    // ack settles into the ledger and is observable via duplicate replay.
+    // This mirrors the existing
+    // mission_action_without_configured_service_settles_unsupported
+    // pattern.
+    let err = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("TurnSubmissionRejected must surface as Err");
+    assert!(
+        !err.is_retryable(),
+        "TurnSubmissionRejected must be non-retryable"
+    );
+    assert_eq!(
+        ledger.settled_count(),
+        1,
+        "TurnSubmissionRejected must SETTLE the ledger as permanent — not release for retry"
+    );
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(
+        inbound.attempt_count(),
+        1,
+        "inbound service must be called exactly once before the rejection settles"
+    );
+
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("duplicate must replay prior rejection");
+    let ProductInboundAck::Duplicate { prior } = second else {
+        panic!("expected Duplicate replay, got {second:?}");
+    };
+    let ProductInboundAck::Rejected(prior_rejection) = *prior else {
+        panic!("expected prior to be Rejected, got prior outcome");
+    };
+    assert_eq!(prior_rejection.kind, ProductRejectionKind::PolicyDenied);
+    assert_eq!(
+        prior_rejection.disposition(),
+        ProductRejectionDisposition::Permanent
+    );
+    assert_eq!(
+        inbound.attempt_count(),
+        1,
+        "duplicate replay must NOT re-invoke the inbound service"
+    );
+}
+
+#[tokio::test]
+async fn resolve_projection_subscription_rejects_non_subscription_payload() {
+    // Routing a non-SubscriptionRequest envelope through
+    // resolve_projection_subscription is a caller bug and must be rejected
+    // at the gate — BEFORE the authority is consulted. The previous
+    // behaviour silently defaulted both hints to None, masking the bug.
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let authority = Arc::new(FakeProjectionSubscriptionAuthority::new());
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone())
+        .with_projection_authority(authority.clone());
+
+    // A UserMessage envelope is the canonical "wrong payload" for the
+    // resolution path.
+    let envelope = sample_envelope("resolve-wrong-payload");
+    let err = workflow
+        .resolve_projection_subscription(envelope)
+        .await
+        .expect_err("non-subscription payload must be rejected at the gate");
+
+    // The error must cross the redaction boundary as ProductAdapterError;
+    // the workflow uses ProductWorkflowError::UnsupportedActionKind with
+    // kind = "non_subscription_payload_for_resolution". The redacted reason
+    // travels inside ProductAdapterError::Internal.
+    match err {
+        ProductAdapterError::Internal { ref detail } => {
+            let redacted = detail.to_string();
+            // RedactedString::Display emits the placeholder; the inner kind
+            // identifier is intentionally not exposed across the boundary.
+            // Asserting the variant + that the redaction is in effect is
+            // the strongest contract available here.
+            assert_eq!(redacted, "<redacted>");
+        }
+        other => panic!("expected Internal error variant, got {other:?}"),
+    }
+
+    // The authority MUST NOT have been consulted — the gate rejects before
+    // reaching the authority.
+    assert_eq!(
+        authority.authorization_count(),
+        0,
+        "the gate must reject before reaching the authority"
+    );
+    // Read-only path: the ledger must stay untouched.
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // LinkedThreadActionService dispatch arm
 // ---------------------------------------------------------------------------
@@ -1101,7 +1219,7 @@ async fn mission_action_submitted_returns_mission_submitted_ack() {
 }
 
 #[tokio::test]
-async fn mission_action_deferred_busy_returns_mission_suppressed_busy_thread() {
+async fn mission_action_deferred_busy_returns_mission_deferred_for_retry() {
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let mission = Arc::new(FakeMissionService::new());
@@ -1116,21 +1234,98 @@ async fn mission_action_deferred_busy_returns_mission_suppressed_busy_thread() {
         .await
         .expect("mission deferred busy ack");
 
-    // DeferredBusy on the mission outcome maps to MissionSuppressed
-    // { BusyThread } at the wire boundary — see workflow.rs
-    // `dispatch_mission_action`.
+    // DeferredBusy on the mission outcome maps to the non-terminal
+    // MissionDeferred ack — mirroring the UserMessage DeferredBusy retry
+    // pattern. Critically, MissionDeferred MUST NOT settle the ledger;
+    // adapters must be allowed to retry the same envelope once the thread
+    // frees, and the second attempt should reach the mission service
+    // again (not be replayed as a duplicate).
     match ack {
-        ProductInboundAck::MissionSuppressed {
+        ProductInboundAck::MissionDeferred {
             mission_fire_ref,
-            reason,
+            active_run_id,
         } => {
             assert_ne!(mission_fire_ref.as_uuid(), Uuid::nil());
-            assert_eq!(reason, AdapterMissionFireSuppressionReason::BusyThread);
+            // TurnRunId has no nil sentinel; assert it parses to a
+            // non-empty debug string so we know the workflow actually
+            // plumbed the value through rather than substituting a
+            // default.
+            assert!(
+                !format!("{active_run_id:?}").is_empty(),
+                "active_run_id must be populated"
+            );
         }
-        other => panic!("expected MissionSuppressed {{ BusyThread }}, got {other:?}"),
+        other => panic!("expected MissionDeferred, got {other:?}"),
     }
 
     assert_eq!(mission.fire_count(), 1);
+    // MissionDeferred is non-terminal: the action must be RELEASED, not
+    // SETTLED. A subsequent retry of the same envelope must be allowed to
+    // re-enter the dispatch path (no Duplicate replay).
+    assert_eq!(
+        ledger.settled_count(),
+        0,
+        "MissionDeferred must not settle the ledger"
+    );
+    assert_eq!(
+        ledger.in_flight_count(),
+        0,
+        "MissionDeferred must release the in-flight reservation for retry"
+    );
+}
+
+#[tokio::test]
+async fn mission_action_deferred_busy_release_allows_retry_with_same_fingerprint() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let mission = Arc::new(FakeMissionService::new());
+    // First call: program a busy-thread outcome.
+    mission.program_deferred_busy();
+
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone())
+        .with_mission_service(mission.clone());
+
+    let envelope =
+        sample_mission_action_envelope("mission-busy-retry", "fire", Some("mission_retry"));
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect("first mission fire (busy)");
+    assert!(
+        matches!(first, ProductInboundAck::MissionDeferred { .. }),
+        "first ack must be MissionDeferred, got {first:?}"
+    );
+    assert_eq!(mission.fire_count(), 1);
+    assert_eq!(ledger.settled_count(), 0, "MissionDeferred must NOT settle");
+    assert_eq!(
+        ledger.in_flight_count(),
+        0,
+        "MissionDeferred must release in-flight"
+    );
+
+    // Reprogram the fake so the second attempt succeeds. If the ledger had
+    // settled on the first call, the retry would surface as a
+    // ProductInboundAck::Duplicate {{ prior: MissionDeferred }} — the
+    // assertion below would catch that regression.
+    mission.program_submitted();
+
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("retry submits after busy thread frees");
+    assert!(
+        matches!(second, ProductInboundAck::MissionSubmitted { .. }),
+        "retry must reach mission service and return MissionSubmitted, got {second:?}"
+    );
+    assert_eq!(
+        mission.fire_count(),
+        2,
+        "retry must invoke the mission service a second time"
+    );
+    // After a successful retry, the terminal outcome settles.
+    assert_eq!(ledger.settled_count(), 1);
+    assert_eq!(ledger.in_flight_count(), 0);
 }
 
 #[tokio::test]

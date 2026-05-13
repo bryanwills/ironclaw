@@ -791,6 +791,10 @@ pub enum ProductInboundAck {
         mission_fire_ref: MissionFireRef,
         submitted_run_id: TurnRunId,
     },
+    MissionDeferred {
+        mission_fire_ref: MissionFireRef,
+        active_run_id: TurnRunId,
+    },
     MissionSuppressed {
         mission_fire_ref: MissionFireRef,
         reason: MissionFireSuppressionReason,
@@ -813,6 +817,7 @@ impl ProductInboundAck {
             | Self::GateHandled { .. }
             | Self::LinkedThreadActionRouted { .. }
             | Self::MissionSubmitted { .. }
+            | Self::MissionDeferred { .. }
             | Self::MissionSuppressed { .. } => true,
             Self::Rejected(rejection) => {
                 rejection.disposition == ProductRejectionDisposition::Permanent
