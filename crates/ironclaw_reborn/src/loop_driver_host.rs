@@ -6,6 +6,8 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_hooks::dispatch::HookDispatcher;
+use ironclaw_hooks::middleware::{HookedLoopCapabilityPort, HookedLoopPromptPort};
 use ironclaw_host_api::{
     CapabilityId, CorrelationId, ExecutionContext, ExtensionId, InvocationId, ResourceEstimate,
     sha256_digest_token,
@@ -927,6 +929,11 @@ where
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    /// Optional hook dispatcher. When set, the factory wraps the capability
+    /// and prompt ports with the hooked middleware from `ironclaw_hooks` so
+    /// every invocation runs hook dispatch ahead of the inner port. Default
+    /// behavior (no dispatcher) is unchanged from the pre-hooks shape.
+    hook_dispatcher: Option<Arc<HookDispatcher>>,
 }
 
 impl<S, G> RebornLoopDriverHostFactory<S, G>
@@ -953,11 +960,21 @@ where
             milestone_sink,
             config,
             skill_context_source: None,
+            hook_dispatcher: None,
         }
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    /// Install a [`HookDispatcher`] that wraps the capability and prompt
+    /// ports. When set, every capability invocation runs through
+    /// `before_capability` dispatch before reaching the inner port, and every
+    /// prompt-bundle build runs through `before_prompt` dispatch.
+    pub fn with_hook_dispatcher(mut self, dispatcher: Arc<HookDispatcher>) -> Self {
+        self.hook_dispatcher = Some(dispatcher);
         self
     }
 
@@ -999,9 +1016,16 @@ where
         }
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         let surface_state = Arc::new(CapabilitySurfaceState::default());
-        let capabilities: Arc<dyn LoopCapabilityPort> = Arc::new(
+        let mut capabilities: Arc<dyn LoopCapabilityPort> = Arc::new(
             SurfaceTrackingLoopCapabilityPort::new(capabilities, Arc::clone(&surface_state)),
         );
+        if let Some(dispatcher) = self.hook_dispatcher.as_ref() {
+            capabilities = Arc::new(HookedLoopCapabilityPort::new(
+                Arc::clone(&capabilities),
+                Arc::clone(dispatcher),
+                run_context.scope.tenant_id.clone(),
+            ));
+        }
         capabilities
             .visible_capabilities(VisibleCapabilityRequest)
             .await
@@ -1009,7 +1033,7 @@ where
                 reason: error.safe_summary,
             })?;
         let surface_state_for_prompt = Arc::clone(&surface_state);
-        let prompt: Arc<dyn LoopPromptPort> = Arc::new(
+        let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(
             HostManagedLoopPromptPort::new(
                 run_context.clone(),
                 Arc::clone(&context),
@@ -1018,6 +1042,13 @@ where
             .with_default_message_limit(max_messages)
             .with_current_surface_version_lookup(move || surface_state_for_prompt.current()),
         );
+        if let Some(dispatcher) = self.hook_dispatcher.as_ref() {
+            prompt = Arc::new(HookedLoopPromptPort::new(
+                Arc::clone(&prompt),
+                Arc::clone(dispatcher),
+                run_context.scope.tenant_id.clone(),
+            ));
+        }
         let input: Arc<dyn LoopInputPort> =
             Arc::new(NoExtraLoopInputPort::new(run_context.clone()));
         let mut model_adapter = ThreadBackedLoopModelPort::with_milestone_sink(

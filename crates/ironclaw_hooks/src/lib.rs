@@ -13,10 +13,13 @@
 
 pub mod dispatch;
 pub mod error;
+pub mod evaluator;
 pub mod failure_policy;
 pub mod identity;
+pub mod installed_hook;
 pub mod kinds;
 pub mod manifest;
+pub mod middleware;
 pub mod ordering;
 pub mod points;
 pub mod predicate;
