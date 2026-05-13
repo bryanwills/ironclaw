@@ -4073,6 +4073,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_agent_loop"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "ironclaw_turns",
+ "serde",
+ "serde_json",
+ "siphasher",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ironclaw_approvals"
 version = "0.1.0"
 dependencies = [

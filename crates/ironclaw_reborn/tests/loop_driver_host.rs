@@ -78,11 +78,12 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink,
         InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextRequest, LoopDriverId,
-        LoopDriverNoteKind, LoopHostMilestone, LoopInputCursor, LoopInputCursorToken,
-        LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort,
-        LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, ModelCallOutcome, ParentLoopOutput, PromptMode,
-        SkillVisibility, VisibleCapabilityRequest,
+        LoopDriverNoteKind, LoopHostMilestone, LoopInlineMessage, LoopInlineMessageRole,
+        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
+        LoopModelGatewayError, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot,
+        LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopSafeSummary, ModelCallOutcome, ParentLoopOutput, PromptMode, SkillVisibility,
+        VisibleCapabilityRequest,
     },
     runner::ClaimedTurnRun,
 };
@@ -125,6 +126,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1359,6 +1361,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1854,6 +1857,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
             surface_version: Some(surface_version.clone()),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1942,6 +1946,7 @@ async fn text_only_host_prompt_accepts_empty_surface_version() {
             surface_version: Some(surface.version),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1961,6 +1966,7 @@ async fn text_only_host_prompt_rejects_stale_surface_version() {
             surface_version: Some(CapabilitySurfaceVersion::new("stale:v1").unwrap()),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1980,6 +1986,7 @@ async fn text_only_host_prompt_rejects_codeact_mode_and_zero_budget() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1992,10 +1999,40 @@ async fn text_only_host_prompt_rejects_codeact_mode_and_zero_budget() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(0),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
     assert_eq!(zero_budget.kind, AgentLoopHostErrorKind::BudgetExceeded);
+}
+
+#[tokio::test]
+async fn text_only_host_prompt_rejects_inline_messages() {
+    let fixture = HostFixture::new("thread-host-prompt-inline", "hello reborn").await;
+    let host = fixture.build_host().await;
+
+    let error = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: vec![LoopInlineMessage {
+                role: LoopInlineMessageRole::User,
+                safe_body: LoopSafeSummary::new("safe inline nudge").unwrap(),
+            }],
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert_eq!(
+        error.safe_summary,
+        "inline_messages not yet supported by this prompt builder"
+    );
+    assert!(fixture.gateway.requests().is_empty());
+    assert!(fixture.milestones().is_empty());
 }
 
 #[tokio::test]
@@ -2019,6 +2056,7 @@ async fn text_only_host_prompt_rejects_foreign_context_and_checkpoint_refs() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -2031,6 +2069,7 @@ async fn text_only_host_prompt_rejects_foreign_context_and_checkpoint_refs() {
             surface_version: None,
             checkpoint_state_ref: Some(LoopCheckpointStateRef::new("checkpoint:foreign").unwrap()),
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -2049,6 +2088,7 @@ async fn text_only_host_prompt_rejects_foreign_context_and_checkpoint_refs() {
                     .unwrap(),
             ),
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -2389,6 +2429,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -3183,6 +3224,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
             surface_version: Some(refreshed_surface.version.clone()),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -4461,6 +4503,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
                 surface_version: Some(surface.version.clone()),
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
+                inline_messages: Vec::new(),
             })
             .await
             .map_err(driver_host_error)?;
