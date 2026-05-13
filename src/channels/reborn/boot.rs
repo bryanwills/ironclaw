@@ -202,7 +202,7 @@ pub async fn bootstrap_telegram_v2(
     });
     let runner_config = NativeProductAdapterRunnerConfig::new(
         Duration::from_secs(15),
-        NonZeroUsize::new(64).expect("64 > 0"),
+        NonZeroUsize::new(64).expect("64 > 0"), // safety: literal 64 is provably non-zero
     );
     let runner = NativeProductAdapterRunner::with_config(
         adapter_arc,

@@ -1249,7 +1249,7 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
 }
 
 #[cfg(test)]
-mod migration_smoke_tests {
+mod tests {
     use super::*;
 
     /// Apply V26 (Reborn product workflow durable state) against a fresh
