@@ -932,8 +932,11 @@ async def test_gateway_attachment_limits_block_batched_uploads(page):
     await page.evaluate(
         """
         () => {
+          // MAX_ATTACHMENT_SIZE_BYTES is 7 MiB (raised from 5 MiB in
+          // #1341 polish to match MAX_INLINE_ATTACHMENT_BYTES). The
+          // per-file alert fires at size > limit, so use 7 MiB + 1 byte.
           const tooBig = new File(
-            [new Uint8Array((5 * 1024 * 1024) + 1)],
+            [new Uint8Array((7 * 1024 * 1024) + 1)],
             'too-big.txt',
             { type: 'text/plain' }
           );
