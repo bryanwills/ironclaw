@@ -225,6 +225,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn endpoint_url_normalizes_base_url_versions() {
+        let cases = [
+            (
+                "https://api.example.com",
+                "https://api.example.com/v1/chat/completions",
+            ),
+            (
+                "https://api.example.com/",
+                "https://api.example.com/v1/chat/completions",
+            ),
+            (
+                "https://api.example.com/v1",
+                "https://api.example.com/v1/chat/completions",
+            ),
+            (
+                "https://api.example.com/v1/",
+                "https://api.example.com/v1/chat/completions",
+            ),
+            (
+                "https://api.example.com/openai/v1",
+                "https://api.example.com/openai/v1/chat/completions",
+            ),
+            (
+                "https://api.example.com/tenant-v1",
+                "https://api.example.com/tenant-v1/v1/chat/completions",
+            ),
+        ];
+
+        for (base_url, expected) in cases {
+            let tool = ImageAnalyzeTool::new(
+                base_url.to_string(),
+                "test-key".to_string(),
+                "gpt-4o".to_string(),
+                None,
+            );
+
+            assert_eq!(tool.endpoint_url("/chat/completions"), expected);
+        }
+    }
+
     #[tokio::test]
     async fn test_read_image_bytes_rejects_path_traversal() {
         let dir = TempDir::new().unwrap();

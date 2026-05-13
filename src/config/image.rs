@@ -292,6 +292,22 @@ mod tests {
     }
 
     #[test]
+    fn debug_output_redacts_image_api_key() {
+        let cfg = ImageConfig {
+            enabled: true,
+            api_base_url: Some("https://image.example.com/v1".to_string()),
+            api_key: Some(SecretString::from("super-secret-image-key".to_string())),
+            model: Some("gpt-image-1".to_string()),
+            vision_model: Some("openai/gpt-5.2".to_string()),
+        };
+
+        let debug = format!("{cfg:?}");
+
+        assert!(!debug.contains("super-secret-image-key"));
+        assert!(debug.contains("api_key"));
+    }
+
+    #[test]
     fn disabled_image_tools_skip_other_image_config() {
         let _guard = lock_env();
         clear_image_env();
