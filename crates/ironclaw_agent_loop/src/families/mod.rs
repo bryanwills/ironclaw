@@ -1,12 +1,8 @@
 use std::sync::Arc;
 
-use crate::family::{
-    ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId, LoopFamilyPlanner,
-};
-
-struct DefaultLoopFamilyPlanner;
-
-impl LoopFamilyPlanner for DefaultLoopFamilyPlanner {}
+use crate::default_planner::DefaultPlanner;
+use crate::family::{ComponentDigest, LoopFamily, LoopFamilyId};
+use crate::planner::AgentLoopPlanner;
 
 /// Stable digest: SHA-256 of
 /// `ironclaw_agent_loop.default_family.v1:planner=DefaultLoopFamilyPlanner;schema=component_identity_v1;family_id=default`.
@@ -21,11 +17,11 @@ pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
 /// The default loop family: the text-tool-use baseline once the planner and
 /// executor workstreams land.
 pub fn default() -> LoopFamily {
-    LoopFamily::new(
-        LoopFamilyId::DEFAULT,
-        ComponentIdentity::from_static("default", DEFAULT_FAMILY_DIGEST),
-        Arc::new(DefaultLoopFamilyPlanner),
-    )
+    let planner = DefaultPlanner::compose_default();
+    let id = planner.id().clone();
+    let version = planner.version().clone();
+
+    LoopFamily::new(id, version, Arc::new(planner))
 }
 
 #[cfg(test)]

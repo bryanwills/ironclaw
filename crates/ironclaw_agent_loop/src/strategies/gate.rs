@@ -89,6 +89,18 @@ impl GateOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultGateHandlingStrategy;
+
+#[async_trait]
+impl GateHandlingStrategy for DefaultGateHandlingStrategy {
+    async fn handle(&self, state: &LoopExecutionState, _gate: &GateSummary) -> GateOutcome {
+        GateOutcome::Block {
+            gate: state.gate_state.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

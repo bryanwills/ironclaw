@@ -227,6 +227,33 @@ impl<'de> serde::Deserialize<'de> for BackoffDelayMs {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultRecoveryStrategy;
+
+#[async_trait]
+impl RecoveryStrategy for DefaultRecoveryStrategy {
+    async fn on_capability_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &CapabilityErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::SkipResult {
+            recovery: state.recovery_state.clone(),
+        }
+    }
+
+    async fn on_model_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &ModelErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind: LoopFailureKind::ModelError,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
