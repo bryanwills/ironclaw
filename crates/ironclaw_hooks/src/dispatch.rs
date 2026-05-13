@@ -1092,8 +1092,13 @@ impl HookDispatcherBuilder {
         scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforeCapabilityHook>,
     ) -> Result<Self, crate::error::HookError> {
-        self.dispatcher
-            .install_installed_before_capability(hook_id, phase, owning_extension, scope, hook)?;
+        self.dispatcher.install_installed_before_capability(
+            hook_id,
+            phase,
+            owning_extension,
+            scope,
+            hook,
+        )?;
         Ok(self)
     }
 
@@ -1127,8 +1132,13 @@ impl HookDispatcherBuilder {
         scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforePromptHook>,
     ) -> Result<Self, crate::error::HookError> {
-        self.dispatcher
-            .install_installed_before_prompt(hook_id, phase, owning_extension, scope, hook)?;
+        self.dispatcher.install_installed_before_prompt(
+            hook_id,
+            phase,
+            owning_extension,
+            scope,
+            hook,
+        )?;
         Ok(self)
     }
 
@@ -1188,8 +1198,14 @@ impl HookDispatcherBuilder {
         scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<Self, crate::error::HookError> {
-        self.dispatcher
-            .install_installed_observer(hook_id, phase, point, owning_extension, scope, hook)?;
+        self.dispatcher.install_installed_observer(
+            hook_id,
+            phase,
+            point,
+            owning_extension,
+            scope,
+            hook,
+        )?;
         Ok(self)
     }
 
