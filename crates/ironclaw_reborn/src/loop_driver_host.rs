@@ -38,11 +38,11 @@ use ironclaw_turns::{
         LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor, LoopInputPort,
         LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
         LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ProcessHandleSummary, StageCheckpointPayloadRequest,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
+        NoOpPolicyGuard, ProcessHandleSummary, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -1610,15 +1610,49 @@ impl LoopRunInfoPort for HostManagedLoopProgressPort {
 #[async_trait]
 impl LoopProgressPort for HostManagedLoopProgressPort {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
+        let emitter = LoopHostMilestoneEmitter::new(
+            self.run_context.clone(),
+            Arc::clone(&self.milestone_sink),
+        );
         match event {
             LoopProgressEvent::DriverNote { kind, safe_summary } => {
-                LoopHostMilestoneEmitter::new(
-                    self.run_context.clone(),
-                    Arc::clone(&self.milestone_sink),
-                )
-                .driver_note(kind, safe_summary)
-                .await
+                emitter.driver_note(kind, safe_summary).await
             }
+            LoopProgressEvent::IterationStarted { iteration } => {
+                emitter.iteration_started(iteration).await
+            }
+            LoopProgressEvent::PromptBundleBuilt { .. } => Ok(()),
+            LoopProgressEvent::CapabilityBatchStarted {
+                iteration,
+                call_count,
+                policy,
+            } => {
+                emitter
+                    .capability_batch_started(iteration, call_count, policy)
+                    .await
+            }
+            LoopProgressEvent::CapabilityBatchCompleted {
+                iteration,
+                result_count,
+                denied_count,
+                gated_count,
+                failed_count,
+            } => {
+                emitter
+                    .capability_batch_completed(
+                        iteration,
+                        result_count,
+                        denied_count,
+                        gated_count,
+                        failed_count,
+                    )
+                    .await
+            }
+            LoopProgressEvent::GateBlocked {
+                iteration,
+                gate_kind,
+            } => emitter.gate_blocked(iteration, gate_kind).await,
+            LoopProgressEvent::CheckpointWritten { .. } => Ok(()),
         }
     }
 }
