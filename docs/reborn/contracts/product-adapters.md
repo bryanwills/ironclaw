@@ -54,7 +54,7 @@ projection update
   `ironclaw_host_runtime`, `ironclaw_network`, `ironclaw_secrets`,
   `ironclaw_filesystem`, raw process spawning, or
   `ironclaw_turns::runner`. Boundary tests in
-  `crates/ironclaw_product_adapters/tests/product_adapter_contract.rs`
+  `crates/product/ironclaw_product_adapters/tests/product_adapter_contract.rs`
   enforce this.
 - Delivery failures are best-effort. They record a separate
   `DeliveryStatus` and never mutate canonical transcript/projection/turn
@@ -166,6 +166,6 @@ configured for the same installation; see
 | Egress policy enforcement | `[implemented slice]` |
 | `NativeProductAdapterRunner` | `[implemented slice]` |
 | Telegram v2 native adapter | `[implemented slice]` (`ironclaw_telegram_v2_adapter`) |
-| wasmtime component-model glue | `[contract exists]` (WIT in `crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit`) |
+| wasmtime component-model glue | `[contract exists]` (WIT in `crates/runtime/ironclaw_wasm_product_adapters/wit/product_adapter.wit`) |
 | Web / Slack / Discord / WhatsApp / Feishu / Signal v2 adapters | `[not implemented]` |
 | Production wiring of v2 webhook route | `[not implemented]` (default-off flag exists; route registration is a follow-up) |

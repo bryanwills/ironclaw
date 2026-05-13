@@ -2,7 +2,7 @@
 
 Date: 2026-04-24
 Status: V1 contract slice
-Crate: `crates/ironclaw_dispatcher`
+Crate: `crates/runtime/ironclaw_dispatcher`
 
 ---
 

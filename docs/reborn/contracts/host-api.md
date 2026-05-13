@@ -2,7 +2,7 @@
 
 **Status:** Draft v0 contract
 **Date:** 2026-04-24
-**Target crate:** `crates/ironclaw_host_api`
+**Target crate:** `crates/foundation/ironclaw_host_api`
 **Source architecture docs:**
 
 - `docs/reborn/2026-04-24-host-api-invariants-and-authorization.md`
@@ -68,7 +68,7 @@ ironclaw_host_api -> no system-service or runtime crates
 ## 3. Proposed module layout
 
 ```text
-crates/ironclaw_host_api/src/
+crates/foundation/ironclaw_host_api/src/
   lib.rs
   ids.rs
   path.rs
@@ -1052,7 +1052,7 @@ If an implementation detail requires one of those, stop and move it to the ownin
 
 The host API contract is ready when:
 
-- `crates/ironclaw_host_api` builds as a standalone workspace crate
+- `crates/foundation/ironclaw_host_api` builds as a standalone workspace crate
 - no runtime/system-service crate dependency is introduced
 - public types in this document exist or have a documented v0 substitute
 - validation constructors exist for authority-bearing strings

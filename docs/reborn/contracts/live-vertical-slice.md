@@ -60,7 +60,7 @@ The default dispatcher example uses in-crate echo adapters so `ironclaw_dispatch
 
 ## 3. What this validates
 
-The integration test `crates/ironclaw_dispatcher/tests/vertical_slice_contract.rs` validates:
+The integration test `crates/runtime/ironclaw_dispatcher/tests/vertical_slice_contract.rs` validates:
 
 - extension manifests are read from `LocalFilesystem` via `/system/extensions`
 - extension discovery returns WASM, Script, and MCP packages

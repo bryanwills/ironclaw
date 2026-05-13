@@ -16,7 +16,7 @@ Error: RuntimeError: execution paused by gate 'approval'
 instead of an approval prompt. The script aborts, the gate is never
 surfaced to the user.
 
-Concretely: in `crates/ironclaw_engine/src/executor/scripting.rs`, the
+Concretely: in `crates/agent/ironclaw_engine/src/executor/scripting.rs`, the
 async tool-resolve path (`resolve_tool_future`, line 1740-1766) catches
 `Err(EngineError::GatePaused { .. })` from `EffectExecutor::execute_action`,
 emits an `ApprovalRequested` event, and converts the gate to a
@@ -61,7 +61,7 @@ exact suspension point. No replay, no restart, no double execution.
 ### Core mechanism: a `GateController` callback on `ThreadExecutionContext`
 
 ```rust
-// crates/ironclaw_engine/src/gate/mod.rs
+// crates/agent/ironclaw_engine/src/gate/mod.rs
 
 #[derive(Debug, Clone)]
 pub struct GatePauseRequest {
@@ -466,7 +466,7 @@ recording so a future reader doesn't get confused:
 ## Build order
 
 1. `GatePauseRequest` / `GateController` / `CancellingGateController`
-   in `crates/ironclaw_engine/src/gate/mod.rs`. Required field
+   in `crates/agent/ironclaw_engine/src/gate/mod.rs`. Required field
    (`Arc<dyn GateController>`, not `Option`) on
    `traits/effect.rs::ThreadExecutionContext`. Restricted to
    `Approval` resume-kind for this PR.

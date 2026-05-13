@@ -74,8 +74,8 @@ Use one of these patterns:
 
 Existing examples to follow:
 
-- `crates/ironclaw_product_adapters/src/auth.rs`: `ProtocolAuthEvidence` can serialize verified evidence but only failed evidence can deserialize from wire; verified evidence is host-minted through a private seal.
-- `crates/ironclaw_trust`: privileged `EffectiveTrustClass` values are host-policy-only; manifest requests do not become grants.
+- `crates/product/ironclaw_product_adapters/src/auth.rs`: `ProtocolAuthEvidence` can serialize verified evidence but only failed evidence can deserialize from wire; verified evidence is host-minted through a private seal.
+- `crates/policy/ironclaw_trust`: privileged `EffectiveTrustClass` values are host-policy-only; manifest requests do not become grants.
 
 ### 3.3 Loop-exit policy implication
 

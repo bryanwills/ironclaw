@@ -43,7 +43,7 @@ turned each into a compile error.
 ## Extension/Auth identity invariant
 
 See `CLAUDE.md` → "Extension/Auth Invariants" for routing rules. The
-types live in `crates/ironclaw_common/src/identity.rs`:
+types live in `crates/foundation/ironclaw_common/src/identity.rs`:
 
 - [`CredentialName`] — backend secret identity (e.g.
   `telegram_bot_token`, `google_oauth_token`). Used for secrets-store

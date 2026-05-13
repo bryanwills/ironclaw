@@ -1193,7 +1193,7 @@ mod tests {
         );
     }
 
-    // Unit tests for is_sensitive_path live in crates/ironclaw_safety/src/sensitive_paths.rs.
+    // Unit tests for is_sensitive_path live in crates/policy/ironclaw_safety/src/sensitive_paths.rs.
     // Only integration-level tests that exercise the tool's execute() method belong here.
 
     #[tokio::test]

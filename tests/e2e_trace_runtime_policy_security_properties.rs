@@ -10,8 +10,8 @@
 //!
 //! Planner defense-in-depth (refusing `SpawnProcess`/`Network`/`UseSecret`
 //! against disabling policies) is covered by the substrate's
-//! `crates/ironclaw_host_runtime/src/planner.rs` unit tests and the
-//! `crates/ironclaw_host_runtime/tests/runtime_policy_planner_contract.rs`
+//! `crates/runtime/ironclaw_host_runtime/src/planner.rs` unit tests and the
+//! `crates/runtime/ironclaw_host_runtime/tests/runtime_policy_planner_contract.rs`
 //! integration tests — not duplicated here.
 
 use std::sync::Arc;

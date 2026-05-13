@@ -136,7 +136,7 @@ The self-improvement thread can create git branches and modify engine defaults:
 ```python
 # In the self-improvement thread:
 shell("git checkout -b self-improve/increase-truncation")
-read_file("crates/ironclaw_engine/src/executor/scripting.rs")
+read_file("crates/agent/ironclaw_engine/src/executor/scripting.rs")
 apply_patch(...)
 result = shell("cargo test -p ironclaw_engine")
 if "test result: ok" in result:
@@ -172,7 +172,7 @@ The database grows over time — after successfully fixing an issue, the self-im
 - Security-sensitive code (safety layer, policy engine, leak detection)
 - Database schemas / migrations
 - Test files (never weaken tests to make a fix pass)
-- Files outside `crates/ironclaw_engine/` and `src/bridge/` without human approval
+- Files outside `crates/agent/ironclaw_engine/` and `src/bridge/` without human approval
 
 **Orchestrator safety:**
 - Auto-rollback after 3 consecutive failures
@@ -195,10 +195,10 @@ The mission is capped at 5 threads per day (`max_threads_per_day: 5`).
 
 | File | Purpose |
 |------|---------|
-| `crates/ironclaw_engine/orchestrator/default.py` | The v0 orchestrator (self-modifiable) |
-| `crates/ironclaw_engine/src/executor/orchestrator.rs` | Loading, versioning, rollback, host functions |
-| `crates/ironclaw_engine/src/executor/prompt.rs` | Prompt overlay loading |
-| `crates/ironclaw_engine/src/runtime/mission.rs` | Self-improvement mission, OnSystemEvent wiring, fix patterns |
+| `crates/agent/ironclaw_engine/orchestrator/default.py` | The v0 orchestrator (self-modifiable) |
+| `crates/agent/ironclaw_engine/src/executor/orchestrator.rs` | Loading, versioning, rollback, host functions |
+| `crates/agent/ironclaw_engine/src/executor/prompt.rs` | Prompt overlay loading |
+| `crates/agent/ironclaw_engine/src/runtime/mission.rs` | Self-improvement mission, OnSystemEvent wiring, fix patterns |
 | `docs/plans/2026-03-23-self-improving-engine.md` | Original design doc |
 | `docs/plans/2026-03-25-python-orchestrator.md` | Python orchestrator design doc |
 

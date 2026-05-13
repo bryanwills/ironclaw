@@ -154,7 +154,7 @@ organised by the source surface they exercise:
   used by `text_entity_windows`.
 
 **Deferred:** the integration contract suite at
-`crates/ironclaw_telegram_v2_adapter/tests/product_adapter_telegram_contract.rs`
+`crates/product/ironclaw_telegram_v2_adapter/tests/product_adapter_telegram_contract.rs`
 (referenced in earlier revisions of this doc with `ac<N>_*`
 acceptance-bullet test names) was removed pending a case-by-case
 port to the post-#3352 product-adapter API
@@ -164,7 +164,7 @@ returning `ProductRenderOutcome`, `EgressRequest` builder API,
 paired `(host, credential)` egress policy, and
 `parse_inbound -> Result<ParsedProductInbound, _>`). The recorded
 Telegram payload fixtures under
-`crates/ironclaw_telegram_v2_adapter/tests/fixtures/*.json` are
+`crates/product/ironclaw_telegram_v2_adapter/tests/fixtures/*.json` are
 retained for that followup. Once the port lands, each restored test
 should carry an `ac<N>_*` name referencing the exact AC bullet from
 issue #3285.

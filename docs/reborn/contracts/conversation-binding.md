@@ -35,7 +35,7 @@ Adapters pass structured external actor/conversation refs to this boundary. The 
 
 ## 3. Implemented semantic slice
 
-`crates/ironclaw_conversations` provides the first contract slice:
+`crates/state/ironclaw_conversations` provides the first contract slice:
 
 - typed external refs: `AdapterKind`, `AdapterInstallationId`, `ExternalActorRef`, `ExternalConversationRef`, `ExternalEventId`;
 - `ConversationBindingService`, `SessionThreadService`, and `InboundTurnService` traits/DTOs;
@@ -77,7 +77,7 @@ This is not the final durable transcript store. The conversation contract stores
 Current semantic coverage lives in:
 
 ```text
-crates/ironclaw_conversations/tests/inbound_contract.rs
+crates/state/ironclaw_conversations/tests/inbound_contract.rs
 ```
 
 Run:

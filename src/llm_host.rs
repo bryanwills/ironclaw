@@ -7,7 +7,7 @@
 //! file helpers. The adapters in this module wire those concrete impls into
 //! the LLM-side traits without forcing `ironclaw_llm` to know about them.
 //!
-//! See `crates/ironclaw_llm/src/host.rs` for the trait definitions.
+//! See `crates/agent/ironclaw_llm/src/host.rs` for the trait definitions.
 
 use std::sync::Arc;
 

@@ -184,7 +184,7 @@ async fn compute_frontend_cache_key(workspace: &crate::workspace::Workspace) -> 
 /// customization can ride a future JS-side fetch against
 /// `/api/frontend/layout`, which is authenticated and routes through
 /// `resolve_workspace(&state, &user)` so it returns the right workspace.
-/// See `crates/ironclaw_gateway/static/js/core/widgets.js` — the
+/// See `crates/product/ironclaw_gateway/static/js/core/widgets.js` — the
 /// layout-config IIFE already reads `window.__IRONCLAW_LAYOUT__`, which
 /// a future change can populate from a `fetch('/api/frontend/layout')`
 /// after auth.

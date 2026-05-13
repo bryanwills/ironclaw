@@ -4,7 +4,7 @@ This document describes the IronClaw Engine v2 architecture for new contributors
 
 ## Overview
 
-IronClaw Engine v2 replaces ~10 fragmented abstractions (Session, Job, Routine, Channel, Tool, Skill, Hook, Observer, Extension, LoopDelegate) with a unified model built on 5 primitives. The engine lives in `crates/ironclaw_engine/` as a standalone crate with no dependency on the main `ironclaw` crate.
+IronClaw Engine v2 replaces ~10 fragmented abstractions (Session, Job, Routine, Channel, Tool, Skill, Hook, Observer, Extension, LoopDelegate) with a unified model built on 5 primitives. The engine lives in `crates/agent/ironclaw_engine/` as a standalone crate with no dependency on the main `ironclaw` crate.
 
 The key architectural innovation: **the execution loop is Python code running inside the Monty interpreter, not Rust**. Rust provides the infrastructure (LLM calls, tool execution, safety, persistence). Python provides the orchestration (tool dispatch, output formatting, state management). This makes the glue layer self-modifiable at runtime by the self-improvement Mission.
 
@@ -476,18 +476,18 @@ Pica's model is optimized for programmatic API access (SDK calls from code). For
 
 | File | Purpose |
 |------|---------|
-| `crates/ironclaw_engine/orchestrator/default.py` | The Python execution loop (v0) |
-| `crates/ironclaw_engine/src/executor/orchestrator.rs` | Host functions + versioning + loading |
-| `crates/ironclaw_engine/src/executor/loop_engine.rs` | Bootstrap (loads + runs orchestrator, skill injection) |
-| `crates/ironclaw_engine/src/executor/scripting.rs` | Monty VM integration, user code execution, CodeAct skill snippets |
-| `crates/ironclaw_engine/src/executor/prompt.rs` | System prompt construction, skill section formatting |
-| `crates/ironclaw_engine/src/runtime/manager.rs` | ThreadManager (spawn, stop, join, skill selector wiring) |
-| `crates/ironclaw_engine/src/runtime/mission.rs` | MissionManager (lifecycle, firing, learning missions) |
-| `crates/ironclaw_engine/src/capability/skill_selector.rs` | MemoryDoc → LoadedSkill bridge, deterministic selection |
-| `crates/ironclaw_engine/src/capability/skill_tracker.rs` | Confidence tracking, versioned updates, rollback |
-| `crates/ironclaw_engine/src/types/` | All core data structures |
-| `crates/ironclaw_engine/src/traits/` | LlmBackend, Store, EffectExecutor |
-| `crates/ironclaw_skills/` | Shared skills crate (types, selector, parser, validation) |
+| `crates/agent/ironclaw_engine/orchestrator/default.py` | The Python execution loop (v0) |
+| `crates/agent/ironclaw_engine/src/executor/orchestrator.rs` | Host functions + versioning + loading |
+| `crates/agent/ironclaw_engine/src/executor/loop_engine.rs` | Bootstrap (loads + runs orchestrator, skill injection) |
+| `crates/agent/ironclaw_engine/src/executor/scripting.rs` | Monty VM integration, user code execution, CodeAct skill snippets |
+| `crates/agent/ironclaw_engine/src/executor/prompt.rs` | System prompt construction, skill section formatting |
+| `crates/agent/ironclaw_engine/src/runtime/manager.rs` | ThreadManager (spawn, stop, join, skill selector wiring) |
+| `crates/agent/ironclaw_engine/src/runtime/mission.rs` | MissionManager (lifecycle, firing, learning missions) |
+| `crates/agent/ironclaw_engine/src/capability/skill_selector.rs` | MemoryDoc → LoadedSkill bridge, deterministic selection |
+| `crates/agent/ironclaw_engine/src/capability/skill_tracker.rs` | Confidence tracking, versioned updates, rollback |
+| `crates/agent/ironclaw_engine/src/types/` | All core data structures |
+| `crates/agent/ironclaw_engine/src/traits/` | LlmBackend, Store, EffectExecutor |
+| `crates/agent/ironclaw_skills/` | Shared skills crate (types, selector, parser, validation) |
 | `src/bridge/router.rs` | Engine v2 entry point, skill migration at startup |
 | `src/bridge/skill_migration.rs` | V1 SKILL.md → V2 MemoryDoc conversion |
 | `src/bridge/effect_adapter.rs` | Tool execution bridge with safety |

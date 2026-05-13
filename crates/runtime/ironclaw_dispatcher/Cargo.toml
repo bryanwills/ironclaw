@@ -1,0 +1,20 @@
+[package]
+name = "ironclaw_dispatcher"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+ironclaw_events = { path = "../../state/ironclaw_events" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_filesystem = { path = "../../policy/ironclaw_filesystem" }
+ironclaw_host_api = { path = "../../foundation/ironclaw_host_api" }
+ironclaw_resources = { path = "../../policy/ironclaw_resources" }
+serde_json = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
+tracing-test = { version = "0.2", features = ["no-env-filter"] }

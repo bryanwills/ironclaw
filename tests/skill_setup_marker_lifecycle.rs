@@ -10,9 +10,9 @@
 //!    absent from the LLM system prompt
 //!
 //! This is the integration-tier cover for the unit tests in
-//! `crates/ironclaw_skills/src/selector.rs::tests::test_setup_marker_*`
+//! `crates/agent/ironclaw_skills/src/selector.rs::tests::test_setup_marker_*`
 //! and the v2 equivalent in
-//! `crates/ironclaw_engine/src/executor/orchestrator.rs::handle_list_skills`.
+//! `crates/agent/ironclaw_engine/src/executor/orchestrator.rs::handle_list_skills`.
 //!
 //! ## Why assert on the LLM system prompt content, not on `active_skill_names()`
 //!

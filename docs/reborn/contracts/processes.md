@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** V1 contract slice
-**Crate:** `crates/ironclaw_processes`
+**Crate:** `crates/runtime/ironclaw_processes`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capabilities.md`, `docs/reborn/contracts/filesystem.md`, `docs/reborn/contracts/events.md`
 
 ---

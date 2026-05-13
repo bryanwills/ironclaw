@@ -51,10 +51,10 @@ IronClaw currently has Session, Job, Routine, Channel, Tool, Skill, Hook, Observ
 
 ## Crate Structure
 
-Single crate: `crates/ironclaw_engine/`
+Single crate: `crates/agent/ironclaw_engine/`
 
 ```
-crates/ironclaw_engine/
+crates/agent/ironclaw_engine/
   Cargo.toml
   CLAUDE.md
   src/
@@ -220,7 +220,7 @@ Learning is driven by trace analysis plus learning missions (`self-improvement`,
 
 ### 4.3 Compaction (from RLM) — IMPLEMENTED
 
-Compaction is orchestrator-owned, in Python. See `crates/ironclaw_engine/orchestrator/default.py:240-310`:
+Compaction is orchestrator-owned, in Python. See `crates/agent/ironclaw_engine/orchestrator/default.py:240-310`:
 
 - Triggers when token count exceeds the configured `compaction_threshold` of the model limit (defaults to 85%)
 - Calls `__llm_complete__()` to produce a summary
@@ -274,7 +274,7 @@ pub struct Mission {
 
 ### 4.9 Tool reliability learning
 
-`ReliabilityTracker` (`crates/ironclaw_engine/src/reliability.rs`) records EMA-smoothed success rate and latency per action. Proposed follow-up work tracked in issue #2800 (PR-B): wire `EffectBridgeAdapter` to record outcomes after dispatch, have `build_step_context` optionally surface a "recently unreliable actions" prompt section, and finalize any thresholds, entry caps, and feature-flag/kill-switch behavior (including a possible `ENGINE_V2_RELIABILITY_HINTS` control) once implemented.
+`ReliabilityTracker` (`crates/agent/ironclaw_engine/src/reliability.rs`) records EMA-smoothed success rate and latency per action. Proposed follow-up work tracked in issue #2800 (PR-B): wire `EffectBridgeAdapter` to record outcomes after dispatch, have `build_step_context` optionally surface a "recently unreliable actions" prompt section, and finalize any thresholds, entry caps, and feature-flag/kill-switch behavior (including a possible `ENGINE_V2_RELIABILITY_HINTS` control) once implemented.
 
 ### 4.10 Tests
 - Learning missions produce the correct knowledge artifacts from completed threads
@@ -422,8 +422,8 @@ Approval, authentication, and post-action auth chaining all use the same pause/r
 
 For `WriteExternal` + `Financial` effects, the unified gate mechanism satisfies the approval invariant:
 
-- `PolicyEngine::evaluate_with_provenance` injects `RequireApproval` for `Financial` effects (via `LlmGenerated` or `ToolOutput` provenance) and `WriteExternal` effects (via `LlmGenerated` provenance) (`crates/ironclaw_engine/src/capability/policy.rs:126-169`).
-- The Tier 0 executor halts the batch on `RequireApproval` and emits `ThreadOutcome::GatePaused` (`crates/ironclaw_engine/src/executor/structured.rs:139-171`).
+- `PolicyEngine::evaluate_with_provenance` injects `RequireApproval` for `Financial` effects (via `LlmGenerated` or `ToolOutput` provenance) and `WriteExternal` effects (via `LlmGenerated` provenance) (`crates/agent/ironclaw_engine/src/capability/policy.rs:126-169`).
+- The Tier 0 executor halts the batch on `RequireApproval` and emits `ThreadOutcome::GatePaused` (`crates/agent/ironclaw_engine/src/executor/structured.rs:139-171`).
 - Resume flows through `POST /api/chat/gate/resolve` — same path as auth gates.
 
 A separate "simulate → preview → approve → execute" flow is intentionally not implemented: the gate mechanism already bounds blast radius, and a preview step would need to round-trip the effect payload through another LLM turn. If a future surface (e.g. DeFi portfolio) requires preview, it should be added at the `EffectBridgeAdapter` boundary for that specific effect, not as a policy-layer primitive.

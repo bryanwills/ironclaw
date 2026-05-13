@@ -277,12 +277,12 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list
 Future commands should follow the crate-local agent contract in:
 
 ```text
-crates/ironclaw_reborn_cli/AGENTS.md
+crates/agent/ironclaw_reborn_cli/AGENTS.md
 ```
 
 Short version:
 
-1. add one command module under `crates/ironclaw_reborn_cli/src/commands/`;
+1. add one command module under `crates/agent/ironclaw_reborn_cli/src/commands/`;
 2. register it in `commands::Command`;
 3. resolve and pass `RebornCliContext` from dispatch only when the command needs boot config;
 4. keep pure commands independent from Reborn home resolution;
@@ -295,7 +295,7 @@ Do not port the current `src/cli/*` command tree wholesale. Port commands one at
 
 `ironclaw-reborn` is **not yet included in cargo-dist release artifacts**.
 
-Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root `ironclaw` package artifacts. Removing `dist = false` alone is not enough to ship `ironclaw-reborn` in the existing `ironclaw-v*` release workflow because that workflow is shaped around the root `ironclaw` package tag. Enabling a standalone `ironclaw_reborn_cli` release also requires cargo-dist WiX metadata/template work and an explicit tag/versioning decision.
+Current `dist plan --output-format=json` with `crates/agent/ironclaw_reborn_cli` marked `dist = false` emits only the root `ironclaw` package artifacts. Removing `dist = false` alone is not enough to ship `ironclaw-reborn` in the existing `ironclaw-v*` release workflow because that workflow is shaped around the root `ironclaw` package tag. Enabling a standalone `ironclaw_reborn_cli` release also requires cargo-dist WiX metadata/template work and an explicit tag/versioning decision.
 
 Follow-up issue: #3483 tracks packaging `ironclaw-reborn` in release artifacts.
 
@@ -306,4 +306,4 @@ Until #3483 is resolved, keep:
 dist = false
 ```
 
-in `crates/ironclaw_reborn_cli/Cargo.toml` so releases do not silently claim to ship an unverified Reborn binary package.
+in `crates/agent/ironclaw_reborn_cli/Cargo.toml` so releases do not silently claim to ship an unverified Reborn binary package.

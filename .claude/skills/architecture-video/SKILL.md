@@ -21,7 +21,7 @@ Generates and maintains the animated architecture overview video in `docs/archit
 Read these files to understand the current system architecture:
 
 - `CLAUDE.md` — top-level project structure, module specs, key traits, principles
-- `crates/ironclaw_engine/CLAUDE.md` — engine v2 primitives, execution loop, CodeAct
+- `crates/agent/ironclaw_engine/CLAUDE.md` — engine v2 primitives, execution loop, CodeAct
 - `src/agent/CLAUDE.md` — agent loop architecture
 - `src/llm/CLAUDE.md` — LLM provider architecture
 - `src/db/CLAUDE.md` — database dual-backend architecture

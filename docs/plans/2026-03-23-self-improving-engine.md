@@ -28,7 +28,7 @@ Each fix used the same tools the engine has access to: `read_file`, `apply_patch
 
 The engine modifies its own prompt templates based on accumulated experience.
 
-**What it changes:** `crates/ironclaw_engine/prompts/*.md` files
+**What it changes:** `crates/agent/ironclaw_engine/prompts/*.md` files
 
 **Examples:**
 - Adds "NEVER call web_fetch — use http() or llm_context()" to rules section
@@ -67,7 +67,7 @@ The engine adjusts its own defaults and mappings.
 
 The engine proposes Rust code changes to fix bugs it detects in itself.
 
-**What it changes:** Any file in `crates/ironclaw_engine/` or `src/bridge/`
+**What it changes:** Any file in `crates/agent/ironclaw_engine/` or `src/bridge/`
 
 **Examples:**
 - Fix unsafe byte slicing (detected by panics in traces)
@@ -81,7 +81,7 @@ The engine proposes Rust code changes to fix bugs it detects in itself.
 1. Always work in a git branch (`self-improve/{timestamp}`)
 2. Run full test suite (`cargo test -p ironclaw_engine`)
 3. Run clippy (`cargo clippy -p ironclaw_engine --all-targets -- -D warnings`)
-4. Never modify files outside `crates/ironclaw_engine/` and `src/bridge/` without human approval
+4. Never modify files outside `crates/agent/ironclaw_engine/` and `src/bridge/` without human approval
 5. Max patch size: 50 lines changed
 6. Generate a PR (not direct commit) with trace evidence
 7. Human approves or rejects the PR
@@ -126,9 +126,9 @@ Then propose and validate a fix.
 ## Available information
 - Trace JSON: full message history, events, tool results, issues detected
 - Source code: read any file in the codebase
-- Prompt templates: crates/ironclaw_engine/prompts/*.md
+- Prompt templates: crates/agent/ironclaw_engine/prompts/*.md
 - Bridge adapters: src/bridge/*.rs
-- Engine code: crates/ironclaw_engine/src/**/*.rs
+- Engine code: crates/agent/ironclaw_engine/src/**/*.rs
 
 ## Fix levels
 1. PROMPT EDIT: Modify prompts/*.md to prevent LLM mistakes
@@ -263,7 +263,7 @@ This database itself is a MemoryDoc that the self-improvement thread can read an
 **Hard boundaries (never auto-modify):**
 - Security-sensitive code (safety layer, policy engine, leak detection)
 - Database schemas / migrations
-- Files outside `crates/ironclaw_engine/` and `src/bridge/` (without human approval)
+- Files outside `crates/agent/ironclaw_engine/` and `src/bridge/` (without human approval)
 - Test files (never weaken tests to make a fix pass)
 
 ---

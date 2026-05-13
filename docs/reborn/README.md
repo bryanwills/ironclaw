@@ -11,24 +11,24 @@ The `reborn-integration` branch currently exposes Reborn structure primarily thr
 | Need | Start with |
 | --- | --- |
 | Standalone Reborn binary | `docs/reborn-binary.md` |
-| Host API vocabulary | `crates/ironclaw_host_api/` |
-| Host API local rules | `crates/ironclaw_host_api/CLAUDE.md` |
-| Host/runtime composition and shared runtime HTTP egress | `crates/ironclaw_host_runtime/` |
-| Architecture dependency guardrails | `crates/ironclaw_architecture/` |
-| Reborn dependency-boundary tests | `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` |
-| Events substrate | `crates/ironclaw_events/` |
-| Event projection read models | `crates/ironclaw_event_projections/` |
-| Standalone durable event/audit stores | `crates/ironclaw_reborn_event_store/` |
-| Filesystem substrate | `crates/ironclaw_filesystem/` |
-| Network policy and HTTP transport substrate | `crates/ironclaw_network/` |
-| Secrets metadata and one-shot leases | `crates/ironclaw_secrets/` |
-| Resource governor substrate | `crates/ironclaw_resources/` |
-| Authorization substrate | `crates/ironclaw_authorization/` |
-| Approval substrate | `crates/ironclaw_approvals/` |
-| Run-state substrate | `crates/ironclaw_run_state/` |
-| WASM runtime lane and WIT HTTP adapter | `crates/ironclaw_wasm/` |
-| Script runtime lane and host HTTP adapter | `crates/ironclaw_scripts/` |
-| MCP runtime lane and host-mediated HTTP/fail-closed process policy | `crates/ironclaw_mcp/` |
+| Host API vocabulary | `crates/foundation/ironclaw_host_api/` |
+| Host API local rules | `crates/foundation/ironclaw_host_api/CLAUDE.md` |
+| Host/runtime composition and shared runtime HTTP egress | `crates/runtime/ironclaw_host_runtime/` |
+| Architecture dependency guardrails | `crates/meta/ironclaw_architecture/` |
+| Reborn dependency-boundary tests | `crates/meta/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` |
+| Events substrate | `crates/state/ironclaw_events/` |
+| Event projection read models | `crates/state/ironclaw_event_projections/` |
+| Standalone durable event/audit stores | `crates/state/ironclaw_reborn_event_store/` |
+| Filesystem substrate | `crates/policy/ironclaw_filesystem/` |
+| Network policy and HTTP transport substrate | `crates/policy/ironclaw_network/` |
+| Secrets metadata and one-shot leases | `crates/policy/ironclaw_secrets/` |
+| Resource governor substrate | `crates/policy/ironclaw_resources/` |
+| Authorization substrate | `crates/policy/ironclaw_authorization/` |
+| Approval substrate | `crates/policy/ironclaw_approvals/` |
+| Run-state substrate | `crates/state/ironclaw_run_state/` |
+| WASM runtime lane and WIT HTTP adapter | `crates/runtime/ironclaw_wasm/` |
+| Script runtime lane and host HTTP adapter | `crates/runtime/ironclaw_scripts/` |
+| MCP runtime lane and host-mediated HTTP/fail-closed process policy | `crates/runtime/ironclaw_mcp/` |
 | Replay fixtures | `tests/fixtures/llm_traces/README.md` |
 | Replay workflow | `.github/workflows/replay-gate.yml` |
 | E2E test harness | `tests/e2e/README.md` |

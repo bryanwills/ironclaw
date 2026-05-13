@@ -2,7 +2,7 @@
 
 Fuzz testing for IronClaw code paths that depend on the full crate, using [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (libFuzzer).
 
-> **Note:** Safety-specific fuzz targets (sanitizer, validator, leak detector, credential detect) have moved to `crates/ironclaw_safety/fuzz/`. See that directory's README for details.
+> **Note:** Safety-specific fuzz targets (sanitizer, validator, leak detector, credential detect) have moved to `crates/policy/ironclaw_safety/fuzz/`. See that directory's README for details.
 
 ## Targets
 
@@ -34,4 +34,4 @@ cargo +nightly fuzz run fuzz_tool_params -- -max_total_time=300
 3. Create `fuzz/corpus/fuzz_<name>/` for seed inputs
 4. Exercise real IronClaw code paths, not just generic serde
 
-For safety-only targets, add them to `crates/ironclaw_safety/fuzz/` instead.
+For safety-only targets, add them to `crates/policy/ironclaw_safety/fuzz/` instead.

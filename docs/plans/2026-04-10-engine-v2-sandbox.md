@@ -38,7 +38,7 @@ What this plan DOES that #1894 will reuse:
 
 ## Locked design decisions
 
-1. **Granularity**: One container per `Project` (`crates/ironclaw_engine/src/types/project.rs`). All threads in the same project — including sub-threads spawned by `rlm_query()` which inherit `project_id` at `crates/ironclaw_engine/src/runtime/manager.rs:505` — share the container.
+1. **Granularity**: One container per `Project` (`crates/agent/ironclaw_engine/src/types/project.rs`). All threads in the same project — including sub-threads spawned by `rlm_query()` which inherit `project_id` at `crates/agent/ironclaw_engine/src/runtime/manager.rs:505` — share the container.
 2. **Persistence**: Named container. `docker create` once, `docker start`/`stop` lifecycle, removed only on project deletion or explicit user reset. Container's own writable layer holds installed dependencies and accumulates over time.
 3. **Mount**: `~/.ironclaw/projects/<user_id>/<project_id>/` (host) → `/project/` (container) bind mount, read-write. Project's user files live here.
 4. **Daemon model**: Container PID 1 is a minimal init (`tini`). Tool-execution daemon is spawned via `docker exec -i sandbox_daemon` per IronClaw session. Daemon talks JSON-RPC over stdin/stdout to the host.
@@ -96,7 +96,7 @@ For v1 of this plan, the routing is narrowly scoped: only the five sandboxed too
 ## Mount backend abstraction (minimal subset of #1894)
 
 ```rust
-// crates/ironclaw_engine/src/workspace/mount.rs (new)
+// crates/agent/ironclaw_engine/src/workspace/mount.rs (new)
 
 pub trait MountBackend: Send + Sync {
     async fn read(&self, rel_path: &Path) -> Result<Vec<u8>, MountError>;
@@ -187,8 +187,8 @@ Threads do not own containers. They use the project's container if it exists, la
 
 ### New code
 
-- `crates/ironclaw_engine/src/workspace/mount.rs` — `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`. Minimal subset of #1894's mount-table types.
-- `crates/ironclaw_engine/src/types/project.rs` — add `workspace_path: Option<PathBuf>` field to `Project`. Accessor returns `~/.ironclaw/projects/<user_id>/<project_id>/` if unset.
+- `crates/agent/ironclaw_engine/src/workspace/mount.rs` — `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`. Minimal subset of #1894's mount-table types.
+- `crates/agent/ironclaw_engine/src/types/project.rs` — add `workspace_path: Option<PathBuf>` field to `Project`. Accessor returns `~/.ironclaw/projects/<user_id>/<project_id>/` if unset.
 - `src/bridge/sandbox/mod.rs` — new submodule of bridge. Public types: `ProjectSandboxManager`, `ContainerHandle`, `SandboxConfig`.
 - `src/bridge/sandbox/manager.rs` — `ProjectSandboxManager` owns `Arc<RwLock<HashMap<ProjectId, ContainerHandle>>>` plus an idle-timeout background task. Provides `dispatch(project_id, request) -> Response`.
 - `src/bridge/sandbox/handle.rs` — `ContainerHandle` wraps the `bollard::Container` + the active `docker exec` stream. Owns the request/response correlation map (`HashMap<RequestId, oneshot::Sender<Response>>`). Background reader task parses NDJSON from daemon stdout, looks up `id`, sends to the waiting oneshot.
@@ -214,12 +214,12 @@ Threads do not own containers. They use the project's container if it exists, la
 - `src/tools/builtin/shell.rs` — works as-is when constructed with `working_dir=/project/`
 - `src/tools/builtin/path_utils.rs:78` — existing `validate_path` enforces the sandbox at the tool layer
 - `src/tools/registry.rs` — used by the daemon to register the five sandbox tools
-- `crates/ironclaw_engine/src/runtime/manager.rs` — no changes; the engine doesn't need to know about sandboxes. All routing lives in the bridge.
+- `crates/agent/ironclaw_engine/src/runtime/manager.rs` — no changes; the engine doesn't need to know about sandboxes. All routing lives in the bridge.
 
 ## Edge cases addressed
 
 - **`shell_exec` cwd**: Daemon constructs the shell tool with `working_dir=/project/` so commands without an explicit `workdir` param run in the project root.
-- **Sub-threads via `rlm_query()`**: Inherit `project_id` (`crates/ironclaw_engine/src/runtime/manager.rs:505`), so they automatically use the parent project's container. No special case needed.
+- **Sub-threads via `rlm_query()`**: Inherit `project_id` (`crates/agent/ironclaw_engine/src/runtime/manager.rs:505`), so they automatically use the parent project's container. No special case needed.
 - **Project folder doesn't exist on first call**: `lifecycle::ensure_project_dir(project_id)` creates `~/.ironclaw/projects/<user_id>/<project_id>/` with mode 0700 before `docker create`. Idempotent.
 - **Cold-start latency**: First sandboxed tool call to a stopped container pays ~500ms (start) + ~50ms (exec daemon). First call to a never-created project pays ~1–2s (create + start + image pull on first ever run). Acceptable; not in the hot path of conversational chat.
 - **Container crash distinction**: `ContainerHandle::dispatch` returns `EngineError::ToolError` with `code=sandbox_error` for IPC failures. The orchestrator can distinguish these from `code=tool_error`.
@@ -239,7 +239,7 @@ Each phase is independently shippable and reviewable.
 
 ### Phase 1: Mount-backend abstraction (subset of #1894 Phase 1) — DONE (#2211)
 
-- Create `crates/ironclaw_engine/src/workspace/mount.rs` with `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`.
+- Create `crates/agent/ironclaw_engine/src/workspace/mount.rs` with `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`.
 - Create `src/bridge/sandbox/intercept.rs` with `maybe_intercept` and `SANDBOX_TOOL_NAMES`. (Originally planned as `src/bridge/workspace_filesystem.rs`; the actual location keeps the bridge-side glue colocated under `src/bridge/sandbox/`.)
 - Add `WorkspaceMounts` field to `EffectBridgeAdapter` via `set_workspace_mounts()` setter (consistent with existing optional collaborators like `set_http_interceptor`). Default is `None`; tests inject manually until Phase 6 wires the router.
 - Modify `EffectBridgeAdapter::execute_action_internal()` to detect `/project/` paths in input for the five sandbox-eligible tools and route through `WorkspaceMounts::resolve(path)`. Behavior is unchanged because the default backend slot is `None`.
@@ -248,7 +248,7 @@ Each phase is independently shippable and reviewable.
 
 ### Phase 2: Project workspace folder concept — DONE
 
-- Add `workspace_path: Option<PathBuf>` to `crates/ironclaw_engine/src/types/project.rs`.
+- Add `workspace_path: Option<PathBuf>` to `crates/agent/ironclaw_engine/src/types/project.rs`.
 - Add accessor that defaults to `~/.ironclaw/projects/<user_id>/<project_id>/`.
 - Add `ensure_project_dir(&self) -> io::Result<PathBuf>` helper that creates the dir with mode 0700 if missing.
 - Migrate `HybridStore` to persist the new field.
@@ -290,7 +290,7 @@ Each phase is independently shippable and reviewable.
 - Cleanup of stopped container handles after extended idle.
 - Logs/metrics: tool dispatch latency, container start time, in-flight queue depth.
 - Test that `cargo install rg && rg foo` persists across container stop/start.
-- Documentation in `crates/ironclaw_engine/CLAUDE.md` and `docs/plans/2026-03-20-engine-v2-architecture.md` (mark Phase 8 as in progress).
+- Documentation in `crates/agent/ironclaw_engine/CLAUDE.md` and `docs/plans/2026-03-20-engine-v2-architecture.md` (mark Phase 8 as in progress).
 - Brief note in nearai/ironclaw#1894 about the partial mount-backend abstraction this lands.
 
 ## Verification

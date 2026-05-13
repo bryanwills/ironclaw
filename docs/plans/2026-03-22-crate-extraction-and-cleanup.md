@@ -156,6 +156,6 @@ Discord, Slack, Telegram, Feishu, WhatsApp channels + 11 tools. Mature WIT inter
 
 ## Completed
 
-- [x] `ironclaw_safety` — extracted to `crates/ironclaw_safety/` (already existed)
-- [x] `ironclaw_engine` — new crate at `crates/ironclaw_engine/` (engine v2)
+- [x] `ironclaw_safety` — extracted to `crates/policy/ironclaw_safety/` (already existed)
+- [x] `ironclaw_engine` — new crate at `crates/agent/ironclaw_engine/` (engine v2)
 - [x] Transcription moved to `src/llm/transcription/` (PR #1559 on staging)

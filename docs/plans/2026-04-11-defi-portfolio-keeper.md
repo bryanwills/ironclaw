@@ -388,7 +388,7 @@ IntentLeg {
 
 ### 2.7 User-authored scripts (Monty/Python)
 
-The engine has Tier-1 Python scripting via Monty (`crates/ironclaw_engine/src/executor/scripting.rs`). Reuse it instead of building a macro system.
+The engine has Tier-1 Python scripting via Monty (`crates/agent/ironclaw_engine/src/executor/scripting.rs`). Reuse it instead of building a macro system.
 
 - **Location**: `projects/<id>/scripts/*.py`.
 - **Discovery**: skill lists available scripts in LLM context on each activation.
@@ -968,7 +968,7 @@ No changes expected to:
 - `src/db/` (uses existing project/memory schema)
 - `src/tools/dispatch.rs` (new tool registers through existing path)
 - `src/tools/mcp/` (no MCP server used)
-- `crates/ironclaw_safety/` (new tool inherits the pipeline)
+- `crates/policy/ironclaw_safety/` (new tool inherits the pipeline)
 
 ## 11. Follow-on: event-driven supporting missions (post-M6)
 

@@ -4,7 +4,7 @@ Summary of the Claude Code sessions that built the engine v2, self-improvement s
 
 ## Session 1: Engine v2 Foundation (2026-03-20 to 2026-03-22)
 
-Built the core engine crate (`crates/ironclaw_engine/`) from scratch in 6 phases:
+Built the core engine crate (`crates/agent/ironclaw_engine/`) from scratch in 6 phases:
 
 - **Phase 1**: Core types (Thread, Step, Capability, MemoryDoc, Project), trait definitions (LlmBackend, Store, EffectExecutor), thread state machine. 32 tests.
 - **Phase 2**: Execution engine (Tier 0) — CapabilityRegistry, LeaseManager, PolicyEngine, ThreadManager, ExecutionLoop with structured tool calls. 74 tests.
@@ -134,7 +134,7 @@ Studied all OAuth issues reported on GitHub (#1537, #902, #1500, #557, #1441, #1
 
 **Implementation** (6 files created/modified in `ironclaw_skills`, 4 in main crate):
 
-1. **Credential types in skill frontmatter** — `SkillCredentialSpec`, `SkillCredentialLocation`, `SkillOAuthConfig`, `ProviderRefreshStrategy` in `crates/ironclaw_skills/src/types.rs`. Skills declare credentials in YAML; values never in LLM context.
+1. **Credential types in skill frontmatter** — `SkillCredentialSpec`, `SkillCredentialLocation`, `SkillOAuthConfig`, `ProviderRefreshStrategy` in `crates/agent/ironclaw_skills/src/types.rs`. Skills declare credentials in YAML; values never in LLM context.
 
 2. **Validation** — HTTPS enforcement on OAuth URLs, credential name patterns, non-empty hosts. Invalid specs logged and skipped during registration.
 
@@ -239,7 +239,7 @@ New submission command: `/expected <what should have happened>`. Captures recent
 
 **Flow**: User → `/expected should have logged in via GitHub OAuth` → handler packages recent context → fires via both v2 MissionManager and v1 RoutineEngine → expected-behavior learning mission investigates gap, classifies root cause (MISSING_CAPABILITY / WRONG_TOOL_CHOICE / PROMPT_GAP / CONFIG_ISSUE / BUG), applies fix.
 
-Files: `src/agent/submission.rs` (parser), `src/agent/commands.rs` (handler), `src/agent/agent_loop.rs` (mission_manager slot + dispatch), `src/bridge/router.rs` (wiring), `crates/ironclaw_engine/src/runtime/mission.rs` (4th learning mission), `crates/ironclaw_engine/prompts/mission_expected_behavior.md` (goal prompt).
+Files: `src/agent/submission.rs` (parser), `src/agent/commands.rs` (handler), `src/agent/agent_loop.rs` (mission_manager slot + dispatch), `src/bridge/router.rs` (wiring), `crates/agent/ironclaw_engine/src/runtime/mission.rs` (4th learning mission), `crates/agent/ironclaw_engine/prompts/mission_expected_behavior.md` (goal prompt).
 
 ### Other Fixes
 
@@ -249,7 +249,7 @@ Files: `src/agent/submission.rs` (parser), `src/agent/commands.rs` (handler), `s
 - **Gateway new-thread fix** — `createNewThread()` now eagerly resets read-only state.
 - **Glob re-exports removed** — `pub use ironclaw_safety::*` and `pub use ironclaw_skills::*` deleted; ~35 files migrated to direct imports.
 - **Clippy cleanup** — collapsible ifs, shadow imports, missing SkillActivated match arm, duplicate repl.rs arms. Zero warnings across all crates.
-- **Mission prompt templates extracted** to `crates/ironclaw_engine/prompts/mission_*.md` from inline Rust strings.
+- **Mission prompt templates extracted** to `crates/agent/ironclaw_engine/prompts/mission_*.md` from inline Rust strings.
 
 ## Session 11: E2E Test Suite + Engine Hardening (2026-03-28 to 2026-03-29)
 
@@ -375,7 +375,7 @@ LLM calls http(url="https://api.github.com/...") →
 
 ### What's NOT Changed
 
-- Engine crate (`crates/ironclaw_engine/`) — `NeedAuthentication` already existed
+- Engine crate (`crates/agent/ironclaw_engine/`) — `NeedAuthentication` already existed
 - HTTP tool (`src/tools/builtin/http.rs`) — existing 401 detection stays as safety net
 - WASM credential injection — zero-exposure model unchanged
 - `/api/chat/auth-token` endpoint — already bypasses LLM correctly
@@ -432,8 +432,8 @@ Rather than adding engine states or new worker modes, plan mode maps to existing
 
 | File | Role |
 |------|------|
-| `crates/ironclaw_engine/src/types/memory.rs` | `DocType::Plan` variant |
-| `crates/ironclaw_common/src/event.rs` | `PlanStepDto`, `AppEvent::PlanUpdate`, tests |
+| `crates/agent/ironclaw_engine/src/types/memory.rs` | `DocType::Plan` variant |
+| `crates/foundation/ironclaw_common/src/event.rs` | `PlanStepDto`, `AppEvent::PlanUpdate`, tests |
 | `src/tools/builtin/plan.rs` | **New** — `PlanUpdateTool` (SSE broadcast) |
 | `src/tools/builtin/mod.rs` | Module + export registration |
 | `src/tools/registry.rs` | `register_plan_tools()`, auto-register in builtins |

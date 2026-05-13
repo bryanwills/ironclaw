@@ -335,7 +335,7 @@ impl Tool for MemorySearchTool {
 
                 let llm_messages = vec![
                     ironclaw_llm::ChatMessage::system(include_str!(
-                        "../../../crates/ironclaw_engine/prompts/memory_reasoning_synthesis.md"
+                        "../../../crates/agent/ironclaw_engine/prompts/memory_reasoning_synthesis.md"
                     )),
                     ironclaw_llm::ChatMessage::user(format!(
                         "Query: {query}\n\nMemory fragments:\n{fragments}"

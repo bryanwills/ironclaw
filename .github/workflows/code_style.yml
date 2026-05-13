@@ -59,7 +59,7 @@ jobs:
             echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/agent/ironclaw_reborn_cli/|crates/agent/ironclaw_reborn_config/|crates/meta/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
@@ -117,7 +117,7 @@ jobs:
           node-version: "22"
       - name: Check gateway JS syntax
         run: |
-          find crates/ironclaw_gateway/static/js -type f -name '*.js' \
+          find crates/product/ironclaw_gateway/static/js -type f -name '*.js' \
             -exec node --check {} +
 
   deny-check:

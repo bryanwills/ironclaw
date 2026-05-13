@@ -39,7 +39,7 @@ pub struct PendingGate {
     ///
     /// This is the channel-supplied identifier (web UUID, Telegram chat id,
     /// Slack `thread_ts`) — not the internal engine [`ThreadId`]. See the
-    /// `ExternalThreadId` rationale in `crates/ironclaw_common/src/identity.rs`.
+    /// `ExternalThreadId` rationale in `crates/foundation/ironclaw_common/src/identity.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_thread_id: Option<ExternalThreadId>,
     /// Conversation the thread belongs to.
