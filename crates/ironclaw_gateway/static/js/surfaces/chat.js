@@ -993,6 +993,44 @@ function fetchAttachmentAsBlobUrl(url) {
   }).then((blob) => URL.createObjectURL(blob));
 }
 
+// One-shot MutationObserver wired on the chat-messages container that
+// revokes the blob URL stamped on `image.dataset.blobUrl` whenever the
+// `<img>` (or any ancestor carrying it) is removed from the DOM.
+//
+// We can't revoke on the image's own `load` event: the lightbox handler
+// reads `target.src` and feeds it to a fresh `<img>` in the overlay, so
+// the blob URL must stay live for the visible lifetime of the chat
+// bubble. Tying the revoke to DOM removal covers every removal site —
+// `pruneOldMessages` (oldest-message cap), thread switch (history
+// re-render clears `#chat-messages`), and ad-hoc remove — without
+// breaking either inline rendering or click-to-preview.
+function wireAttachmentBlobCleanup() {
+  if (window.__attachmentBlobCleanupWired) return;
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  window.__attachmentBlobCleanupWired = true;
+  const revokeForSubtree = (node) => {
+    if (!(node instanceof Element)) return;
+    const own = node instanceof HTMLImageElement ? node : null;
+    const candidates = own
+      ? [own]
+      : Array.from(node.querySelectorAll('img.message-attachment-image'));
+    candidates.forEach((img) => {
+      const blobUrl = img.dataset && img.dataset.blobUrl;
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        delete img.dataset.blobUrl;
+      }
+    });
+  };
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      m.removedNodes.forEach(revokeForSubtree);
+    }
+  });
+  observer.observe(container, { childList: true, subtree: true });
+}
+
 function renderMessageAttachments(container, attachments) {
   if (!attachments || attachments.length === 0) return;
   const strip = document.createElement('div');
@@ -1017,13 +1055,15 @@ function renderMessageAttachments(container, attachments) {
       strip.appendChild(image);
       fetchAttachmentAsBlobUrl(att.url)
         .then((blobUrl) => {
-          // Revoke after the browser has decoded the blob into the <img>
-          // (or failed to). Without this, every persisted image leaks a
-          // blob URL for the lifetime of the document — long sessions
-          // accumulate megabytes as history grows or threads switch.
-          const revoke = () => URL.revokeObjectURL(blobUrl);
-          image.addEventListener('load', revoke, { once: true });
-          image.addEventListener('error', revoke, { once: true });
+          // Stamp the blob URL on the element so `wireAttachmentBlobCleanup`
+          // can revoke it when the bubble is removed from the DOM. We
+          // intentionally do NOT revoke on `load`: the lightbox click
+          // handler (and any browser repaint after bitmap eviction) needs
+          // the URL to stay live for as long as the bubble is visible. The
+          // MutationObserver-driven revoke covers `pruneOldMessages`,
+          // thread switches, and ad-hoc removals so memory still tracks
+          // the visible history rather than the document lifetime.
+          image.dataset.blobUrl = blobUrl;
           image.src = blobUrl;
         })
         .catch(() => {
@@ -1128,3 +1168,12 @@ function showImageLightbox(src, alt) {
     showImageLightbox(target.src, target.alt || '');
   });
 })();
+
+// Set up the blob-URL cleanup observer once the chat-messages container
+// is in the DOM. `wireAttachmentBlobCleanup` is idempotent and guarded
+// against missing container, so it's safe to call from both paths.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', wireAttachmentBlobCleanup, { once: true });
+} else {
+  wireAttachmentBlobCleanup();
+}

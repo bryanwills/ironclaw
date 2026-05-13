@@ -678,6 +678,104 @@ async def test_gateway_user_image_survives_page_refresh(page, ironclaw_server, m
     assert "<attachments>" not in reloaded_state["text"], reloaded_state
 
 
+async def test_gateway_user_image_lightbox_still_loads_after_render(page, ironclaw_server, mock_llm_server):
+    """Regression: clicking a persisted image attachment must open the
+    lightbox with a viewable image, not a broken-icon placeholder.
+
+    The chat surface fetches `/api/attachments/...` into a blob URL and
+    stamps it on the inline `<img class="message-attachment-image">`.
+    The lightbox click handler reads `target.src` and feeds it to a
+    fresh `<img class="image-lightbox-image">` in an overlay — that
+    second load reuses the same blob URL. A previous regression revoked
+    the blob URL inside the inline `<img>`'s `load` handler, so the
+    lightbox's fresh load found a dead URL and rendered blank. The fix
+    ties the revoke to DOM removal via a MutationObserver on
+    `#chat-messages` instead, keeping the URL live for as long as the
+    chat bubble is visible.
+
+    This test reproduces the click→preview path end-to-end and asserts
+    `naturalWidth > 0` on the lightbox image, which is the only
+    cross-browser-safe way to distinguish "loaded the bytes" from
+    "rendered the broken-image icon" (Chrome reports `complete === true`
+    for both).
+    """
+    attachment_input = page.locator(SEL["attachment_input"])
+    chat_input = page.locator(SEL["chat_input"])
+    thread_id = await _wait_for_current_thread_id(page)
+
+    await attachment_input.set_input_files(
+        files=[
+            {
+                "name": "kitten.png",
+                "mimeType": "image/png",
+                "buffer": ONE_BY_ONE_PNG,
+            },
+        ]
+    )
+    await chat_input.fill("Show me the cat again.")
+    await chat_input.press("Enter")
+
+    await _wait_for_thread_response(
+        ironclaw_server,
+        thread_id,
+        expected_user_input="Show me the cat again.",
+        timeout=45.0,
+    )
+
+    # Reload so we exercise the persist-then-fetch path (the optimistic
+    # send uses a data URL, not a blob URL — the lightbox bug only
+    # surfaces on the blob path).
+    await page.reload(wait_until="domcontentloaded")
+    await page.locator(SEL["auth_screen"]).wait_for(state="hidden", timeout=15000)
+    await page.wait_for_function(
+        """targetThreadId => (
+          typeof sseHasConnectedBefore !== 'undefined' &&
+          sseHasConnectedBefore === true &&
+          typeof currentThreadId !== 'undefined' &&
+          currentThreadId === targetThreadId &&
+          document.querySelectorAll('#chat-messages .message.user').length > 0
+        )""",
+        arg=thread_id,
+        timeout=15000,
+    )
+    # Wait for the blob src to settle AND for the inline image to fully
+    # decode — `naturalWidth > 0` proves the decode succeeded before we
+    # click. If the revoke fired prematurely the inline `<img>` could
+    # still report `complete === true` while never having decoded any
+    # pixels, masking the bug.
+    await page.wait_for_function(
+        """() => {
+          const users = document.querySelectorAll('#chat-messages .message.user');
+          if (!users.length) return false;
+          const img = users[users.length - 1].querySelector('.message-attachment-image');
+          if (!img) return false;
+          return typeof img.src === 'string'
+            && img.src.startsWith('blob:')
+            && img.complete
+            && img.naturalWidth > 0;
+        }""",
+        timeout=15000,
+    )
+
+    inline_image = page.locator(".message.user .message-attachment-image").last
+    await inline_image.click()
+
+    # The lightbox overlay opens; its `<img>` should fetch from the
+    # SAME blob URL and decode successfully. `naturalWidth > 0` is the
+    # specific assertion that fails when the URL was revoked: a dead
+    # blob URL yields `complete === true` but `naturalWidth === 0`
+    # (the broken-image placeholder).
+    await page.locator("#image-lightbox").wait_for(state="visible", timeout=5000)
+    await page.wait_for_function(
+        """() => {
+          const lightbox = document.querySelector('#image-lightbox .image-lightbox-image');
+          if (!lightbox) return false;
+          return lightbox.complete && lightbox.naturalWidth > 0;
+        }""",
+        timeout=10000,
+    )
+
+
 async def test_gateway_attachment_unextractable_file_uses_placeholder(page, ironclaw_server, mock_llm_server):
     """A PDF that passes the MIME allowlist + header check but fails content
     extraction reaches the backend with a fallback "[Failed to extract…]"
