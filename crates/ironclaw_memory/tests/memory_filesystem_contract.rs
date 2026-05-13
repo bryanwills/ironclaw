@@ -423,6 +423,27 @@ async fn memory_filesystem_reports_success_when_best_effort_indexer_fails_after_
 }
 
 #[tokio::test]
+async fn memory_document_filesystem_preserves_legacy_event_source() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let events = Arc::new(RecordingMemoryEventSink::default());
+    let fs = MemoryDocumentFilesystem::new(repo).with_memory_event_sink(events.clone());
+
+    fs.write_file(
+        &VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/MEMORY.md").unwrap(),
+        b"memory event",
+    )
+    .await
+    .unwrap();
+
+    let recorded = events.events();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].source,
+        MemorySignificantEventSource::MemoryDocumentFilesystem
+    );
+}
+
+#[tokio::test]
 async fn memory_filesystem_rejects_non_document_memory_paths() {
     let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
     let fs = MemoryDocumentFilesystem::new(repo);
@@ -448,6 +469,28 @@ struct RecordingIndexer {
 impl MemoryDocumentIndexer for RecordingIndexer {
     async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError> {
         self.paths.lock().unwrap().push(path.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingMemoryEventSink {
+    events: Mutex<Vec<MemorySignificantEvent>>,
+}
+
+impl RecordingMemoryEventSink {
+    fn events(&self) -> Vec<MemorySignificantEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl MemorySignificantEventSink for RecordingMemoryEventSink {
+    async fn record_memory_significant_event(
+        &self,
+        event: MemorySignificantEvent,
+    ) -> Result<(), MemoryEventSinkError> {
+        self.events.lock().unwrap().push(event);
         Ok(())
     }
 }

@@ -8,21 +8,14 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::VirtualPath;
 
-use crate::backend::{MemoryBackend, MemoryContext};
+use crate::backend::{MemoryBackend, MemoryContext, RepositoryMemoryBackend};
 use crate::chunking::{content_bytes_sha256, content_sha256};
-use crate::events::{
-    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
-    record_memory_significant_event,
-};
+use crate::events::{MemorySignificantEventSink, MemorySignificantEventSource};
 use crate::indexer::MemoryDocumentIndexer;
-use crate::metadata::{MemoryWriteOptions, resolve_document_metadata};
 use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, ParsedMemoryPath, memory_error, memory_not_found,
 };
-use crate::repo::{
-    MemoryAppendOutcome, MemoryDocumentRepository, memory_direct_children,
-    scoped_memory_changed_by_key,
-};
+use crate::repo::{MemoryAppendOutcome, MemoryDocumentRepository, memory_direct_children};
 use crate::safety::{
     DefaultPromptWriteSafetyPolicy, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
     PromptWriteOperation, PromptWriteSafetyCheck, PromptWriteSafetyEnforcement,
@@ -30,8 +23,6 @@ use crate::safety::{
     enforce_prompt_write_safety, prompt_write_policy_requires_previous_content_hash,
     prompt_write_protected_classification, take_prompt_safety_allowance,
 };
-use crate::schema::validate_content_against_schema;
-
 const MAX_MEMORY_APPEND_RETRIES: usize = 8;
 
 fn memory_append_conflict_error(path: VirtualPath) -> FilesystemError {
@@ -433,14 +424,15 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
     }
 }
 
-/// [`RootFilesystem`] backend exposing DB-backed memory documents as virtual files.
+/// Compatibility [`RootFilesystem`] facade for repository-backed memory documents.
+///
+/// New code should prefer composing [`RepositoryMemoryBackend`] with
+/// [`MemoryBackendFilesystemAdapter`] directly. This facade keeps the historical
+/// repository constructor surface while delegating write/append policy, schema,
+/// indexing, and memory-event behavior to the repository-backed backend so the
+/// rules live in one Implementation.
 pub struct MemoryDocumentFilesystem {
-    repository: Arc<dyn MemoryDocumentRepository>,
-    indexer: Option<Arc<dyn MemoryDocumentIndexer>>,
-    prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
-    prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
-    memory_event_sink: Option<Arc<dyn MemorySignificantEventSink>>,
-    prompt_protected_path_registry: PromptProtectedPathRegistry,
+    backend: RepositoryMemoryBackend<dyn MemoryDocumentRepository>,
     one_shot_prompt_safety_allowance: Mutex<Option<PromptSafetyAllowanceId>>,
 }
 
@@ -454,16 +446,9 @@ impl MemoryDocumentFilesystem {
     }
 
     pub fn from_dyn(repository: Arc<dyn MemoryDocumentRepository>) -> Self {
-        let registry = PromptProtectedPathRegistry::default();
         Self {
-            repository,
-            indexer: None,
-            prompt_safety_policy: Some(Arc::new(DefaultPromptWriteSafetyPolicy::with_registry(
-                registry.clone(),
-            ))),
-            prompt_safety_event_sink: None,
-            memory_event_sink: None,
-            prompt_protected_path_registry: registry,
+            backend: RepositoryMemoryBackend::new(repository)
+                .with_memory_event_source(MemorySignificantEventSource::MemoryDocumentFilesystem),
             one_shot_prompt_safety_allowance: Mutex::new(None),
         }
     }
@@ -472,7 +457,7 @@ impl MemoryDocumentFilesystem {
     where
         I: MemoryDocumentIndexer + 'static,
     {
-        self.indexer = Some(indexer);
+        self.backend = self.backend.with_indexer(indexer);
         self
     }
 
@@ -480,13 +465,12 @@ impl MemoryDocumentFilesystem {
     where
         P: PromptWriteSafetyPolicy + 'static,
     {
-        let policy: Arc<dyn PromptWriteSafetyPolicy> = policy;
-        self.prompt_safety_policy = Some(policy);
+        self.backend = self.backend.with_prompt_write_safety_policy(policy);
         self
     }
 
     pub fn without_prompt_write_safety_policy(mut self) -> Self {
-        self.prompt_safety_policy = None;
+        self.backend = self.backend.without_prompt_write_safety_policy();
         self
     }
 
@@ -494,8 +478,7 @@ impl MemoryDocumentFilesystem {
     where
         S: PromptWriteSafetyEventSink + 'static,
     {
-        let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
-        self.prompt_safety_event_sink = Some(event_sink);
+        self.backend = self.backend.with_prompt_write_safety_event_sink(event_sink);
         self
     }
 
@@ -503,8 +486,7 @@ impl MemoryDocumentFilesystem {
     where
         S: MemorySignificantEventSink + 'static,
     {
-        let event_sink: Arc<dyn MemorySignificantEventSink> = event_sink;
-        self.memory_event_sink = Some(event_sink);
+        self.backend = self.backend.with_memory_event_sink(event_sink);
         self
     }
 
@@ -526,7 +508,7 @@ impl MemoryDocumentFilesystem {
         mut self,
         registry: PromptProtectedPathRegistry,
     ) -> Self {
-        self.prompt_protected_path_registry = registry;
+        self.backend = self.backend.with_prompt_protected_path_registry(registry);
         self
     }
 
@@ -549,11 +531,33 @@ impl MemoryDocumentFilesystem {
         })
     }
 
+    fn context_for_write(
+        &self,
+        path: &VirtualPath,
+        operation: FilesystemOperation,
+        document_path: &MemoryDocumentPath,
+    ) -> Result<MemoryContext, FilesystemError> {
+        let mut context = MemoryContext::new(document_path.scope().clone());
+        if self
+            .backend
+            .prompt_write_safety_protects_path(document_path)
+            && let Some(allowance) = take_prompt_safety_allowance(
+                &self.one_shot_prompt_safety_allowance,
+                path,
+                operation,
+            )?
+        {
+            context = context.with_prompt_write_safety_allowance(allowance);
+        }
+        Ok(context)
+    }
+
     async fn list_for_scope(
         &self,
         scope: &MemoryDocumentScope,
     ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
-        self.repository.list_documents(scope).await
+        let context = MemoryContext::new(scope.clone());
+        self.backend.list_documents(&context, scope).await
     }
 }
 
@@ -561,208 +565,40 @@ impl MemoryDocumentFilesystem {
 impl RootFilesystem for MemoryDocumentFilesystem {
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         let document_path = self.parse_file_path(path, FilesystemOperation::ReadFile)?;
-        self.repository
-            .read_document(&document_path)
+        let context = MemoryContext::new(document_path.scope().clone());
+        self.backend
+            .read_document(&context, &document_path)
             .await?
             .ok_or_else(|| memory_not_found(path.clone(), FilesystemOperation::ReadFile))
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         let document_path = self.parse_file_path(path, FilesystemOperation::WriteFile)?;
-        let is_protected = prompt_write_protected_classification(
-            self.prompt_safety_policy.as_ref(),
-            &self.prompt_protected_path_registry,
-            &document_path,
-        )
-        .is_some();
-        let prompt_safety_allowance = if is_protected {
-            take_prompt_safety_allowance(
-                &self.one_shot_prompt_safety_allowance,
-                path,
-                FilesystemOperation::WriteFile,
-            )?
-        } else {
-            None
-        };
-        let metadata = resolve_document_metadata(self.repository.as_ref(), &document_path).await?;
-        let mut content_for_schema = None;
-        if is_protected {
-            let content = std::str::from_utf8(bytes).map_err(|_| {
-                memory_error(
-                    path.clone(),
-                    FilesystemOperation::WriteFile,
-                    "memory document content must be UTF-8",
-                )
-            })?;
-            content_for_schema = Some(content);
-            let previous_hash = if prompt_write_policy_requires_previous_content_hash(
-                self.prompt_safety_policy.as_ref(),
-            ) {
-                self.repository
-                    .read_document(&document_path)
-                    .await?
-                    .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(content_sha256))
-            } else {
-                None
-            };
-            enforce_prompt_write_safety(
-                self.prompt_safety_policy.as_ref(),
-                self.prompt_safety_event_sink.as_ref(),
-                &self.prompt_protected_path_registry,
-                PromptWriteSafetyCheck {
-                    scope: document_path.scope(),
-                    path: &document_path,
-                    operation: PromptWriteOperation::Write,
-                    source: PromptWriteSource::MemoryDocumentFilesystem,
-                    content,
-                    previous_content_hash: previous_hash.as_deref(),
-                    allowance: prompt_safety_allowance.as_ref(),
-                    audit_context: None,
-                    filesystem_operation: FilesystemOperation::WriteFile,
-                },
-            )
-            .await?;
-        }
-        if let Some(schema) = &metadata.schema {
-            let content = match content_for_schema {
-                Some(content) => content,
-                None => std::str::from_utf8(bytes).map_err(|_| {
-                    memory_error(
-                        path.clone(),
-                        FilesystemOperation::WriteFile,
-                        "memory document content must be UTF-8",
-                    )
-                })?,
-            };
-            validate_content_against_schema(&document_path, content, schema)?;
-        }
-        let options = MemoryWriteOptions {
-            metadata,
-            changed_by: Some(scoped_memory_changed_by_key(document_path.scope())),
-        };
-        self.repository
-            .write_document_with_options(&document_path, bytes, &options)
-            .await?;
-        record_memory_significant_event(
-            self.memory_event_sink.as_ref(),
-            MemorySignificantEvent::document_written(
-                &document_path,
-                MemorySignificantEventSource::MemoryDocumentFilesystem,
-                bytes.len() as u64,
-            ),
-        )
-        .await;
-        if let Some(indexer) = &self.indexer {
-            let _ = indexer.reindex_document(&document_path).await;
-        }
-        Ok(())
+        let context =
+            self.context_for_write(path, FilesystemOperation::WriteFile, &document_path)?;
+        self.backend
+            .write_document(&context, &document_path, bytes)
+            .await
     }
 
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         let document_path = self.parse_file_path(path, FilesystemOperation::AppendFile)?;
-        let is_protected = prompt_write_protected_classification(
-            self.prompt_safety_policy.as_ref(),
-            &self.prompt_protected_path_registry,
-            &document_path,
-        )
-        .is_some();
-        let prompt_safety_allowance = if is_protected {
-            take_prompt_safety_allowance(
-                &self.one_shot_prompt_safety_allowance,
-                path,
-                FilesystemOperation::AppendFile,
-            )?
-        } else {
-            None
-        };
+        let context =
+            self.context_for_write(path, FilesystemOperation::AppendFile, &document_path)?;
         for _ in 0..MAX_MEMORY_APPEND_RETRIES {
-            let previous = self.repository.read_document(&document_path).await?;
-            let metadata =
-                resolve_document_metadata(self.repository.as_ref(), &document_path).await?;
-            let options = MemoryWriteOptions {
-                metadata,
-                changed_by: Some(scoped_memory_changed_by_key(document_path.scope())),
-            };
+            let previous = self.backend.read_document(&context, &document_path).await?;
             let expected_previous_hash = previous.as_deref().map(content_bytes_sha256);
-            let previous_bytes = previous.unwrap_or_default();
-            let previous_prompt_hash = if is_protected
-                && prompt_write_policy_requires_previous_content_hash(
-                    self.prompt_safety_policy.as_ref(),
-                ) {
-                std::str::from_utf8(&previous_bytes)
-                    .ok()
-                    .map(content_sha256)
-            } else {
-                None
-            };
-            let mut combined = previous_bytes;
-            combined.extend_from_slice(bytes);
-            let mut content_for_schema = None;
-            if is_protected {
-                let content = std::str::from_utf8(&combined).map_err(|_| {
-                    memory_error(
-                        path.clone(),
-                        FilesystemOperation::AppendFile,
-                        "memory document content must be UTF-8",
-                    )
-                })?;
-                content_for_schema = Some(content);
-                enforce_prompt_write_safety(
-                    self.prompt_safety_policy.as_ref(),
-                    self.prompt_safety_event_sink.as_ref(),
-                    &self.prompt_protected_path_registry,
-                    PromptWriteSafetyCheck {
-                        scope: document_path.scope(),
-                        path: &document_path,
-                        operation: PromptWriteOperation::Append,
-                        source: PromptWriteSource::MemoryDocumentFilesystem,
-                        content,
-                        previous_content_hash: previous_prompt_hash.as_deref(),
-                        allowance: prompt_safety_allowance.as_ref(),
-                        audit_context: None,
-                        filesystem_operation: FilesystemOperation::AppendFile,
-                    },
-                )
-                .await?;
-            }
-            if let Some(schema) = &options.metadata.schema {
-                let content = match content_for_schema {
-                    Some(content) => content,
-                    None => std::str::from_utf8(&combined).map_err(|_| {
-                        memory_error(
-                            path.clone(),
-                            FilesystemOperation::AppendFile,
-                            "memory document content must be UTF-8",
-                        )
-                    })?,
-                };
-                validate_content_against_schema(&document_path, content, schema)?;
-            }
             match self
-                .repository
-                .compare_and_append_document_with_options(
+                .backend
+                .compare_and_append_document(
+                    &context,
                     &document_path,
                     expected_previous_hash.as_deref(),
                     bytes,
-                    &options,
                 )
                 .await?
             {
-                MemoryAppendOutcome::Appended => {
-                    record_memory_significant_event(
-                        self.memory_event_sink.as_ref(),
-                        MemorySignificantEvent::document_written(
-                            &document_path,
-                            MemorySignificantEventSource::MemoryDocumentFilesystem,
-                            bytes.len() as u64,
-                        ),
-                    )
-                    .await;
-                    if let Some(indexer) = &self.indexer {
-                        let _ = indexer.reindex_document(&document_path).await;
-                    }
-                    return Ok(());
-                }
+                MemoryAppendOutcome::Appended => return Ok(()),
                 MemoryAppendOutcome::Conflict => continue,
             }
         }
@@ -794,9 +630,10 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                 .iter()
                 .find(|document| document.relative_path() == relative_path)
             {
+                let context = MemoryContext::new(document.scope().clone());
                 let len = self
-                    .repository
-                    .read_document(document)
+                    .backend
+                    .read_document(&context, document)
                     .await?
                     .map(|bytes| bytes.len() as u64)
                     .unwrap_or(0);

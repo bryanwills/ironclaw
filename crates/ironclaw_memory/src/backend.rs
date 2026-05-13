@@ -216,7 +216,7 @@ pub trait MemoryBackend: Send + Sync {
 }
 
 /// Memory backend wrapper for existing repository/indexer implementations.
-pub struct RepositoryMemoryBackend<R> {
+pub struct RepositoryMemoryBackend<R: ?Sized> {
     repository: Arc<R>,
     indexer: Option<Arc<dyn MemoryDocumentIndexer>>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
@@ -224,12 +224,13 @@ pub struct RepositoryMemoryBackend<R> {
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
     memory_event_sink: Option<Arc<dyn MemorySignificantEventSink>>,
+    memory_event_source: MemorySignificantEventSource,
     prompt_protected_path_registry: PromptProtectedPathRegistry,
 }
 
 impl<R> RepositoryMemoryBackend<R>
 where
-    R: MemoryDocumentRepository + 'static,
+    R: MemoryDocumentRepository + ?Sized + 'static,
 {
     pub fn new(repository: Arc<R>) -> Self {
         let registry = PromptProtectedPathRegistry::default();
@@ -249,6 +250,7 @@ where
             ))),
             prompt_safety_event_sink: None,
             memory_event_sink: None,
+            memory_event_source: MemorySignificantEventSource::RepositoryMemoryBackend,
             prompt_protected_path_registry: registry,
         }
     }
@@ -313,6 +315,11 @@ where
         self.prompt_protected_path_registry = registry;
         self
     }
+
+    pub(crate) fn with_memory_event_source(mut self, source: MemorySignificantEventSource) -> Self {
+        self.memory_event_source = source;
+        self
+    }
 }
 
 // Defense-in-depth scope guards for the public `MemoryBackend` seam. The host
@@ -370,7 +377,7 @@ fn ensure_scope_matches_context(
 #[async_trait]
 impl<R> MemoryBackend for RepositoryMemoryBackend<R>
 where
-    R: MemoryDocumentRepository + 'static,
+    R: MemoryDocumentRepository + ?Sized + 'static,
 {
     fn capabilities(&self) -> MemoryBackendCapabilities {
         self.capabilities.clone()
@@ -468,7 +475,7 @@ where
             self.memory_event_sink.as_ref(),
             MemorySignificantEvent::document_written(
                 path,
-                MemorySignificantEventSource::RepositoryMemoryBackend,
+                self.memory_event_source,
                 bytes.len() as u64,
             )
             .with_audit_context(context.audit_context()),
@@ -560,7 +567,7 @@ where
                 self.memory_event_sink.as_ref(),
                 MemorySignificantEvent::document_written(
                     path,
-                    MemorySignificantEventSource::RepositoryMemoryBackend,
+                    self.memory_event_source,
                     bytes.len() as u64,
                 )
                 .with_audit_context(context.audit_context()),
@@ -681,7 +688,7 @@ where
             self.memory_event_sink.as_ref(),
             MemorySignificantEvent::search_performed(
                 context.scope(),
-                MemorySignificantEventSource::RepositoryMemoryBackend,
+                self.memory_event_source,
                 &request,
                 results.len() as u64,
             )
