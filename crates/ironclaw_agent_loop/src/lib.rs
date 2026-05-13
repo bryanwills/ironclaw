@@ -11,6 +11,8 @@ pub mod family;
 pub mod planner;
 pub mod state;
 pub(crate) mod strategies;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use default_planner::DefaultPlanner;
 pub use planner::AgentLoopPlanner;

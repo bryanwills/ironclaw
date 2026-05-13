@@ -284,6 +284,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             runtime: RuntimeKind::FirstParty,
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
+            concurrency_hint: ConcurrencyHint::SafeForParallel,
         }],
     };
     let request = InstructionBundleRequest {
@@ -526,6 +527,7 @@ async fn instruction_bundle_builder_allows_tool_result_reference_context_message
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -659,6 +661,7 @@ async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
             surface_version: Some(surface_v1.clone()),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -673,6 +676,7 @@ async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
             surface_version: Some(surface_v1),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1076,6 +1080,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             runtime: RuntimeKind::FirstParty,
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
+            concurrency_hint: ConcurrencyHint::SafeForParallel,
         }],
     };
     let port = HostManagedLoopPromptPort::new(
@@ -1099,6 +1104,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             surface_version: Some(surface.version),
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
