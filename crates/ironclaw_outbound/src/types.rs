@@ -79,11 +79,55 @@ pub struct ThreadProjectionAccessRequest {
     pub thread_id: ThreadId,
 }
 
+/// Untrusted access decision returned by a [`ThreadProjectionAccessPolicy`]
+/// implementation. Only the [`OutboundPolicyService`] mints the sealed
+/// [`ThreadProjectionAccessGrant`] from this claim after cross-checking the
+/// request, so policy implementors cannot forge a grant by constructing one
+/// directly.
+///
+/// [`ThreadProjectionAccessPolicy`]: crate::ThreadProjectionAccessPolicy
+/// [`OutboundPolicyService`]: crate::OutboundPolicyService
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadProjectionAccessGrant {
+pub struct ThreadProjectionAccessClaim {
     pub actor: TurnActor,
     pub scope: ProjectionScope,
     pub thread_id: ThreadId,
+}
+
+/// Trust-bearing record that the [`OutboundPolicyService`] has authorized a
+/// projection subscription for a specific actor/scope/thread triple. Sealed
+/// against external construction; obtain instances only by calling
+/// [`OutboundPolicyService::authorize_subscription`].
+///
+/// [`OutboundPolicyService`]: crate::OutboundPolicyService
+/// [`OutboundPolicyService::authorize_subscription`]: crate::OutboundPolicyService::authorize_subscription
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadProjectionAccessGrant {
+    pub(crate) actor: TurnActor,
+    pub(crate) scope: ProjectionScope,
+    pub(crate) thread_id: ThreadId,
+}
+
+impl ThreadProjectionAccessGrant {
+    pub(crate) fn from_claim(claim: ThreadProjectionAccessClaim) -> Self {
+        Self {
+            actor: claim.actor,
+            scope: claim.scope,
+            thread_id: claim.thread_id,
+        }
+    }
+
+    pub fn actor(&self) -> &TurnActor {
+        &self.actor
+    }
+
+    pub fn scope(&self) -> &ProjectionScope {
+        &self.scope
+    }
+
+    pub fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,7 +188,14 @@ impl OutboundDeliveryStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryFailureKind {
+    /// Permanent denial from the reply-target validator. Do not retry — the
+    /// authorization that originally established this binding has been
+    /// revoked or never existed.
     AuthorizationRevoked,
+    /// Transient validator-side failure (backend, serialization, or other
+    /// non-`AccessDenied` error). Callers may retry; the underlying validator
+    /// or its dependency was unavailable at attempt time.
+    TransientValidatorError,
     TransportUnavailable,
     RateLimited,
     Rejected,
@@ -157,9 +208,43 @@ pub struct ReplyTargetValidationRequest {
     pub candidate: OutboundPushCandidate,
 }
 
+/// Untrusted validator decision returned by a [`ReplyTargetBindingValidator`]
+/// implementation. Only the [`OutboundPolicyService`] mints the sealed
+/// [`ValidatedReplyTargetBinding`] from this claim after confirming the
+/// claimed target matches the original push candidate, so validators cannot
+/// forge a "validated" binding by constructing one directly.
+///
+/// [`ReplyTargetBindingValidator`]: crate::ReplyTargetBindingValidator
+/// [`OutboundPolicyService`]: crate::OutboundPolicyService
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyTargetBindingClaim {
+    pub target: ReplyTargetBindingRef,
+}
+
+/// Trust-bearing record that the [`OutboundPolicyService`] has authorized a
+/// push to a specific [`ReplyTargetBindingRef`] for the current attempt.
+/// Sealed against external construction; obtain instances only by calling
+/// [`OutboundPolicyService::prepare_delivery_attempt`], which performs the
+/// claim/candidate target-equality check that prevents validator-supplied
+/// target substitution.
+///
+/// [`OutboundPolicyService`]: crate::OutboundPolicyService
+/// [`OutboundPolicyService::prepare_delivery_attempt`]: crate::OutboundPolicyService::prepare_delivery_attempt
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatedReplyTargetBinding {
-    pub target: ReplyTargetBindingRef,
+    pub(crate) target: ReplyTargetBindingRef,
+}
+
+impl ValidatedReplyTargetBinding {
+    pub(crate) fn from_claim(claim: ReplyTargetBindingClaim) -> Self {
+        Self {
+            target: claim.target,
+        }
+    }
+
+    pub fn target(&self) -> &ReplyTargetBindingRef {
+        &self.target
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

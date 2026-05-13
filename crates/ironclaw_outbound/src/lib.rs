@@ -32,9 +32,9 @@ pub use types::{
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
     OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
     PrepareOutboundDeliveryRequest, ProjectionSubscriptionRecord, ProjectionSubscriptionRequest,
-    ReplyTargetValidationRequest, ThreadNotificationPolicy, ThreadNotificationTarget,
-    ThreadProjectionAccessGrant, ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest,
-    ValidatedReplyTargetBinding,
+    ReplyTargetBindingClaim, ReplyTargetValidationRequest, ThreadNotificationPolicy,
+    ThreadNotificationTarget, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
+    ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };
 
 #[cfg(feature = "libsql")]

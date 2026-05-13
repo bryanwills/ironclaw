@@ -3,24 +3,35 @@ use async_trait::async_trait;
 use crate::{
     DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryId,
     OutboundDeliveryStatus, OutboundError, OutboundStateStore, PrepareOutboundDeliveryRequest,
-    ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetValidationRequest,
-    ThreadProjectionAccessGrant, ThreadProjectionAccessRequest, ValidatedReplyTargetBinding,
+    ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
+    ReplyTargetValidationRequest, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
+    ThreadProjectionAccessRequest, ValidatedReplyTargetBinding,
 };
 
 #[async_trait]
 pub trait ThreadProjectionAccessPolicy: Send + Sync {
+    /// Decide whether the request actor may subscribe to projections for the
+    /// requested thread/scope. The returned [`ThreadProjectionAccessClaim`] is
+    /// **untrusted** — the [`OutboundPolicyService`] mints the sealed
+    /// [`ThreadProjectionAccessGrant`] only after verifying the claim's fields
+    /// match the original request.
     async fn authorize_projection_access(
         &self,
         request: ThreadProjectionAccessRequest,
-    ) -> Result<ThreadProjectionAccessGrant, OutboundError>;
+    ) -> Result<ThreadProjectionAccessClaim, OutboundError>;
 }
 
 #[async_trait]
 pub trait ReplyTargetBindingValidator: Send + Sync {
+    /// Validate that the candidate's reply target binding is still authorized
+    /// for the current scope. The returned [`ReplyTargetBindingClaim`] is
+    /// **untrusted** — the [`OutboundPolicyService`] mints the sealed
+    /// [`ValidatedReplyTargetBinding`] only after confirming the claim's
+    /// target matches the original push candidate (no target substitution).
     async fn validate_reply_target(
         &self,
         request: ReplyTargetValidationRequest,
-    ) -> Result<ValidatedReplyTargetBinding, OutboundError>;
+    ) -> Result<ReplyTargetBindingClaim, OutboundError>;
 }
 
 pub struct OutboundPolicyService<'a> {
@@ -46,7 +57,7 @@ impl<'a> OutboundPolicyService<'a> {
         &self,
         request: ProjectionSubscriptionRequest,
     ) -> Result<ProjectionSubscriptionRecord, OutboundError> {
-        let grant = self
+        let claim = self
             .projection_access_policy
             .authorize_projection_access(ThreadProjectionAccessRequest {
                 actor: request.actor.clone(),
@@ -54,7 +65,8 @@ impl<'a> OutboundPolicyService<'a> {
                 thread_id: request.thread_id.clone(),
             })
             .await?;
-        validate_access_grant(&request, &grant)?;
+        validate_access_claim(&request, &claim)?;
+        let grant = ThreadProjectionAccessGrant::from_claim(claim);
 
         let record = ProjectionSubscriptionRecord {
             subscription_id: request.subscription_id,
@@ -91,12 +103,13 @@ impl<'a> OutboundPolicyService<'a> {
             .await;
 
         match validation {
-            Ok(target) => {
-                if target.target != request.candidate.target {
+            Ok(claim) => {
+                if claim.target != request.candidate.target {
                     return Err(OutboundError::InvalidRequest {
                         reason: "validated reply target does not match push candidate",
                     });
                 }
+                let target = ValidatedReplyTargetBinding::from_claim(claim);
                 let attempt = OutboundDeliveryAttempt {
                     delivery_id: OutboundDeliveryId::new(),
                     scope: request.scope,
@@ -120,22 +133,44 @@ impl<'a> OutboundPolicyService<'a> {
                 self.store.record_delivery_attempt(attempt.clone()).await?;
                 Ok(OutboundDeliveryDecision::Rejected { attempt })
             }
+            Err(error) if is_transient_validator_error(&error) => {
+                let attempt = OutboundDeliveryAttempt {
+                    delivery_id: OutboundDeliveryId::new(),
+                    scope: request.scope,
+                    candidate: request.candidate,
+                    status: OutboundDeliveryStatus::Failed,
+                    attempted_at: request.attempted_at,
+                    failure_kind: Some(DeliveryFailureKind::TransientValidatorError),
+                };
+                self.store.record_delivery_attempt(attempt.clone()).await?;
+                Ok(OutboundDeliveryDecision::Rejected { attempt })
+            }
             Err(error) => Err(error),
         }
     }
 }
 
-fn validate_access_grant(
+fn validate_access_claim(
     request: &ProjectionSubscriptionRequest,
-    grant: &ThreadProjectionAccessGrant,
+    claim: &ThreadProjectionAccessClaim,
 ) -> Result<(), OutboundError> {
-    if request.actor != grant.actor
-        || request.scope != grant.scope
-        || request.thread_id != grant.thread_id
+    if request.actor != claim.actor
+        || request.scope != claim.scope
+        || request.thread_id != claim.thread_id
     {
         return Err(OutboundError::InvalidRequest {
-            reason: "projection access grant does not match subscription request",
+            reason: "projection access claim does not match subscription request",
         });
     }
     Ok(())
+}
+
+/// Returns true when a non-`AccessDenied` validator error reflects a
+/// transient infrastructure failure rather than a caller bug. Caller-bug
+/// errors (e.g. `InvalidRequest`, `SubscriptionScopeMismatch`,
+/// `DeliveryNotFound`) propagate to the caller so they are not silently
+/// retried; backend/serialization failures become recorded delivery
+/// attempts so the saga can retry without losing the audit trail.
+fn is_transient_validator_error(error: &OutboundError) -> bool {
+    matches!(error, OutboundError::Backend | OutboundError::Serialization)
 }

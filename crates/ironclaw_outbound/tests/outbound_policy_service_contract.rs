@@ -99,7 +99,7 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
         panic!("expected authorized delivery decision");
     };
     assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
-    assert_eq!(target.target, candidate.target);
+    assert_eq!(target.target(), &candidate.target);
 
     let second = service
         .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
@@ -214,6 +214,87 @@ async fn delivery_preparation_fails_closed_when_candidate_skips_revalidation() {
     );
 }
 
+#[tokio::test]
+async fn delivery_preparation_records_transient_validator_error_separately_from_revocation() {
+    let store = InMemoryOutboundStateStore::default();
+    let access_policy = FakeThreadProjectionAccessPolicy::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+    let scope = turn_scope("thread-1");
+    let candidate = candidate(&scope, "reply-default", OutboundPushKind::FinalReply);
+    validator.fail_transient(candidate.target.clone());
+
+    let rejected = service
+        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
+            scope: scope.clone(),
+            candidate: candidate.clone(),
+            attempted_at: now(),
+        })
+        .await
+        .expect("transient validator error is classified, not propagated");
+    let OutboundDeliveryDecision::Rejected { attempt } = rejected else {
+        panic!("expected rejected delivery decision");
+    };
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Failed);
+    assert_eq!(
+        attempt.failure_kind,
+        Some(DeliveryFailureKind::TransientValidatorError),
+        "transient validator failures must be distinguishable from authorization revocations"
+    );
+
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("list delivery attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(DeliveryFailureKind::TransientValidatorError)
+    );
+}
+
+#[tokio::test]
+async fn delivery_preparation_propagates_validator_caller_bug_errors() {
+    let store = InMemoryOutboundStateStore::default();
+    let access_policy = FakeThreadProjectionAccessPolicy::default();
+    let validator = InvalidRequestValidator;
+    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+    let scope = turn_scope("thread-1");
+    let candidate = candidate(&scope, "reply-default", OutboundPushKind::FinalReply);
+
+    let err = service
+        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
+            scope: scope.clone(),
+            candidate,
+            attempted_at: now(),
+        })
+        .await
+        .expect_err("caller-bug validator errors must propagate, not be cached as transient");
+    assert!(matches!(err, OutboundError::InvalidRequest { .. }));
+    assert!(
+        store
+            .list_delivery_attempts(scope)
+            .await
+            .expect("list delivery attempts")
+            .is_empty(),
+        "caller-bug errors must not leave a phantom attempt row"
+    );
+}
+
+struct InvalidRequestValidator;
+
+#[async_trait]
+impl ReplyTargetBindingValidator for InvalidRequestValidator {
+    async fn validate_reply_target(
+        &self,
+        _request: ReplyTargetValidationRequest,
+    ) -> Result<ReplyTargetBindingClaim, OutboundError> {
+        Err(OutboundError::InvalidRequest {
+            reason: "validator received bad input",
+        })
+    }
+}
+
 #[derive(Default)]
 struct FakeThreadProjectionAccessPolicy {
     allowed: Mutex<HashSet<(TurnActor, ThreadId)>>,
@@ -233,14 +314,14 @@ impl ThreadProjectionAccessPolicy for FakeThreadProjectionAccessPolicy {
     async fn authorize_projection_access(
         &self,
         request: ThreadProjectionAccessRequest,
-    ) -> Result<ThreadProjectionAccessGrant, OutboundError> {
+    ) -> Result<ThreadProjectionAccessClaim, OutboundError> {
         if self
             .allowed
             .lock()
             .expect("fake access policy lock poisoned")
             .contains(&(request.actor.clone(), request.thread_id.clone()))
         {
-            Ok(ThreadProjectionAccessGrant {
+            Ok(ThreadProjectionAccessClaim {
                 actor: request.actor,
                 scope: request.scope,
                 thread_id: request.thread_id,
@@ -255,6 +336,7 @@ impl ThreadProjectionAccessPolicy for FakeThreadProjectionAccessPolicy {
 struct FakeReplyTargetBindingValidator {
     allowed: Mutex<HashSet<ReplyTargetBindingRef>>,
     denied: Mutex<HashSet<ReplyTargetBindingRef>>,
+    transient: Mutex<HashSet<ReplyTargetBindingRef>>,
     redirects: Mutex<HashMap<ReplyTargetBindingRef, ReplyTargetBindingRef>>,
     calls: Mutex<usize>,
 }
@@ -269,6 +351,13 @@ impl FakeReplyTargetBindingValidator {
 
     fn deny(&self, target: ReplyTargetBindingRef) {
         self.denied
+            .lock()
+            .expect("fake validator lock poisoned")
+            .insert(target);
+    }
+
+    fn fail_transient(&self, target: ReplyTargetBindingRef) {
+        self.transient
             .lock()
             .expect("fake validator lock poisoned")
             .insert(target);
@@ -291,8 +380,16 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
     async fn validate_reply_target(
         &self,
         request: ReplyTargetValidationRequest,
-    ) -> Result<ValidatedReplyTargetBinding, OutboundError> {
+    ) -> Result<ReplyTargetBindingClaim, OutboundError> {
         *self.calls.lock().expect("fake validator lock poisoned") += 1;
+        if self
+            .transient
+            .lock()
+            .expect("fake validator lock poisoned")
+            .contains(&request.candidate.target)
+        {
+            return Err(OutboundError::Backend);
+        }
         if self
             .denied
             .lock()
@@ -308,7 +405,7 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
             .get(&request.candidate.target)
             .cloned()
         {
-            return Ok(ValidatedReplyTargetBinding { target });
+            return Ok(ReplyTargetBindingClaim { target });
         }
         if self
             .allowed
@@ -316,7 +413,7 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
             .expect("fake validator lock poisoned")
             .contains(&request.candidate.target)
         {
-            Ok(ValidatedReplyTargetBinding {
+            Ok(ReplyTargetBindingClaim {
                 target: request.candidate.target,
             })
         } else {
