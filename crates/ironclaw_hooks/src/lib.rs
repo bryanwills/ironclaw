@@ -29,6 +29,7 @@ pub mod self_authored;
 pub mod sink;
 pub mod telemetry;
 pub mod trust;
+pub mod wasm;
 
 pub use error::HookError;
 pub use failure_policy::{FailureCategory, FailureDisposition};

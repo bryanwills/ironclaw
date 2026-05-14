@@ -23,9 +23,11 @@ sink as host imports.
      (manifest's `WasmBudget` already declares all three).
 2. **`HookManifestBody::Wasm`** routes through the new runtime. The
    registrar's current "WASM not implemented" rejection is removed.
-3. **`HookId::for_wasm`** identity derivation pinning the module bytes
-   (so a swapped module produces a different `HookId` and breaks
-   checkpoint replay safely).
+3. **WASM-aware `HookId::derive` input**. Reuse the existing
+   `HookId::derive(extension_id, extension_version, hook_local_id,
+   hook_version)` constructor, but include the compiled module digest in
+   the version material the registrar passes to it. Do not add a
+   separate `for_wasm` constructor unless the identity contract changes.
 4. **New threat model**: `crates/ironclaw_hooks/docs/threat-model-wasm.md`
    covering the wasmtime boundary, host-import surface, time/memory
    exhaustion, side-channels.
@@ -47,8 +49,8 @@ PR brings it in scope; the new threat-model-wasm.md must cover:
   filesystem, network, system time, RNG.
 - **Fuel exhaustion**: trap → FailIsolated for observers, FailClosed
   for gates (existing failure_policy matrix already covers this).
-- **Memory exhaustion**: `memory_mb` cap enforced via wasmtime's
-  `StoreLimits`.
+- **Memory exhaustion**: `memory_mb` cap enforced via the tool-WASM
+  `WasmResourceLimiter` resource limiter.
 - **Wall-clock exhaustion**: `wall_ms` cap enforced via `tokio::time::timeout`
   on the host side + epoch-interrupt on the wasmtime side.
 - **Module substitution**: `HookId` content-addressing must include the
@@ -64,7 +66,8 @@ PR brings it in scope; the new threat-model-wasm.md must cover:
 2. **Fuel exhaustion**: WASM loops forever → trap → FailClosed for gate
    point (Denied), FailIsolated for observer point (no outer impact).
 3. **Module substitution**: same `HookLocalId`, different module bytes
-   → different `HookId` → registry rejects on `HookId` collision check.
+   → different `HookId` → checkpoint replay refuses with
+   `UnknownHook` / `unknown_hook_id_at_replay`, not a registry collision.
 4. **Host-import surface negative**: WASM tries to call an undeclared
    import → link error at instantiation → fail closed.
 5. **Memory cap**: WASM tries to grow past `memory_mb` → trap → fail
@@ -99,6 +102,25 @@ implementation lands.
 
 Codex's design-review pass surfaced two scope-shaping issues and one
 recommendation.
+
+Human design ack for the implementation PR:
+
+1. **Module loading**: reuse `ironclaw_wasm`'s existing tool-WASM
+   loader primitives where the hook crate needs a wasmtime boundary:
+   cache compiled modules by byte digest, fetch bytes through a
+   resolver handoff, and compile with wasmtime. Do not build a second
+   extension-loader stack in `ironclaw_hooks/`.
+2. **Runtime lifetime**: v1 uses a fresh `wasmtime::Store` for every
+   hook invocation. This lines up with the existing FU8 fresh-dispatcher
+   per-build pattern; cross-invocation store reuse is future work.
+3. **ABI**: use `wasmtime::Linker`, not `wit-bindgen`, for parity with
+   the current tool-WASM runtime. Revisit only when tool-WASM migrates.
+4. **Host-import budgets**: enforce at the sink shim:
+   `max_sink_calls_per_invocation = 64`,
+   `max_total_patch_bytes = 4 * 1024`,
+   `max_observer_facts_per_invocation = 32`, and
+   `max_decision_calls_per_invocation = 1` (second decision call =
+   `FailureCategory::Malformed`).
 
 ### Critical: host-import calls + outputs need budgets
 
@@ -147,5 +169,6 @@ imports, and the existing tool-WASM stack already chose one path.
 
 **Decision for this PR**: follow `ironclaw_wasm`'s existing pattern
 (linked via `wasmtime::Linker`) for parity. The implementation PR
-documents this choice and reuses tool-WASM's import-budget primitives
-where applicable.
+documents this choice and reuses tool-WASM's memory/fuel sandbox
+primitives where applicable; hook-specific sink budgets live in the
+hook host-import shim.
