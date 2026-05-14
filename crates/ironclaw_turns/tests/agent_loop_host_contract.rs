@@ -1987,6 +1987,7 @@ impl LoopPromptPort for RecordingAgentLoopHost {
             .load_loop_context(LoopContextRequest {
                 after: request.context_cursor,
                 limit: request.max_messages.unwrap_or(8) as usize,
+                mode: request.mode,
             })
             .await?;
         let bundle = LoopPromptBundle {

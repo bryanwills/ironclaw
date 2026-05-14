@@ -103,6 +103,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 8,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -1709,6 +1710,7 @@ async fn text_only_host_factory_implements_turn_runner_host_factory() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 8,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap();
