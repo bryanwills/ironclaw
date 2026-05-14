@@ -16,8 +16,9 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     AlwaysAliveRunCancellationFactory, EmptyLoopCapabilityPort, HostManagedModelGateway,
-    HostSkillContextSource, RunCancellationFactory, RunStateLoopCancellationPort,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
+    HostSkillContextSource, RunCancellationFactory, RunCancellationObservationKind,
+    RunStateLoopCancellationPort, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -31,22 +32,20 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ConcurrencyHint, FinalizeAssistantMessage, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InstructionMaterializationStore, InstructionSafetyContext, LoopCancellationPort,
-        LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopContextBundle, LoopContextPort, LoopContextRequest, LoopContextSummary,
-        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
-        LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
-        LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
+        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
+        FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        InMemoryInstructionMaterializationStore, InstructionMaterializationStore,
+        InstructionSafetyContext, LoopCancellationPort, LoopCancellationSignal,
+        LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest, LoopContextBundle,
+        LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+        LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant,
+        LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPolicyGuard,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent,
+        LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest,
         LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ProcessHandleSummary, PromptMode,
-        PromptSkillContextMetadata, StageCheckpointPayloadRequest, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, skill_snippet_model_message_ref,
-        summary_only_model_message_ref,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ProcessHandleSummary,
+        StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -987,6 +986,10 @@ where
         let factory: Arc<dyn RunCancellationFactory> = factory;
         self.cancellation_factory = factory;
         self
+    }
+
+    pub fn cancellation_observation_kind(&self) -> RunCancellationObservationKind {
+        self.cancellation_factory.observation_kind()
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {

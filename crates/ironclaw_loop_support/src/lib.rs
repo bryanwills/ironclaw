@@ -14,7 +14,7 @@ mod skill_context;
 
 pub use cancellation_port::{
     AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory, RunCancellationFactory,
-    RunCancellationHandle, RunStateLoopCancellationPort,
+    RunCancellationHandle, RunCancellationObservationKind, RunStateLoopCancellationPort,
 };
 pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,

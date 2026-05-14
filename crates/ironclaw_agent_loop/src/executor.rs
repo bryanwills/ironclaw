@@ -1353,6 +1353,7 @@ mod tests {
                     content_ref: LoopMessageRef::new("msg:user").expect("valid"),
                 }],
                 surface_version: self.prompt_surface_version.clone(),
+                instruction_fingerprint: None,
             })
         }
     }
