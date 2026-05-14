@@ -381,6 +381,15 @@ mod tests {
     use crate::types::memory::{DocId, DocType, MemoryDoc};
     use crate::types::shared_owner_id;
 
+    fn prompt_section<'a>(prompt: &'a str, heading: &str) -> &'a str {
+        let start = prompt
+            .find(heading)
+            .unwrap_or_else(|| panic!("prompt should contain {heading}"));
+        let after_heading = &prompt[start + heading.len()..];
+        let end = after_heading.find("\n## ").unwrap_or(after_heading.len());
+        &after_heading[..end]
+    }
+
     #[tokio::test]
     async fn prompt_without_store_uses_compiled_preamble() {
         let prompt =
@@ -600,13 +609,14 @@ mod tests {
 
         assert!(prompt.contains("## Enabled Tools"));
         assert_eq!(prompt.matches("## Enabled Tools").count(), 1);
-        assert!(prompt.contains(
+        let enabled_tools = prompt_section(&prompt, "## Enabled Tools");
+        assert!(enabled_tools.contains(
             "Avoid unnecessary repeated `tool_info` calls for the same tool in the same task"
         ));
-        assert!(prompt.contains("- `mission_create`"));
-        assert!(!prompt.contains("mission_create("));
-        assert!(!prompt.contains("always check its schema"));
-        assert!(!prompt.contains("- `http`"));
+        assert!(enabled_tools.contains("- `mission_create`"));
+        assert!(!enabled_tools.contains("mission_create("));
+        assert!(!enabled_tools.contains("always check its schema"));
+        assert!(!enabled_tools.contains("- `http`"));
         assert!(prompt.contains("## Activatable Integrations"));
         assert_eq!(prompt.matches("`gmail` [provider]").count(), 1);
     }
