@@ -235,21 +235,55 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
     async fn on_capability_error(
         &self,
         state: &LoopExecutionState,
-        _err: &CapabilityErrorSummary,
+        err: &CapabilityErrorSummary,
     ) -> RecoveryOutcome {
-        RecoveryOutcome::SkipResult {
-            recovery: state.recovery_state.clone(),
+        match err.class {
+            CapabilityErrorClass::Transient | CapabilityErrorClass::Unavailable => {
+                RecoveryOutcome::Retry {
+                    recovery: state.recovery_state.clone(),
+                    scope: RetryScope::Call,
+                    alter: Some(RetryAlteration::Backoff {
+                        delay_ms: BackoffDelayMs(250),
+                    }),
+                }
+            }
+            CapabilityErrorClass::PolicyDenied => RecoveryOutcome::Abort {
+                recovery: state.recovery_state.clone(),
+                failure_kind: LoopFailureKind::PolicyDenied,
+            },
+            CapabilityErrorClass::Permanent
+            | CapabilityErrorClass::InputInvalid
+            | CapabilityErrorClass::Internal => RecoveryOutcome::Abort {
+                recovery: state.recovery_state.clone(),
+                failure_kind: LoopFailureKind::CapabilityProtocolError,
+            },
         }
     }
 
     async fn on_model_error(
         &self,
         state: &LoopExecutionState,
-        _err: &ModelErrorSummary,
+        err: &ModelErrorSummary,
     ) -> RecoveryOutcome {
-        RecoveryOutcome::Abort {
-            recovery: state.recovery_state.clone(),
-            failure_kind: LoopFailureKind::ModelError,
+        match err.class {
+            ModelErrorClass::Transient | ModelErrorClass::Unavailable => RecoveryOutcome::Retry {
+                recovery: state.recovery_state.clone(),
+                scope: RetryScope::Call,
+                alter: Some(RetryAlteration::Backoff {
+                    delay_ms: BackoffDelayMs(250),
+                }),
+            },
+            ModelErrorClass::ContextOverflow => RecoveryOutcome::Retry {
+                recovery: state.recovery_state.clone(),
+                scope: RetryScope::Iteration,
+                alter: Some(RetryAlteration::ShrinkContext { drop_messages: 4 }),
+            },
+            ModelErrorClass::ContentFiltered | ModelErrorClass::Internal => {
+                RecoveryOutcome::Abort {
+                    recovery: state.recovery_state.clone(),
+                    failure_kind: LoopFailureKind::ModelError,
+                }
+            }
         }
     }
 }

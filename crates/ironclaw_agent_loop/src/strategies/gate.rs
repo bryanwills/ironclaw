@@ -94,9 +94,15 @@ pub(crate) struct DefaultGateHandlingStrategy;
 
 #[async_trait]
 impl GateHandlingStrategy for DefaultGateHandlingStrategy {
-    async fn handle(&self, state: &LoopExecutionState, _gate: &GateSummary) -> GateOutcome {
-        GateOutcome::Block {
-            gate: state.gate_state.clone(),
+    async fn handle(&self, state: &LoopExecutionState, gate: &GateSummary) -> GateOutcome {
+        match gate.kind {
+            GateKind::Approval | GateKind::Auth => GateOutcome::Block {
+                gate: state.gate_state.clone(),
+            },
+            GateKind::Resource => GateOutcome::Abort {
+                gate: state.gate_state.clone(),
+                failure_kind: LoopFailureKind::PolicyDenied,
+            },
         }
     }
 }

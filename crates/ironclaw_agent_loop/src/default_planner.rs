@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::families::DEFAULT_FAMILY_DIGEST;
-use crate::family::{ComponentDigest, ComponentIdentity, LoopFamilyId};
+use crate::family::{ComponentIdentity, LoopFamilyId};
 use crate::planner::{AgentLoopPlanner, AgentLoopPlannerInternal};
 use crate::strategies::{
     BatchPolicyStrategy, BudgetStrategy, CapabilityStrategy, ContextStrategy,
@@ -210,7 +210,8 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{TenantId, ThreadId};
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        AgentLoopDriverDescriptor, LoopFailureKind, LoopGateRef, RunProfileId, RunProfileVersion,
+        TurnId, TurnRunId, TurnScope,
         run_profile::{
             CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
             ConcurrencyClass, ContextProfileId, LoopDriverId, LoopPromptBundleRequest,
@@ -220,9 +221,13 @@ mod tests {
         },
     };
 
-    use crate::family::LoopFamilyId;
+    use crate::family::{ComponentDigest, LoopFamilyId};
     use crate::state::LoopExecutionState;
-    use crate::strategies::{BatchPolicy, CapabilityFilter, ContextStrategy};
+    use crate::strategies::{
+        BackoffDelayMs, BatchPolicy, CapabilityErrorClass, CapabilityErrorSummary,
+        CapabilityFilter, ContextStrategy, GateKind, GateOutcome, GateSummary, ModelErrorClass,
+        ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope, SanitizedStrategySummary,
+    };
 
     use super::*;
 
@@ -294,6 +299,166 @@ mod tests {
 
         let filter = futures::executor::block_on(planner.capability().filter(&state));
         assert_eq!(filter, CapabilityFilter::All);
+    }
+
+    #[test]
+    fn default_gate_strategy_branches_by_gate_kind() {
+        let planner = DefaultPlanner::compose_default();
+        let state = LoopExecutionState::initial_for_run(&test_run_context());
+
+        for kind in [GateKind::Approval, GateKind::Auth] {
+            let outcome = futures::executor::block_on(planner.gate().handle(
+                &state,
+                &GateSummary {
+                    kind,
+                    gate_ref: LoopGateRef::new("gate:default-planner-test").expect("valid"),
+                },
+            ));
+            assert!(
+                matches!(outcome, GateOutcome::Block { .. }),
+                "expected {kind:?} to block, got {outcome:?}"
+            );
+        }
+
+        let outcome = futures::executor::block_on(planner.gate().handle(
+            &state,
+            &GateSummary {
+                kind: GateKind::Resource,
+                gate_ref: LoopGateRef::new("gate:default-planner-resource").expect("valid"),
+            },
+        ));
+        assert!(
+            matches!(
+                outcome,
+                GateOutcome::Abort {
+                    failure_kind: LoopFailureKind::PolicyDenied,
+                    ..
+                }
+            ),
+            "expected resource gate to abort, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn default_capability_recovery_branches_by_error_class() {
+        let planner = DefaultPlanner::compose_default();
+        let state = LoopExecutionState::initial_for_run(&test_run_context());
+
+        for class in [
+            CapabilityErrorClass::Transient,
+            CapabilityErrorClass::Unavailable,
+        ] {
+            let outcome = futures::executor::block_on(
+                planner
+                    .recovery()
+                    .on_capability_error(&state, &capability_error(class)),
+            );
+            assert_retry_with_backoff(outcome, RetryScope::Call);
+        }
+
+        let policy = futures::executor::block_on(planner.recovery().on_capability_error(
+            &state,
+            &capability_error(CapabilityErrorClass::PolicyDenied),
+        ));
+        assert_abort(policy, LoopFailureKind::PolicyDenied);
+
+        for class in [
+            CapabilityErrorClass::Permanent,
+            CapabilityErrorClass::InputInvalid,
+            CapabilityErrorClass::Internal,
+        ] {
+            let outcome = futures::executor::block_on(
+                planner
+                    .recovery()
+                    .on_capability_error(&state, &capability_error(class)),
+            );
+            assert_abort(outcome, LoopFailureKind::CapabilityProtocolError);
+        }
+    }
+
+    #[test]
+    fn default_model_recovery_branches_by_error_class() {
+        let planner = DefaultPlanner::compose_default();
+        let state = LoopExecutionState::initial_for_run(&test_run_context());
+
+        for class in [ModelErrorClass::Transient, ModelErrorClass::Unavailable] {
+            let outcome = futures::executor::block_on(
+                planner
+                    .recovery()
+                    .on_model_error(&state, &model_error(class)),
+            );
+            assert_retry_with_backoff(outcome, RetryScope::Call);
+        }
+
+        let context_overflow = futures::executor::block_on(
+            planner
+                .recovery()
+                .on_model_error(&state, &model_error(ModelErrorClass::ContextOverflow)),
+        );
+        assert!(
+            matches!(
+                context_overflow,
+                RecoveryOutcome::Retry {
+                    scope: RetryScope::Iteration,
+                    alter: Some(RetryAlteration::ShrinkContext { drop_messages: 4 }),
+                    ..
+                }
+            ),
+            "expected context overflow shrink retry, got {context_overflow:?}"
+        );
+
+        for class in [ModelErrorClass::ContentFiltered, ModelErrorClass::Internal] {
+            let outcome = futures::executor::block_on(
+                planner
+                    .recovery()
+                    .on_model_error(&state, &model_error(class)),
+            );
+            assert_abort(outcome, LoopFailureKind::ModelError);
+        }
+    }
+
+    fn capability_error(class: CapabilityErrorClass) -> CapabilityErrorSummary {
+        CapabilityErrorSummary {
+            class,
+            safe_summary: SanitizedStrategySummary::from_trusted_static("capability failed"),
+            diagnostic_ref: None,
+        }
+    }
+
+    fn model_error(class: ModelErrorClass) -> ModelErrorSummary {
+        ModelErrorSummary {
+            class,
+            safe_summary: SanitizedStrategySummary::from_trusted_static("model failed"),
+            diagnostic_ref: None,
+        }
+    }
+
+    fn assert_retry_with_backoff(outcome: RecoveryOutcome, scope: RetryScope) {
+        assert!(
+            matches!(
+                outcome,
+                RecoveryOutcome::Retry {
+                    scope: actual_scope,
+                    alter: Some(RetryAlteration::Backoff { delay_ms }),
+                    ..
+                } if actual_scope == scope
+                    && delay_ms == BackoffDelayMs::new(250).expect("valid backoff")
+            ),
+            "expected backoff retry with scope {scope:?}, got {outcome:?}"
+        );
+    }
+
+    fn assert_abort(outcome: RecoveryOutcome, expected: LoopFailureKind) {
+        assert!(
+            matches!(
+                outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind,
+                    ..
+                } if failure_kind == expected
+            ),
+            "expected abort {expected:?}, got {outcome:?}"
+        );
     }
 
     #[allow(clippy::too_many_lines)]

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::default_planner::DefaultPlanner;
-use crate::family::{ComponentDigest, LoopFamily, LoopFamilyId};
+use crate::family::{ComponentDigest, LoopFamily};
 use crate::planner::AgentLoopPlanner;
 
 /// Stable digest: SHA-256 of
@@ -26,6 +26,8 @@ pub fn default() -> LoopFamily {
 
 #[cfg(test)]
 mod tests {
+    use crate::family::LoopFamilyId;
+
     use super::*;
 
     #[test]
