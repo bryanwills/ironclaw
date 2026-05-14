@@ -232,6 +232,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -286,6 +287,7 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -502,6 +504,7 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1600,7 +1603,18 @@ async fn text_only_host_factory_threads_model_route_snapshot_to_gateway() {
 
     host_dyn
         .stream_model(LoopModelRequest {
-            messages: Vec::new(),
+            messages: host_dyn
+                .build_prompt_bundle(LoopPromptBundleRequest {
+                    mode: PromptMode::TextOnly,
+                    context_cursor: None,
+                    surface_version: None,
+                    checkpoint_state_ref: None,
+                    max_messages: Some(8),
+                    inline_messages: Vec::new(),
+                })
+                .await
+                .unwrap()
+                .messages,
             surface_version: None,
             model_preference: None,
         })
@@ -2603,6 +2617,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
             surface_version: Some(surface.version.clone()),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -4492,6 +4507,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
                 surface_version: Some(surface.version.clone()),
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
+                inline_messages: Vec::new(),
             })
             .await
             .map_err(driver_host_error)?;

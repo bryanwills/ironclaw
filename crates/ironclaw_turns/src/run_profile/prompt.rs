@@ -303,7 +303,8 @@ mod tests {
         RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{
             InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-            LoopInlineMessage, LoopInlineMessageRole, LoopSafeSummary, ResolvedRunProfile,
+            LoopContextBundle, LoopContextMessage, LoopInlineMessage, LoopInlineMessageRole,
+            LoopSafeSummary, ResolvedRunProfile,
         },
     };
 

@@ -865,9 +865,12 @@ pub struct HostManagedModelResponse {
 impl HostManagedModelResponse {
     pub fn assistant_reply(content: impl Into<String>) -> Self {
         let content = content.into();
+        let safe_content = sanitize_model_visible_text(content);
         Self {
-            safe_text_deltas: vec![sanitize_model_visible_text(content.clone())],
-            output: ParentLoopOutput::AssistantReply(AssistantReply { content }),
+            safe_text_deltas: vec![safe_content.clone()],
+            output: ParentLoopOutput::AssistantReply(AssistantReply {
+                content: safe_content,
+            }),
         }
     }
 }

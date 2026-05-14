@@ -28,19 +28,21 @@ use ironclaw_turns::{
     TurnCheckpointId, TurnError, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ConcurrencyHint, FinalizeAssistantMessage, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InstructionMaterializationStore, InstructionSafetyContext, LoopCapabilityPort,
-        LoopCheckpointPort, LoopCheckpointRequest, LoopContextBundle, LoopContextPort,
-        LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProcessHandleSummary, StageCheckpointPayloadRequest, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
+        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
+        FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        InMemoryInstructionMaterializationStore, InstructionMaterializationStore,
+        InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
+        LoopContextBundle, LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter,
+        LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
+        LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
+        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ProcessHandleSummary, StageCheckpointPayloadRequest,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -1043,12 +1045,14 @@ where
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             })?;
+        let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
         let mut prompt_port = HostManagedLoopPromptPort::new(
             run_context.clone(),
             Arc::clone(&context),
             Arc::clone(&self.milestone_sink),
         )
+        .with_prompt_bundle_authority(prompt_authority.clone())
         .with_default_message_limit(max_messages)
         .with_current_surface_lookup(move || surface_state_for_prompt.current())
         .with_instruction_materialization_store(Arc::clone(&instruction_materialization_store));
@@ -1065,6 +1069,7 @@ where
             max_messages,
             self.skill_context_source.clone(),
             Some(Arc::clone(&instruction_materialization_store)),
+            prompt_authority,
         ));
         let model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
@@ -1155,6 +1160,7 @@ where
     max_messages: usize,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    prompt_authority: LoopPromptBundleAuthority,
 }
 
 impl<S, G> ThreadResolvingLoopModelGateway<S, G>
@@ -1169,6 +1175,7 @@ where
         max_messages: usize,
         skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
         instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+        prompt_authority: LoopPromptBundleAuthority,
     ) -> Self {
         Self {
             thread_service,
@@ -1177,6 +1184,7 @@ where
             max_messages,
             skill_context_source,
             instruction_materialization_store,
+            prompt_authority,
         }
     }
 }
@@ -1197,7 +1205,8 @@ where
             request.context,
             Arc::clone(&self.host_gateway),
             self.max_messages,
-        );
+        )
+        .with_prompt_bundle_authority(self.prompt_authority.clone());
         if let Some(source) = self.skill_context_source.as_ref() {
             model_port = model_port.with_skill_context_source(source.clone());
         }
