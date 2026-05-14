@@ -1,11 +1,10 @@
 //! Crate-internal strategy trait contracts for the Reborn agent-loop framework.
 //!
-//! Each strategy receives `&LoopExecutionState` and returns either a pure policy
-//! value or an outcome enum carrying the new value of its own state slot. The
-//! executor swaps the slot into the next whole state. See
-//! `docs/reborn/agent-loop-skeleton.md` section 6.
+//! Wire enums remain non-exhaustive so checkpoints and observability payloads
+//! can add compatible states without forcing old consumers to assume closure.
 
-// Strategy contracts land before WS-4/WS-6 consume them.
+// WS-1/2/3 land crate-private strategy contracts before WS-4/5/6 compose and
+// execute them. Keep the unused lint local to these forward-declared contracts.
 #![allow(dead_code, unused_imports)]
 
 pub(crate) mod batch;
