@@ -37,7 +37,7 @@ use ironclaw_turns::{
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, FinalizeAssistantMessage,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        HookMilestoneSink, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InstructionBundleMaterializedMessage,
         InstructionMaterializationStore, InstructionSafetyContext, LoopCapabilityPort,
         LoopCheckpointPort, LoopCheckpointRequest, LoopContextBundle, LoopContextPort,
@@ -47,8 +47,8 @@ use ironclaw_turns::{
         LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
         LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
         LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ProcessHandleSummary, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        ProcessHandleSummary, RunScopedHookMilestoneSink, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -1102,6 +1102,17 @@ fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {
 /// across `.await` points and shared across tokio tasks.
 pub type HookDispatcherFactory = Arc<dyn Fn() -> Arc<HookDispatcher> + Send + Sync + 'static>;
 
+/// Per-build hook dispatcher *builder* factory. Unlike
+/// [`HookDispatcherFactory`] which returns a finalized `Arc<HookDispatcher>`
+/// and forces the caller to wire telemetry sinks themselves (a doc-only
+/// contract that henrypark133 Critical #4 flagged as silently losing
+/// telemetry when callers forgot), this variant returns a builder so the
+/// host factory can attach a `RunScopedHookMilestoneSink` keyed to the
+/// current `LoopRunContext` before sealing — telemetry is then
+/// run-scope-correct without caller bookkeeping.
+pub type HookDispatcherBuilderFactory =
+    Arc<dyn Fn() -> HookDispatcherBuilder + Send + Sync + 'static>;
+
 pub struct RebornLoopDriverHostFactory<S, G>
 where
     S: SessionThreadService + ?Sized,
@@ -1127,6 +1138,11 @@ where
     /// active do not leak into the next run. Default behavior (no factory) is
     /// unchanged from the pre-hooks shape.
     hook_dispatcher_factory: Option<HookDispatcherFactory>,
+    /// Per-build builder factory. Preferred over `hook_dispatcher_factory`
+    /// because it lets the host factory attach the run-scoped milestone
+    /// sink internally (henrypark133 Critical #4). Exactly one of these
+    /// two should be set; if both are, the builder factory wins.
+    hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
     /// Optional capability-input resolver. When the hook dispatcher is set
     /// and a resolver is configured, the factory wraps it in a
     /// [`HookCapabilityInputResolverAdapter`] (bound to the current
@@ -1171,6 +1187,7 @@ where
             config,
             skill_context_source: None,
             hook_dispatcher_factory: None,
+            hook_dispatcher_builder_factory: None,
             capability_input_resolver: None,
             hook_gate_ref_factory: None,
             safety_context: None,
@@ -1218,6 +1235,25 @@ where
     /// to convert opaque capability input refs into JSON arguments; production
     /// callers typically share a single implementation between dispatch and
     /// hook evaluation so both observe the same logical input.
+    /// Install a hook dispatcher *builder* factory. **Preferred over
+    /// [`Self::with_hook_dispatcher_factory`]** because the host factory
+    /// can attach a `RunScopedHookMilestoneSink` keyed to the current
+    /// `LoopRunContext` *internally*, before the builder is sealed —
+    /// guaranteeing hook telemetry carries the right run/thread scope
+    /// without caller bookkeeping (henrypark133 Critical #4).
+    ///
+    /// The closure is invoked once per `build_text_only_host*` call. It
+    /// should construct a clean builder (no pre-attached milestone sink —
+    /// the host wires one). Manifest-driven hook installations happen
+    /// inside the closure exactly as with the legacy factory.
+    pub fn with_hook_dispatcher_builder_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn() -> HookDispatcherBuilder + Send + Sync + 'static,
+    {
+        self.hook_dispatcher_builder_factory = Some(Arc::new(factory));
+        self
+    }
+
     pub fn with_capability_input_resolver(
         mut self,
         resolver: Arc<dyn LoopCapabilityInputResolver>,
@@ -1335,10 +1371,30 @@ where
         // localizes dispatcher-owned state (slot poisoning, registry edits,
         // predicate counters) to this one host so it cannot leak into the
         // next run that shares this factory.
-        let per_build_dispatcher = self
-            .hook_dispatcher_factory
-            .as_ref()
-            .map(|factory| factory());
+        //
+        // Builder-factory path (preferred): the factory hands back a
+        // mutable builder; we attach a `RunScopedHookMilestoneSink` keyed
+        // to *this* run's `LoopRunContext` *before* sealing. Hook
+        // telemetry then carries the correct run/thread scope without
+        // depending on the closure capturing the right context (which
+        // would silently misattribute across reuses — henrypark133
+        // Critical #4).
+        let per_build_dispatcher = match (
+            self.hook_dispatcher_builder_factory.as_ref(),
+            self.hook_dispatcher_factory.as_ref(),
+        ) {
+            (Some(builder_factory), _) => {
+                let builder = builder_factory();
+                let run_scoped: Arc<dyn HookMilestoneSink> =
+                    Arc::new(RunScopedHookMilestoneSink::new(
+                        run_context.clone(),
+                        Arc::clone(&self.milestone_sink) as _,
+                    ));
+                Some(builder.with_milestone_sink(run_scoped).build_arc())
+            }
+            (None, Some(factory)) => Some(factory()),
+            (None, None) => None,
+        };
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
         let surface_state = Arc::new(CapabilitySurfaceState::default());

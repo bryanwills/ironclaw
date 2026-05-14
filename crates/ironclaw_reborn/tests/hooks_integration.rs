@@ -1549,6 +1549,139 @@ async fn own_capabilities_hook_does_not_fire_when_provider_unknown() {
     );
 }
 
+// ─── henrypark133 Critical #4: per-run hook telemetry attribution ─────────
+
+/// Two-run telemetry test: build the factory once with the same builder
+/// factory closure, drive a hook dispatch under run 1, then build a second
+/// host with a fresh `LoopRunContext` and drive the same hook again. Both
+/// runs share the dispatcher *builder* (so the closure is invoked twice,
+/// minting one dispatcher per run), but the host factory attaches a
+/// `RunScopedHookMilestoneSink` keyed to the *current* run context inside
+/// `build_text_only_host_with_capabilities`. The test asserts the
+/// milestones emitted in run 1 carry run 1's `run_id`, and the milestones
+/// emitted in run 2 carry run 2's `run_id` — never the stale captured one
+/// (henrypark133 Critical #4).
+#[tokio::test]
+async fn hook_telemetry_attribution_is_per_run_not_captured() {
+    let fixture = Fixture::new().await;
+    let inner_a = Arc::new(RecordingCapabilityPort::new());
+    let inner_b = Arc::new(RecordingCapabilityPort::new());
+
+    // Same dispatcher-builder closure used for both builds; if the factory
+    // were capturing run_context inside the closure (the broken pattern),
+    // run 2 would emit milestones under run 1's id.
+    let factory_with_hook = fixture.factory().with_hook_dispatcher_builder_factory(|| {
+        use ironclaw_hooks::dispatch::HookDispatcherBuilder as HDBuilder;
+        use ironclaw_hooks::registry::HookRegistry as HReg;
+        let hook_id = HookId::derive(
+            &ExtensionId("ext-tele".to_string()),
+            "0.0.1",
+            &HookLocalId("deny-everything".to_string()),
+            HookVersion::ONE,
+        );
+        struct AlwaysDeny;
+        #[async_trait]
+        impl RestrictedBeforeCapabilityHook for AlwaysDeny {
+            async fn evaluate(
+                &self,
+                _ctx: &BeforeCapabilityHookContext,
+                sink: &mut dyn RestrictedGateSink,
+            ) {
+                sink.deny("two-run-telemetry-test");
+            }
+        }
+        HDBuilder::new(HReg::new())
+            .install_installed_before_capability(
+                hook_id,
+                HookPhase::Policy,
+                ironclaw_host_api::ExtensionId::new("ext-tele").expect("valid ext id"),
+                HookBindingScope::Global,
+                Box::new(AlwaysDeny),
+            )
+            .expect("install always-deny hook")
+    });
+
+    // Run 1.
+    let request_1 = fixture.request();
+    let run_id_1 = request_1.loop_run_context.run_id;
+    let host_1 = factory_with_hook
+        .build_text_only_host_with_capabilities(request_1, inner_a)
+        .await
+        .expect("host 1 builds");
+    let _ = host_1
+        .invoke_capability(invocation(&fixture.surface_version, "cap.x"))
+        .await
+        .expect("invoke 1 returns outcome");
+
+    // Run 2: fresh turn_id + run_id, otherwise same fixture state.
+    let mut request_2 = fixture.request();
+    let new_turn_id = ironclaw_turns::TurnId::new();
+    let new_run_id = TurnRunId::new();
+    request_2.loop_run_context = LoopRunContext::new(
+        request_2.loop_run_context.scope.clone(),
+        new_turn_id,
+        new_run_id,
+        request_2.loop_run_context.resolved_run_profile.clone(),
+    );
+    request_2.claimed_run.state.turn_id = new_turn_id;
+    request_2.claimed_run.state.run_id = new_run_id;
+    let host_2 = factory_with_hook
+        .build_text_only_host_with_capabilities(request_2, inner_b)
+        .await
+        .expect("host 2 builds with fresh run context");
+    let _ = host_2
+        .invoke_capability(invocation(&fixture.surface_version, "cap.x"))
+        .await
+        .expect("invoke 2 returns outcome");
+
+    // Inspect the milestone sink. Hook milestones from run 1 must carry
+    // run_id_1; hook milestones from run 2 must carry new_run_id. None of
+    // them may carry a stale or swapped id.
+    let milestones = fixture.milestone_sink.milestones();
+    let hook_milestones: Vec<_> = milestones
+        .iter()
+        .filter(|m| {
+            matches!(
+                m.kind,
+                LoopHostMilestoneKind::HookDispatched { .. }
+                    | LoopHostMilestoneKind::HookDecisionEmitted { .. }
+                    | LoopHostMilestoneKind::HookFailed { .. }
+            )
+        })
+        .collect();
+    assert!(
+        !hook_milestones.is_empty(),
+        "expected at least one hook milestone across the two runs"
+    );
+
+    let in_run_1: Vec<_> = hook_milestones
+        .iter()
+        .filter(|m| m.run_id == run_id_1)
+        .collect();
+    let in_run_2: Vec<_> = hook_milestones
+        .iter()
+        .filter(|m| m.run_id == new_run_id)
+        .collect();
+    let stale: Vec<_> = hook_milestones
+        .iter()
+        .filter(|m| m.run_id != run_id_1 && m.run_id != new_run_id)
+        .collect();
+
+    assert!(
+        !in_run_1.is_empty(),
+        "expected hook milestones tagged with run 1's id"
+    );
+    assert!(
+        !in_run_2.is_empty(),
+        "expected hook milestones tagged with run 2's id; the factory must \
+         attach the run-scoped sink fresh per build, not reuse a captured one"
+    );
+    assert!(
+        stale.is_empty(),
+        "no milestone may carry a run id outside the two test runs; got {stale:?}"
+    );
+}
+
 // ─── henrypark133 Critical #1: before_prompt hook resolver path ───────────
 
 /// Drives the full path: install a `before_prompt` hook that emits an

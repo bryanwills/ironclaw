@@ -302,9 +302,9 @@ fn invocation_arguments_digest(invocation: &CapabilityInvocation) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::middleware::gate_ref::UuidHookGateRefFactory;
     use crate::dispatch::BeforeCapabilityHookImpl;
     use crate::identity::{ExtensionId, HookId, HookLocalId, HookVersion};
+    use crate::middleware::gate_ref::UuidHookGateRefFactory;
     use crate::ordering::HookPhase;
     use crate::ordering::HookPriority;
     use crate::registry::{HookBinding, HookBindingScope, HookPointSpec, HookRegistry};

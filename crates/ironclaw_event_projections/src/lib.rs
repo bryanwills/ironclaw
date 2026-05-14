@@ -178,6 +178,24 @@ pub struct TimelineEntry {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Sanitized hook metadata. Populated only when `kind` is one of the
+    /// `Hook*` variants — for other kinds these fields are `None`.
+    /// Each field is a *closed-vocabulary* label (no free-form text), so
+    /// replay consumers can pattern-match on the actual hook that
+    /// fired/failed without burning audit budget on operator-supplied
+    /// reason strings (henrypark133 Concerning #6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_point: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_trust_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_failure_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_failure_disposition: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1546,6 +1564,12 @@ fn project_timeline_entry(entry: &EventLogEntry<RuntimeEvent>) -> TimelineEntry 
         process_id: event.process_id,
         output_bytes: event.output_bytes,
         error_kind: event.error_kind.clone().map(sanitize_error_kind),
+        hook_id: event.hook_id.clone(),
+        hook_point: event.hook_point.clone(),
+        hook_trust_class: event.hook_trust_class.clone(),
+        hook_decision: event.hook_decision.clone(),
+        hook_failure_category: event.hook_failure_category.clone(),
+        hook_failure_disposition: event.hook_failure_disposition.clone(),
     }
 }
 

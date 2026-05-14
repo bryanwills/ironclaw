@@ -1981,3 +1981,175 @@ async fn replay_projection_snapshot_runs_reflect_process_failed_under_truncation
     // raw `error_kind` is normalized via `sanitize_error_kind`.
     assert!(snapshot.runs[0].error_kind.is_some());
 }
+
+// ─── henrypark133 Concerning #6: hook metadata projection ─────────────────
+
+/// Contract test: when the durable event log carries `RuntimeEvent::Hook*`
+/// events, the projection's `TimelineEntry` must preserve the sanitized
+/// hook metadata (id, point, trust class, decision, failure category/
+/// disposition). Without this, product replay sees only "a hook event
+/// happened" and cannot identify which hook fired or how it failed
+/// (henrypark133 Concerning #6).
+#[tokio::test]
+async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
+    let scope = scope_for_thread(ThreadId::new("thread-hooks").unwrap());
+
+    // Three hook events spanning the full lifecycle: dispatch start,
+    // decision emitted, failure recorded.
+    let dispatched = RuntimeEvent {
+        event_id: RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        kind: RuntimeEventKind::HookDispatched,
+        scope: scope.clone(),
+        capability_id: capability_id(),
+        provider: Some(provider_id()),
+        runtime: None,
+        process_id: None,
+        output_bytes: None,
+        error_kind: None,
+        hook_id: Some("0123456789abcdef".repeat(4)), // 64-char blake3 hex
+        hook_point: Some("before_capability".to_string()),
+        hook_trust_class: Some("installed".to_string()),
+        hook_decision: None,
+        hook_failure_category: None,
+        hook_failure_disposition: None,
+    };
+    let decision = RuntimeEvent {
+        event_id: RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        kind: RuntimeEventKind::HookDecisionEmitted,
+        scope: scope.clone(),
+        capability_id: capability_id(),
+        provider: Some(provider_id()),
+        runtime: None,
+        process_id: None,
+        output_bytes: None,
+        error_kind: None,
+        hook_id: Some("0123456789abcdef".repeat(4)),
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: Some("deny".to_string()),
+        hook_failure_category: None,
+        hook_failure_disposition: None,
+    };
+    let failed = RuntimeEvent {
+        event_id: RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        kind: RuntimeEventKind::HookFailed,
+        scope: scope.clone(),
+        capability_id: capability_id(),
+        provider: Some(provider_id()),
+        runtime: None,
+        process_id: None,
+        output_bytes: None,
+        error_kind: None,
+        hook_id: Some("fedcba9876543210".repeat(4)),
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: None,
+        hook_failure_category: Some("timeout".to_string()),
+        hook_failure_disposition: Some("fail_closed".to_string()),
+    };
+
+    let backend = Arc::new(StaticDurableEventLog {
+        entries: vec![
+            EventLogEntry {
+                cursor: EventCursor::new(1),
+                record: dispatched,
+            },
+            EventLogEntry {
+                cursor: EventCursor::new(2),
+                record: decision,
+            },
+            EventLogEntry {
+                cursor: EventCursor::new(3),
+                record: failed,
+            },
+        ],
+    });
+    let service = ReplayEventProjectionService::new(Arc::clone(&backend));
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.timeline.entries.len(), 3);
+
+    // 1. HookDispatched: hook_id + hook_point + hook_trust_class set.
+    let d = &snapshot.timeline.entries[0];
+    assert_eq!(d.kind, TimelineEntryKind::HookDispatched);
+    assert!(d.hook_id.is_some(), "HookDispatched must carry hook_id");
+    assert_eq!(d.hook_point.as_deref(), Some("before_capability"));
+    assert_eq!(d.hook_trust_class.as_deref(), Some("installed"));
+    assert_eq!(d.hook_decision, None);
+    assert_eq!(d.hook_failure_category, None);
+    assert_eq!(d.hook_failure_disposition, None);
+
+    // 2. HookDecisionEmitted: hook_id + hook_decision set.
+    let e = &snapshot.timeline.entries[1];
+    assert_eq!(e.kind, TimelineEntryKind::HookDecisionEmitted);
+    assert!(e.hook_id.is_some());
+    assert_eq!(e.hook_decision.as_deref(), Some("deny"));
+
+    // 3. HookFailed: hook_id + failure_category + disposition set.
+    let f = &snapshot.timeline.entries[2];
+    assert_eq!(f.kind, TimelineEntryKind::HookFailed);
+    assert!(f.hook_id.is_some());
+    assert_eq!(f.hook_failure_category.as_deref(), Some("timeout"));
+    assert_eq!(f.hook_failure_disposition.as_deref(), Some("fail_closed"));
+}
+
+/// Non-hook events must NOT have hook_* fields populated — guards against
+/// a future refactor that accidentally cross-populates the wrong fields.
+#[tokio::test]
+async fn non_hook_runtime_events_project_with_no_hook_metadata() {
+    let scope = scope_for_thread(ThreadId::new("thread-non-hook").unwrap());
+    let dispatch_succeeded = RuntimeEvent {
+        event_id: RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        kind: RuntimeEventKind::DispatchSucceeded,
+        scope: scope.clone(),
+        capability_id: capability_id(),
+        provider: Some(provider_id()),
+        runtime: Some(RuntimeKind::Script),
+        process_id: Some(ProcessId::new()),
+        output_bytes: Some(42),
+        error_kind: None,
+        hook_id: None,
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: None,
+        hook_failure_category: None,
+        hook_failure_disposition: None,
+    };
+    let backend = Arc::new(StaticDurableEventLog {
+        entries: vec![EventLogEntry {
+            cursor: EventCursor::new(1),
+            record: dispatch_succeeded,
+        }],
+    });
+    let service = ReplayEventProjectionService::new(Arc::clone(&backend));
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+
+    let entry = &snapshot.timeline.entries[0];
+    assert_eq!(entry.kind, TimelineEntryKind::DispatchSucceeded);
+    assert!(entry.hook_id.is_none());
+    assert!(entry.hook_point.is_none());
+    assert!(entry.hook_trust_class.is_none());
+    assert!(entry.hook_decision.is_none());
+    assert!(entry.hook_failure_category.is_none());
+    assert!(entry.hook_failure_disposition.is_none());
+}
