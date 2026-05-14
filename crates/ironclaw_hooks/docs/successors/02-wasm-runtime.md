@@ -94,3 +94,58 @@ PR brings it in scope; the new threat-model-wasm.md must cover:
 
 Large. Plan for at least one design-review iteration before
 implementation lands.
+
+## Codex review addenda (2026-05-14)
+
+Codex's design-review pass surfaced two scope-shaping issues and one
+recommendation.
+
+### Critical: host-import calls + outputs need budgets
+
+The original scope budgets Wasm fuel/memory/wall-time but says nothing
+about host-side sink call counts, emitted facts, patch bytes, or
+decision attempts. A module that respects the Wasm-side budgets can
+still exhaust host memory by issuing thousands of small import calls
+(each appending a small string to a sink-internal `Vec`, for instance).
+
+**Mitigation**: the host-import shims must enforce per-invocation
+budgets:
+
+- `max_sink_calls_per_invocation` (default ~64)
+- `max_total_patch_bytes` (default the existing 4 KiB envelope budget)
+- `max_observer_facts_per_invocation` (default ~32)
+- `max_decision_calls_per_invocation` (1; second call = protocol violation)
+
+Each budget overflow trips a `FailureCategory::Malformed` and the
+slot poisons per the existing failure-policy matrix. Negative tests
+in the implementation PR will fire each cap explicitly.
+
+### Critical: module-substitution test claim was internally inconsistent
+
+The original scope said "same `HookLocalId`, different module bytes →
+different `HookId` → **registry rejects on `HookId` collision check**."
+Those two clauses can't both be true: different `HookId`s by
+definition aren't a collision.
+
+**Corrected statement**: a different module produces a different
+`HookId`, so the resume / checkpoint replay path refuses with a
+**checkpoint-hook-id-mismatch** error (the existing pinned-id replay
+guard), not a registry-side collision. The test should:
+
+1. Install hook with module A → `HookId_A`.
+2. Persist a checkpoint referencing `HookId_A`.
+3. Re-install the same `HookLocalId` with module B → `HookId_B`.
+4. Replay against the checkpoint → refused with
+   `unknown_hook_id_at_replay` (or equivalent).
+
+### Recommendation: ABI choice should land in the draft
+
+The original scope says "wit-bindgen vs hand-rolled ABI: pick one"
+under design discussion. Codex was right that this is implementation-
+shaping — the budgets above depend on which crate intercepts the host
+imports, and the existing tool-WASM stack already chose one path.
+
+**Decision for this PR**: follow `ironclaw_wasm`'s existing pattern
+(linked via `wasmtime::Linker`) for parity. The implementation PR
+documents this choice and reuses tool-WASM's import-budget primitives
+where applicable.
