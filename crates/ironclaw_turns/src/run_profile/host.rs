@@ -844,6 +844,7 @@ pub struct LoopPromptBundle {
 pub struct LoopPromptBundleGrant {
     pub bundle_ref: LoopPromptBundleRef,
     pub messages: Vec<LoopModelMessage>,
+    pub surface_version: Option<CapabilitySurfaceVersion>,
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
 }
 
@@ -880,6 +881,7 @@ impl LoopPromptBundleAuthority {
             LoopPromptBundleGrant {
                 bundle_ref: bundle.bundle_ref.clone(),
                 messages: bundle.messages.clone(),
+                surface_version: bundle.surface_version.clone(),
                 instruction_fingerprint: bundle.instruction_fingerprint.clone(),
             },
         );
@@ -890,12 +892,12 @@ impl LoopPromptBundleAuthority {
         &self,
         context: &LoopRunContext,
         messages: &[LoopModelMessage],
+        surface_version: &Option<CapabilitySurfaceVersion>,
     ) -> Result<LoopPromptBundleGrant, AgentLoopHostError> {
         let grant = self
             .lock_state()?
             .latest_by_run
-            .get(&context.run_id.to_string())
-            .cloned()
+            .remove(&context.run_id.to_string())
             .ok_or_else(|| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
@@ -913,6 +915,12 @@ impl LoopPromptBundleAuthority {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "model request messages do not match the host-built prompt bundle",
+            ));
+        }
+        if &grant.surface_version != surface_version {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::StaleSurface,
+                "model request surface version does not match the host-built prompt bundle",
             ));
         }
 
