@@ -133,9 +133,11 @@ WASM modules can call the following host functions provided by IronClaw:
 | Function | Description |
 |----------|-------------|
 | `log(level, message)` | Write to the IronClaw log at the given severity level |
-| `now_unix_secs()` | Return the current Unix timestamp |
-| `workspace_read(path)` | Read a document from the workspace |
-| `workspace_write(path, content)` | Write a document to the workspace |
+| `now_millis()` | Return the current Unix timestamp in milliseconds |
+| `workspace_read(path)` | Read a document from the workspace (capability-gated) |
+| `http_request(method, url, headers, body, timeout)` | Make an HTTP request; the host validates the destination, injects credentials, and scans the response for secrets before returning |
+| `tool_invoke(alias, params)` | Invoke another tool by alias (capability-gated; output is scanned for leaks) |
+| `secret_exists(name)` | Check whether a secret is present and accessible to this tool. Returns a boolean only — never the value |
 
 These are the only host capabilities available. A WASM tool cannot call arbitrary OS functions, fork processes, or access the network directly — all network access goes through the proxy.
 
