@@ -52,6 +52,7 @@ pub struct MockAgentLoopDriverHost {
     staged_iterations: Mutex<VecDeque<u32>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
+    acked_tokens: Mutex<Vec<LoopInputAckToken>>,
 }
 
 impl MockAgentLoopDriverHost {
@@ -71,6 +72,11 @@ impl MockAgentLoopDriverHost {
             .iter()
             .filter(|call| matches!(call, MockHostCall::StreamModel))
             .count()
+    }
+
+    /// Returns all ack tokens passed to [`ack_inputs`] so far, in call order.
+    pub fn acked_tokens(&self) -> Vec<LoopInputAckToken> {
+        lock_or_panic(&self.acked_tokens).clone()
     }
 
     fn record_call(&self, call: MockHostCall) {
@@ -145,6 +151,7 @@ impl MockAgentLoopDriverHostBuilder {
                 staged_iterations: Mutex::new(VecDeque::new()),
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
+                acked_tokens: Mutex::new(Vec::new()),
             },
             checkpoints,
         )
@@ -574,8 +581,9 @@ impl ironclaw_turns::run_profile::LoopInputPort for MockAgentLoopDriverHost {
         })
     }
 
-    async fn ack_inputs(&self, _tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError> {
+    async fn ack_inputs(&self, tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError> {
         self.record_call(MockHostCall::AckInputs);
+        lock_or_panic(&self.acked_tokens).extend(tokens);
         Ok(())
     }
 }

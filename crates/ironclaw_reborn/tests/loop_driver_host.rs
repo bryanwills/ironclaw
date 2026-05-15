@@ -25,10 +25,10 @@ use ironclaw_host_runtime::{
     VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
-    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError,
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource,
+    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, HostSkillContextBuildError, HostSkillContextCandidate,
+    HostSkillContextSource,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::{
@@ -2352,10 +2352,9 @@ impl HostInputQueue for SingleMessageQueue {
         let pending = self.input.lock().expect("queue lock").take();
         match pending {
             Some(input) => {
-                let cursor = ironclaw_turns::run_profile::LoopInputCursorToken::new(
-                    "input-cursor:1",
-                )
-                .unwrap();
+                let cursor =
+                    ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:1")
+                        .unwrap();
                 let ack_token =
                     ironclaw_turns::run_profile::LoopInputAckToken::new("input-ack:1").unwrap();
                 Ok(HostInputBatch {
