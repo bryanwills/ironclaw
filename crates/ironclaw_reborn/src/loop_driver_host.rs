@@ -37,8 +37,8 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
-        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
+        CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
+        ConcurrencyHint, FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
         HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
         InstructionBundleMaterializedMessage, InstructionMaterializationStore,
         InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
@@ -966,6 +966,7 @@ async fn runtime_outcome_to_loop(
             CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref,
                 safe_summary: "capability completed".to_string(),
+                terminate_hint: false,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => CapabilityOutcome::ApprovalRequired {
@@ -1003,7 +1004,7 @@ async fn runtime_outcome_to_loop(
                 })
             } else {
                 CapabilityOutcome::Failed(CapabilityFailure {
-                    error_kind: failure.kind.as_str().to_string(),
+                    error_kind: runtime_failure_kind_to_loop(failure.kind),
                     safe_summary: runtime_safe_summary(
                         failure.message,
                         "capability invocation failed",
@@ -1013,7 +1014,12 @@ async fn runtime_outcome_to_loop(
         }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
             CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind: unknown.kind,
+                error_kind: CapabilityFailureKind::unknown(unknown.kind).map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Internal,
+                        "unknown capability outcome kind could not be represented",
+                    )
+                })?,
                 safe_summary: runtime_safe_summary(
                     unknown.message,
                     "capability invocation returned an unknown outcome",
@@ -1021,6 +1027,23 @@ async fn runtime_outcome_to_loop(
             })
         }
     })
+}
+
+fn runtime_failure_kind_to_loop(kind: RuntimeFailureKind) -> CapabilityFailureKind {
+    match kind {
+        RuntimeFailureKind::Authorization => CapabilityFailureKind::Authorization,
+        RuntimeFailureKind::Backend => CapabilityFailureKind::Backend,
+        RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
+        RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
+        RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
+        RuntimeFailureKind::MissingRuntime => CapabilityFailureKind::MissingRuntime,
+        RuntimeFailureKind::Network => CapabilityFailureKind::Network,
+        RuntimeFailureKind::OutputTooLarge => CapabilityFailureKind::OutputTooLarge,
+        RuntimeFailureKind::Process => CapabilityFailureKind::Process,
+        RuntimeFailureKind::Resource => CapabilityFailureKind::Resource,
+        RuntimeFailureKind::Unknown => CapabilityFailureKind::Permanent,
+        _ => CapabilityFailureKind::Permanent,
+    }
 }
 
 fn ensure_runtime_outcome_matches(

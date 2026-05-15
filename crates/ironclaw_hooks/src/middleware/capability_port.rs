@@ -384,6 +384,7 @@ mod tests {
                 result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                     .expect("ok"),
                 safe_summary: format!("ran {}", request.capability_id),
+                terminate_hint: false,
             }))
         }
 

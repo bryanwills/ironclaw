@@ -132,6 +132,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
             safe_summary: "stub capability completed".to_string(),
+            terminate_hint: false,
         }))
     }
 
@@ -201,6 +202,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
             safe_summary: "stub capability completed".to_string(),
+            terminate_hint: false,
         }))
     }
 
@@ -1018,7 +1020,6 @@ fn observer_dispatcher_at(point: HookPointSpec, seen: Arc<Mutex<u32>>) -> Arc<Ho
         .expect("install builtin observer")
         .build_arc()
 }
-
 
 #[tokio::test]
 async fn after_model_fires_exactly_once_at_durable_boundary() {
