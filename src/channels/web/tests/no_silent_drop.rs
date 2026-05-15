@@ -463,7 +463,16 @@ async fn mission_notification_routes_to_parent_thread_when_set() {
     mgr.add(Box::new(gw)).await;
     let channels = Arc::new(mgr);
 
-    let parent = ironclaw_engine::ThreadId(uuid::Uuid::new_v4());
+    // Real chat threads always have a v1 `conversations` row before a
+    // mission can target them — the chat ingress writes it. Mirror that
+    // here so the sink's ownership/metadata check resolves to "verified".
+    // Without this row, the sink correctly treats the parent as missing
+    // and re-routes to the assistant conversation (the consistency fix).
+    let parent_uuid = store
+        .create_conversation("gateway", "test-user", None)
+        .await
+        .expect("parent v1 conversation should be creatable");
+    let parent = ironclaw_engine::ThreadId(parent_uuid);
     let execution_thread = ironclaw_engine::ThreadId(uuid::Uuid::new_v4());
 
     let notif = ironclaw_engine::MissionNotification {
@@ -971,5 +980,224 @@ async fn mission_notification_v2_entry_lands_in_scoped_conversation() {
         "mission output must not leak into the unscoped v2 conversation \
          (entries: {:?})",
         unscoped_conv.entries,
+    );
+}
+
+/// Missing-parent-row consistency regression. When `parent_thread_id` is set
+/// but has no v1 `conversations` row (deleted thread, never-created row),
+/// `handle_mission_notification` must collapse the destination to the user's
+/// assistant conversation in a single resolution step. Otherwise the
+/// destination splits: SSE/v2 keyed by `parent` (treating the missing row as
+/// "verified"), v1 FK-failing and falling back to the assistant conversation.
+/// The live SSE event then lands in one thread while refresh/history loads
+/// from another, and the v2 follow-up turn reads from `gateway:<parent>` —
+/// a conversation that has no mission entry — so the agent denies sending it.
+///
+/// This test asserts the three destinations (SSE thread_id, v1 persisted row,
+/// v2 conversation key) all converge on the assistant conversation when the
+/// parent row is missing.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn mission_notification_missing_parent_row_converges_on_assistant_conv() {
+    use crate::channels::ChannelManager;
+    use crate::db::Database;
+    use futures::StreamExt;
+    use ironclaw_common::AppEvent;
+    use ironclaw_engine::{
+        CapabilityRegistry, ConversationManager, LeaseManager, LlmBackend, LlmCallConfig,
+        LlmOutput, LlmResponse, PolicyEngine, ThreadManager, TokenUsage,
+    };
+    use std::sync::Arc;
+
+    struct NoopLlm;
+    #[async_trait::async_trait]
+    impl LlmBackend for NoopLlm {
+        async fn complete(
+            &self,
+            _: &[ironclaw_engine::ThreadMessage],
+            _: &[ironclaw_engine::ActionDef],
+            _: &LlmCallConfig,
+        ) -> Result<LlmOutput, ironclaw_engine::EngineError> {
+            Ok(LlmOutput {
+                response: LlmResponse::Text("noop".into()),
+                usage: TokenUsage::default(),
+            })
+        }
+        fn model_name(&self) -> &str {
+            "noop"
+        }
+    }
+    struct NoopEffects;
+    #[async_trait::async_trait]
+    impl ironclaw_engine::EffectExecutor for NoopEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &ironclaw_engine::CapabilityLease,
+            _: &ironclaw_engine::ThreadExecutionContext,
+        ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+            unreachable!("test does not drive execution")
+        }
+        async fn available_actions(
+            &self,
+            _: &[ironclaw_engine::CapabilityLease],
+            _: &ironclaw_engine::ThreadExecutionContext,
+        ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+            Ok(vec![])
+        }
+        async fn available_capabilities(
+            &self,
+            _: &[ironclaw_engine::CapabilityLease],
+            _: &ironclaw_engine::ThreadExecutionContext,
+        ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test_missing_parent_row.db");
+    let backend = crate::db::libsql::LibSqlBackend::new_local(&db_path)
+        .await
+        .unwrap();
+    Database::run_migrations(&backend).await.unwrap();
+    let store: Arc<dyn Database> = Arc::new(backend);
+
+    let gw = test_gateway().with_store(store.clone());
+    let sse = Arc::clone(&gw.state.sse);
+    let mut stream = sse
+        .subscribe_raw(Some("test-user".to_string()), false)
+        .expect("subscribe should succeed");
+
+    let mgr = ChannelManager::new();
+    mgr.add(Box::new(gw)).await;
+    let channels = Arc::new(mgr);
+
+    let engine_store: Arc<dyn ironclaw_engine::Store> =
+        Arc::new(crate::bridge::store_adapter::HybridStore::new(None));
+    let thread_manager = Arc::new(ThreadManager::new(
+        Arc::new(NoopLlm),
+        Arc::new(NoopEffects),
+        Arc::clone(&engine_store),
+        Arc::new(CapabilityRegistry::new()),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    ));
+    let conv_mgr = ConversationManager::new(thread_manager, Arc::clone(&engine_store));
+
+    // The mission carries a `parent_thread_id` whose v1 row was never
+    // created (or has since been deleted). Deliberately do NOT call
+    // `create_conversation` here.
+    let missing_parent = ironclaw_engine::ThreadId(uuid::Uuid::new_v4());
+
+    let assistant_conv = store
+        .get_or_create_assistant_conversation("test-user", "gateway")
+        .await
+        .expect("assistant conv should be creatable");
+
+    let notif = ironclaw_engine::MissionNotification {
+        mission_id: ironclaw_engine::MissionId(uuid::Uuid::new_v4()),
+        mission_name: "missing-parent-test".to_string(),
+        thread_id: ironclaw_engine::ThreadId(uuid::Uuid::new_v4()),
+        parent_thread_id: Some(missing_parent),
+        user_id: "test-user".to_string(),
+        notify_channels: vec!["gateway".to_string()],
+        notify_user: None,
+        response: Some("missing-parent mission output".to_string()),
+        is_error: false,
+        gate: None,
+    };
+
+    crate::bridge::handle_mission_notification(
+        &notif,
+        &channels,
+        Some(&sse),
+        Some(&store),
+        Some(&conv_mgr),
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    // (1) SSE thread_id must equal the assistant conversation, not the
+    //     missing parent UUID. The split-brain bug surfaced exactly here:
+    //     SSE advertised the live event under `missing_parent` while the
+    //     v1 row landed elsewhere.
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+        .await
+        .expect("should receive SSE event within 1s")
+        .expect("stream should not be empty");
+    let AppEvent::Response { thread_id, .. } = event else {
+        panic!("expected AppEvent::Response, got: {event:?}");
+    };
+    assert_eq!(
+        thread_id,
+        assistant_conv.to_string(),
+        "SSE thread_id must converge on the assistant conversation when the \
+         parent row is missing — not the missing parent UUID"
+    );
+    assert_ne!(
+        thread_id,
+        missing_parent.to_string(),
+        "SSE thread_id must not advertise a parent UUID with no v1 row \
+         (history endpoint would return empty for that thread)"
+    );
+
+    // (2) v1 persistence must land in the assistant conversation, NOT in
+    //     a (nonexistent) row for the missing parent.
+    let assistant_messages = store
+        .list_conversation_messages_paginated(assistant_conv, None, 50)
+        .await
+        .expect("listing assistant conv messages should succeed")
+        .0;
+    assert!(
+        assistant_messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.contains("missing-parent mission output")),
+        "v1 persistence must converge on the assistant conversation when the \
+         parent row is missing (messages: {assistant_messages:?})"
+    );
+
+    // (3) v2 conversation key must use the unscoped `gateway` key, matching
+    //     the assistant-conv routing. Scoping by `gateway:<missing_parent>`
+    //     here would re-create the split-brain at the v2 follow-up layer:
+    //     the next chat turn loads from the unscoped key and would miss the
+    //     entry.
+    let unscoped_id = conv_mgr
+        .get_or_create_conversation("gateway", "test-user")
+        .await
+        .expect("unscoped conversation lookup");
+    let unscoped_conv = conv_mgr
+        .get_conversation(unscoped_id)
+        .await
+        .expect("unscoped conversation snapshot");
+    assert!(
+        unscoped_conv
+            .entries
+            .iter()
+            .any(|e| e.content.contains("missing-parent mission output")),
+        "v2 entry must land in the unscoped `gateway` conversation when the \
+         parent row is missing (entries: {:?})",
+        unscoped_conv.entries,
+    );
+
+    let scoped_id = conv_mgr
+        .get_or_create_conversation(&format!("gateway:{}", missing_parent.0), "test-user")
+        .await
+        .expect("scoped conversation lookup");
+    let scoped_conv = conv_mgr
+        .get_conversation(scoped_id)
+        .await
+        .expect("scoped conversation snapshot");
+    assert!(
+        scoped_conv
+            .entries
+            .iter()
+            .all(|e| !e.content.contains("missing-parent mission output")),
+        "v2 entry must NOT land under `gateway:<missing_parent>` — otherwise \
+         the follow-up turn loading from the unscoped key would not see it \
+         (entries: {:?})",
+        scoped_conv.entries,
     );
 }

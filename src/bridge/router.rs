@@ -5625,21 +5625,21 @@ pub(crate) async fn handle_mission_notification(
     // tagged with another user's conversation UUID, but a missed surface
     // upstream (a future channel, a missed validation, a v1-only path) must
     // not turn into a cross-user `add_conversation_message` write here. We
-    // re-verify against the v1 ownership predicate; on mismatch or DB error
-    // we fall back to the assistant conversation. With `db = None` (test
-    // harness) there is no v1 table to write into, so the check is skipped
-    // and the parent is trusted — there is no IDOR risk in that path.
-    // Ownership semantics mirror the chat-ingress gate at
-    // `chat_send_handler` (src/channels/web/features/chat/mod.rs): only
-    // reject `parent_thread_id` when a v1 conversation row exists and is
-    // owned by someone other than `notif.user_id`. A missing row is
-    // harmless — the FK on `add_conversation_message` would fail
-    // independently — and rejecting it would needlessly redirect every
-    // legitimate parent-routed mission whose v1 row was deleted or never
-    // created (e.g. a non-`gateway` channel that didn't pre-write to
-    // `conversations`). With `db = None` (test harness) there is no v1
-    // table to write into, so the check is skipped and the parent is
-    // trusted — no IDOR risk in that path.
+    // re-verify against the v1 ownership predicate; on mismatch, missing
+    // row, or DB error we fall back to the assistant conversation. With
+    // `db = None` (test harness) there is no v1 table to write into, so the
+    // check is skipped and the parent is trusted — there is no IDOR risk in
+    // that path.
+    //
+    // Missing-row policy: a `parent_thread_id` whose v1 `conversations`
+    // row does not exist is treated as unroutable, not as verified. The
+    // earlier "missing row is harmless, the FK will fail" rationale
+    // produced a split-brain destination — SSE/v2 keyed by `parent` while
+    // the v1 write FK-failed and re-routed to the assistant conversation —
+    // so the live event landed in one thread while refresh/history loaded
+    // from another. By collapsing missing rows to `None` here, SSE,
+    // v1 persistence, and the v2 conversation key all converge on the
+    // assistant conversation in a single resolution step.
     let verified_parent: Option<ironclaw_engine::ThreadId> = match notif.parent_thread_id {
         Some(parent) => match db {
             Some(db_ref) => match db_ref
@@ -5660,7 +5660,20 @@ pub(crate) async fn handle_mission_notification(
                         );
                         None
                     }
-                    Ok(None) => Some(parent),
+                    Ok(None) => {
+                        // Row does not exist (deleted or never created).
+                        // Falling through to the assistant conversation keeps
+                        // SSE, v1 persistence, and the v2 conversation key
+                        // pointed at the same destination.
+                        tracing::debug!(
+                            user = %notif.user_id,
+                            parent = %parent.0,
+                            mission = %notif.mission_name,
+                            "mission parent_thread_id has no v1 conversation row; \
+                             falling back to assistant conversation",
+                        );
+                        None
+                    }
                     Err(error) => {
                         tracing::warn!(
                             user = %notif.user_id,
@@ -5750,13 +5763,15 @@ pub(crate) async fn handle_mission_notification(
             .add_conversation_message(target_thread.0, "assistant", &full_text)
             .await
             .is_ok();
-        // If the chosen target was a parent conversation thread and the write
-        // failed (e.g. the V1 row was deleted), fall back to the assistant
-        // conversation so the output still surfaces somewhere visible. Keyed
-        // on `verified_parent` rather than the raw `parent_thread_id` —
-        // otherwise an ownership rejection (which already redirected
-        // `target_thread` to the assistant conversation) would retry the same
-        // write needlessly.
+        // TOCTOU / transient-error fallback: missing-row and IDOR cases are
+        // already redirected to the assistant conversation above, so reaching
+        // this branch with `verified_parent.is_some()` means the row passed
+        // both ownership and metadata checks but the write still failed —
+        // either a transient DB error, or the parent row was deleted between
+        // the resolution above and this write. Either way, re-route to the
+        // assistant conversation so the output stays visible. Keyed on
+        // `verified_parent` rather than the raw `parent_thread_id` so the
+        // already-redirected paths don't retry the same write needlessly.
         if !write_ok
             && verified_parent.is_some()
             && let Ok(assistant_conv_id) = db
