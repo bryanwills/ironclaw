@@ -25,6 +25,7 @@ use ironclaw_host_runtime::{
     VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
+    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError,
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
     HostSkillContextCandidate, HostSkillContextSource,
@@ -67,7 +68,7 @@ use ironclaw_turns::{
     GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryRunProfileResolver, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked,
     LoopBlockedKind, LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
-    LoopExit, LoopExitId, LoopGateRef, LoopResultRef, PutCheckpointStateRequest,
+    LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
     RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
@@ -79,7 +80,7 @@ use ironclaw_turns::{
         FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopContextRequest, LoopDriverId, LoopDriverNoteKind,
-        LoopHostMilestone, LoopInlineMessage, LoopInlineMessageRole, LoopInputAckToken,
+        LoopHostMilestone, LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken,
         LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
         LoopModelGatewayError, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot,
         LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
@@ -2283,6 +2284,103 @@ async fn no_extra_loop_input_port_rejects_unissued_ack_token() {
         .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+}
+
+/// Regression test for the `with_input_queue` factory composition path.
+///
+/// Proves that `RebornLoopDriverHostFactory::with_input_queue` actually wires the
+/// provided `HostInputQueue` into the host's `LoopInputPort` — i.e. the factory
+/// does not silently drop the queue. If the wiring were ever broken, `poll_inputs`
+/// would return an empty batch (the `NoExtraLoopInputPort` default) instead of
+/// delivering the steering message.
+#[tokio::test]
+async fn input_queue_wired_through_factory_drains_steering_message() {
+    let fixture = HostFixture::new("thread-host-input-queue-factory", "hello input queue").await;
+
+    let steering_ref = LoopMessageRef::new("msg:steering-factory-test").unwrap();
+    let queue = Arc::new(SingleMessageQueue::new(LoopInput::Steering {
+        message_ref: steering_ref.clone(),
+    }));
+
+    let host = fixture
+        .factory()
+        .with_input_queue(queue as Arc<dyn HostInputQueue>)
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+
+    let batch = host
+        .poll_inputs(LoopInputCursor::origin_for_run(&fixture.context), 8)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        batch.inputs,
+        vec![LoopInput::Steering {
+            message_ref: steering_ref
+        }],
+        "factory should wire input_queue into the host's LoopInputPort"
+    );
+    assert_eq!(batch.input_acks.len(), 1, "one ack token should be issued");
+}
+
+/// A minimal in-memory `HostInputQueue` that serves exactly one input item,
+/// then returns empty batches.
+struct SingleMessageQueue {
+    input: Mutex<Option<LoopInput>>,
+}
+
+impl SingleMessageQueue {
+    fn new(input: LoopInput) -> Self {
+        Self {
+            input: Mutex::new(Some(input)),
+        }
+    }
+}
+
+#[async_trait]
+impl HostInputQueue for SingleMessageQueue {
+    async fn next_after(
+        &self,
+        _run_id: TurnRunId,
+        after: ironclaw_turns::run_profile::LoopInputCursorToken,
+        _limit: usize,
+    ) -> Result<HostInputBatch, HostInputQueueError> {
+        let pending = self.input.lock().expect("queue lock").take();
+        match pending {
+            Some(input) => {
+                let cursor = ironclaw_turns::run_profile::LoopInputCursorToken::new(
+                    "input-cursor:1",
+                )
+                .unwrap();
+                let ack_token =
+                    ironclaw_turns::run_profile::LoopInputAckToken::new("input-ack:1").unwrap();
+                Ok(HostInputBatch {
+                    inputs: vec![HostInputEnvelope {
+                        input,
+                        cursor: cursor.clone(),
+                        ack_token,
+                    }],
+                    next_cursor: cursor,
+                })
+            }
+            None => Ok(HostInputBatch {
+                inputs: Vec::new(),
+                next_cursor: after,
+            }),
+        }
+    }
+
+    async fn ack_consumed(
+        &self,
+        _run_id: TurnRunId,
+        _tokens: Vec<ironclaw_turns::run_profile::LoopInputAckToken>,
+    ) -> Result<(), HostInputQueueError> {
+        Ok(())
+    }
 }
 
 #[tokio::test]

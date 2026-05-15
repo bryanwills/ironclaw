@@ -1009,6 +1009,10 @@ where
         self
     }
 
+    // Note: the WS-11 brief specifies input_queue on PlannedDriverConfig; the implementation
+    // puts it here on RebornLoopDriverHostFactory instead, which is the factory pattern already
+    // used for capability/context ports. PlannedDriver delegates fully to the host for
+    // input port construction. This deviation is intentional; update the brief if keeping.
     pub fn with_input_queue(mut self, queue: Arc<dyn HostInputQueue>) -> Self {
         self.input_queue = Some(queue);
         self

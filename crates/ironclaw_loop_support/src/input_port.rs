@@ -18,6 +18,9 @@ const MAX_HOST_INPUT_POLL_LIMIT: usize = 128;
 pub struct HostQueueLoopInputPort {
     queue: Arc<dyn HostInputQueue>,
     run_context: LoopRunContext,
+    // TODO: issued_cursors accumulates every cursor ever issued for this port instance.
+    // Once the underlying queue substrate lands, add cursor eviction (ack-d cursors can be
+    // dropped from the set; the loop never reuses an advanced-past cursor).
     issued_cursors: Mutex<HashSet<LoopInputCursorToken>>,
     issued_ack_tokens: Mutex<HashSet<LoopInputAckToken>>,
 }
