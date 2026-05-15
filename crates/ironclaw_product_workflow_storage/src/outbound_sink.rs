@@ -85,6 +85,9 @@ impl OutboundDeliverySink for OutboundStateStoreDeliverySink {
             delivery_id: ironclaw_outbound::OutboundDeliveryId::from_uuid(status.attempt_id()),
             scope: self.scope.clone(),
             candidate: OutboundPushCandidate {
+                tenant_id: self.scope.tenant_id.clone(),
+                agent_id: self.scope.agent_id.clone(),
+                project_id: self.scope.project_id.clone(),
                 thread_id: self.thread_id.clone(),
                 turn_run_id: run_id,
                 target,

@@ -10,6 +10,7 @@
 
 mod driver;
 mod host;
+mod instruction_bundle;
 mod memory_context;
 mod milestones;
 mod model;
@@ -31,16 +32,23 @@ pub use host::{
     CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
     CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
     CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
-    CapabilitySurfaceVersion, FinalizeAssistantMessage, LoopCancelReasonKind, LoopCapabilityPort,
-    LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
-    LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
-    LoopContextSnippetMetadata, LoopDriverNoteKind, LoopInput, LoopInputBatch, LoopInputCursor,
+    CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage, LoopCancelReasonKind,
+    LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
+    LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverNoteKind,
+    LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputBatch, LoopInputCursor,
     LoopInputCursorToken, LoopInputPort, LoopInterruptKind, LoopModelMessage, LoopModelPort,
     LoopModelRequest, LoopModelResponse, LoopModelRouteSnapshot, LoopProcessRef, LoopProgressEvent,
-    LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-    LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-    ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, PromptMode, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, validate_model_route_component_value,
+    LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
+    LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary,
+    PromptMode, StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, sanitize_model_visible_text, validate_model_route_component_value,
+};
+pub use instruction_bundle::{
+    InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
+    InstructionBundleFingerprint, InstructionBundleMaterializedMessage, InstructionBundleRequest,
+    InstructionMaterializationStore, InstructionSafetyContext,
 };
 pub use memory_context::{
     EmptyMemoryPromptContextService, MemoryPromptContextRequest, MemoryPromptContextService,
@@ -50,7 +58,9 @@ pub use milestones::{
     LoopHostMilestoneKind, LoopHostMilestoneSink, PromptSkillContextMetadata,
 };
 pub use model::{
-    HostManagedLoopModelPort, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
+    HostManagedLoopModelPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
+    LoopModelGatewayRequest, LoopModelPolicyGuard, ModelCallOutcome, NoOpBudgetAccountant,
+    NoOpPolicyGuard,
 };
 pub use policy::{
     CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,

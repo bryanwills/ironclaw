@@ -43,9 +43,10 @@ async fn handle(
     };
 
     match runner.process_webhook(&headers, &body).await {
-        Ok(WebhookProcessOutcome::Acknowledged { .. }) | Ok(WebhookProcessOutcome::NoOp) => {
-            StatusCode::OK.into_response()
-        }
+        // Upstream consolidated the prior `NoOp` outcome into `Acknowledged`
+        // with a no-op ack — `ProductInboundPayload::NoOp` events still flow
+        // through `ProductWorkflow` and ack 200.
+        Ok(WebhookProcessOutcome::Acknowledged { .. }) => StatusCode::OK.into_response(),
         Err(RunnerError::AuthenticationFailed { failure }) => {
             tracing::warn!(
                 installation = %installation_id,
