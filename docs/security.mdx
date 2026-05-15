@@ -71,7 +71,7 @@ The leak detector uses a combination of regex patterns and heuristic checks to i
 | AWS credentials    | `AKIA...`                         |
 | GitHub tokens      | `ghp_...`                         |
 
-When a pattern matches, IronClaw blocks the response, redacts the matched span, or logs a warning depending on severity. See [Secrets & Sandboxing](/security/secrets-and-sandboxing#the-leak-detector) for the full action breakdown and the two scan points (tool output and model reply) that catch leaks coming and going.
+When a pattern matches, IronClaw blocks the response, redacts the matched span, or logs a warning depending on severity. The scan runs on tool output before it enters the model's context — see [Secrets & Sandboxing](/security/secrets-and-sandboxing#the-leak-detector) for the full action breakdown and where this sits in the tool-execution path.
 
 ---
 
