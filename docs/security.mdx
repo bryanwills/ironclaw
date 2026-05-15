@@ -3,15 +3,23 @@ title: Security
 description: IronClaw's defense-in-depth security architecture
 ---
 
-IronClaw is built from the ground up with security as a core principle. We use a defense-in-depth architecture with multiple independent layers of protection to keep your data safe while enabling powerful agent capabilities.
+Hand a language model the right tools and it can triage your inbox, ship code, run your infrastructure, spend your money. Each new model release moves the ceiling on what's possible.
 
-<CardGroup cols={2}>
+But all of these capabilities are only possible by accessing your credentials. 
+
+Your API keys, OAuth tokens, database passwords, and SSH access all sit between two untrusted layers: a model that treats its context as instructions, and tools that are arbitrary code. If either the model or a tool can read a credential, that credential is one clever prompt-injected email or one bad dependency away from being turned against you.
+
+IronClaw is built around this problem. Credential handling isn't a feature bolted on; it's the shape of the system. The single rule the architecture enforces: **models and tools never see your credentials.** 
+
+Everything below exists to make that rule hold up in practice.
+
+<CardGroup cols={1}>
   <Card title="Encrypted at rest" icon="lock">
     Secrets rest encrypted, and are injected at the host boundary only for approved endpoints.
   </Card>
 
   <Card title="Sandboxed execution" icon="cubes">
-    Tool run in containers, are resource limited and can only contact allowlisted endpoints.
+    Tools run in containers, are resource limited and can only contact allowlisted endpoints.
   </Card>
 
   <Card title="Leak Detection" icon="shield">
@@ -40,11 +48,11 @@ At all point, secrets are separated from regular data and handled with extra car
 
 Multiple layers protect against prompt injection:
 
-1. **Input validation** — Length, encoding, forbidden patterns
-2. **Sanitizer** — Escapes dangerous content
-3. **Policy engine** — Severity-based actions
-4. **Leak detector** — Scans for 15+ secret patterns
-5. **Tool output wrapping** — XML format with escape hints
+1. **Input validation:** Length, encoding, forbidden patterns
+2. **Sanitizer:** Escapes dangerous content
+3. **Policy engine:** Severity-based actions
+4. **Leak detector:** Scans for 15+ secret patterns
+5. **Tool output wrapping:** XML format with escape hints
 
 ---
 
@@ -62,6 +70,8 @@ The leak detector uses a combination of regex patterns and heuristic checks to i
 | Connection strings | `postgres://user:pass@...`        |
 | AWS credentials    | `AKIA...`                         |
 | GitHub tokens      | `ghp_...`                         |
+
+When a pattern matches, IronClaw blocks the response, redacts the matched span, or logs a warning depending on severity. See [Secrets & Sandboxing](/security/secrets-and-sandboxing#the-leak-detector) for the full action breakdown and the two scan points (tool output and model reply) that catch leaks coming and going.
 
 ---
 
@@ -95,6 +105,10 @@ Tools cannot access secrets directly, instead, they define what keys, oauth toke
     }
   }
 ```
+
+<Card title="Deep dive: how credentials are injected at runtime" href="/security/secrets-and-sandboxing" icon="arrow-right">
+  Step-by-step walkthrough of the injection flow, why the WASM sandbox makes the "tool never sees the credential" guarantee enforceable, and what this model doesn't defend against.
+</Card>
 
 ---
 
