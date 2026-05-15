@@ -5,11 +5,11 @@ description: IronClaw's defense-in-depth security architecture
 
 Hand a language model the right tools and it can triage your inbox, ship code, run your infrastructure, spend your money. Each new model release moves the ceiling on what's possible.
 
-But all of these capabilities are only possible by accessing your credentials. 
+But all of these capabilities are only possible by accessing your credentials.
 
 Your API keys, OAuth tokens, database passwords, and SSH access all sit between two untrusted layers: a model that treats its context as instructions, and tools that are arbitrary code. If either the model or a tool can read a credential, that credential is one clever prompt-injected email or one bad dependency away from being turned against you.
 
-IronClaw is built around this problem. Credential handling isn't a feature bolted on; it's the shape of the system. The single rule the architecture enforces: **models and tools never see your credentials.** 
+IronClaw is built around this problem. Credential handling isn't a feature bolted on; it's the shape of the system. The single rule the architecture enforces: **models and tools never see your credentials.**
 
 Everything below exists to make that rule hold up in practice.
 
@@ -94,10 +94,10 @@ cat ../../../etc/passwd
 
 ## Credential Management
 
-Tools cannot access secrets directly, instead, they define what keys, oauth tokens, or API credential they need. Then they proceed to create the necessary requests, and the network proxy injects these credentials into outgoing requests without exposing them to the container.
+Tools cannot read secrets directly. They declare which credentials they need and which hosts those credentials apply to; the host process matches outbound requests against those declarations and injects the credential at the host boundary, before the request leaves IronClaw. The WASM module's address space never holds the plaintext value.
 
 ```json
-"capabilities": {
+{
   "http": {
     "credentials": {
       "google_oauth_token": {

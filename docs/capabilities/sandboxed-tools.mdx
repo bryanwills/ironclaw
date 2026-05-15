@@ -58,12 +58,16 @@ export WASM_MEMORY_LIMIT=16777216
 
 Each WASM tool has a per-tool rate limiter to prevent a misbehaving or compromised tool from making excessive API calls.
 
-Rate limits are declared inside the relevant capability section of `capabilities.json` (for HTTP requests, under `http.rate_limit`):
+Rate limits are declared inside the relevant capability section of `capabilities.json` — for HTTP requests, under `http.rate_limit`:
 
 ```json
-"rate_limit": {
-  "requests_per_minute": 60,
-  "requests_per_hour": 1000
+{
+  "http": {
+    "rate_limit": {
+      "requests_per_minute": 60,
+      "requests_per_hour": 1000
+    }
+  }
 }
 ```
 
@@ -71,50 +75,48 @@ Rate limits are declared inside the relevant capability section of `capabilities
 
 ## capabilities.json
 
-Every WASM tool ships a `capabilities.json` alongside its `.wasm` binary. This file is the single source of truth for what the tool is allowed to do. Capabilities live under a top-level `capabilities` key; metadata (`description`, `version`, etc.) sits at the root.
+Every WASM tool ships a `<tool>.capabilities.json` alongside its `.wasm` binary. This file is the single source of truth for what the tool is allowed to do. Capability sections (`http`, `secrets`, `workspace`, `tool_invoke`, `webhook`) sit at the root alongside metadata (`description`, `version`, `wit_version`). They may also be nested under a `capabilities` key for compatibility with channel-style capability files; the loader accepts both shapes.
 
 ```json
 {
   "version": "0.1.0",
   "description": "Fetches data from example.com",
-  "capabilities": {
-    "http": {
-      "allowlist": [
-        {
-          "host": "api.example.com",
-          "path_prefix": "/",
-          "methods": ["GET", "POST"]
-        }
-      ],
-      "credentials": {
-        "example_api_key": {
-          "secret_name": "example_api_key",
-          "location": { "type": "bearer" },
-          "host_patterns": ["api.example.com"]
-        }
-      },
-      "rate_limit": {
-        "requests_per_minute": 30,
-        "requests_per_hour": 500
+  "http": {
+    "allowlist": [
+      {
+        "host": "api.example.com",
+        "path_prefix": "/",
+        "methods": ["GET", "POST"]
+      }
+    ],
+    "credentials": {
+      "example_api_key": {
+        "secret_name": "example_api_key",
+        "location": { "type": "bearer" },
+        "host_patterns": ["api.example.com"]
       }
     },
-    "secrets": {
-      "allowed_names": ["example_api_key"]
-    },
-    "workspace": {
-      "allowed_prefixes": ["context/", "daily/"]
+    "rate_limit": {
+      "requests_per_minute": 30,
+      "requests_per_hour": 500
     }
+  },
+  "secrets": {
+    "allowed_names": ["example_api_key"]
+  },
+  "workspace": {
+    "allowed_prefixes": ["context/", "daily/"]
   }
 }
 ```
 
 ### HTTP allowlist
 
-`capabilities.http.allowlist` controls which destinations the tool can reach via the `http_request` host function. Each entry pins a `host`, an optional `path_prefix`, and the allowed `methods`. Requests that don't match an entry are rejected by the host before any connection opens.
+`http.allowlist` controls which destinations the tool can reach via the `http_request` host function. Each entry pins a `host`, an optional `path_prefix`, and the allowed `methods`. Requests that don't match an entry are rejected by the host before any connection opens.
 
 ### Credential injection
 
-`capabilities.http.credentials` declares which secrets the host will attach to outbound requests, and where. The credential value is never passed into the WASM module's memory — the tool builds an unauthenticated request, the host matches the destination against `host_patterns`, decrypts the secret in its own address space, and writes it into the request just before sending.
+`http.credentials` declares which secrets the host will attach to outbound requests, and where. The credential value is never passed into the WASM module's memory — the tool builds an unauthenticated request, the host matches the destination against `host_patterns`, decrypts the secret in its own address space, and writes it into the request just before sending.
 
 `location.type` selects the injection point:
 
@@ -130,11 +132,11 @@ For the full end-to-end injection flow (and why this can't be bypassed by a misb
 
 ### Secrets allowlist
 
-`capabilities.secrets.allowed_names` is the second half of the credential gate. A tool can only resolve secrets whose names appear in this list (glob patterns like `github_*` are allowed). Even if a credential mapping references a secret, the host will refuse to load it unless the name is allowlisted here.
+`secrets.allowed_names` is the second half of the credential gate. A tool can only resolve secrets whose names appear in this list (glob patterns like `github_*` are allowed). Even if a credential mapping references a secret, the host will refuse to load it unless the name is allowlisted here.
 
 ### Workspace read
 
-`capabilities.workspace.allowed_prefixes` declares which workspace path prefixes the tool can read via the `workspace_read` host function. There is no `workspace_write` host function exposed to tools — workspace mutations happen through the agent's `memory_write` tool, which carries its own dispatch and audit trail.
+`workspace.allowed_prefixes` declares which workspace path prefixes the tool can read via the `workspace_read` host function. There is no `workspace_write` host function exposed to tools — workspace mutations happen through the agent's `memory_write` tool, which carries its own dispatch and audit trail.
 
 ---
 
@@ -148,7 +150,7 @@ WASM modules can call the following host functions provided by IronClaw:
 | `now_millis()` | Return the current Unix timestamp in milliseconds |
 | `workspace_read(path)` | Read a document from the workspace (capability-gated) |
 | `http_request(method, url, headers, body, timeout)` | Make an HTTP request; the host validates the destination, injects credentials, and scans the response for secrets before returning |
-| `tool_invoke(alias, params)` | Invoke another tool by alias (capability-gated; output is scanned for leaks) |
+| `tool_invoke(alias, params)` | Declared in the WIT interface but not yet implemented for WASM tools; the host currently returns an error. |
 | `secret_exists(name)` | Check whether a secret is present and accessible to this tool. Returns a boolean only — never the value |
 
 These are the only host capabilities available. A WASM tool cannot call arbitrary OS functions, fork processes, or access the network directly — all network access goes through the proxy.
