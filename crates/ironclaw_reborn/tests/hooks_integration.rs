@@ -1019,15 +1019,6 @@ fn observer_dispatcher_at(point: HookPointSpec, seen: Arc<Mutex<u32>>) -> Arc<Ho
         .build_arc()
 }
 
-/// Build a `LoopModelRequest` referencing the inbound message added by the
-/// fixture so `ThreadBackedLoopModelPort` resolves real context messages.
-fn model_request() -> LoopModelRequest {
-    LoopModelRequest {
-        messages: Vec::new(),
-        surface_version: None,
-        model_preference: None,
-    }
-}
 
 #[tokio::test]
 async fn after_model_fires_exactly_once_at_durable_boundary() {
