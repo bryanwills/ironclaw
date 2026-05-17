@@ -1,19 +1,23 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, RuntimeKind, TenantId, ThreadId, UserId,
+    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
+    ExtensionId, GrantConstraints, NetworkPolicy, Principal, RuntimeKind, TenantId, ThreadId,
+    TrustClass, UserId,
 };
+use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, ProductLiveCancellationProbe,
+    RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -34,10 +38,17 @@ use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
     build_product_live_planned_runtime,
 };
+use ironclaw_reborn_composition::{
+    ProductLiveCapabilityIo, ProductLiveModelRouteSettings, ProductLivePlannedRuntimeAdapterConfig,
+    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
+    RebornServices, build_reborn_services, capability_allowlist,
+    visible_capability_request_for_run,
+};
 use ironclaw_threads::{
     InMemorySessionThreadService, SessionThreadService, ThreadHistoryRequest, ThreadMessageRecord,
     ThreadScope,
 };
+use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
     CancelRunRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
     InMemoryLoopCheckpointStore, InMemoryTurnStateStore, LoopResultRef, SanitizedCancelReason,
@@ -71,7 +82,9 @@ pub struct ProductLiveAgentLoopHarness {
     >,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
     capability_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    capability_results: Arc<Mutex<Vec<serde_json::Value>>>,
     model_release: Option<CancellationToken>,
+    _host_runtime_root: Option<tempfile::TempDir>,
     worker_cancel: CancellationToken,
     worker_handle: JoinHandle<()>,
 }
@@ -88,6 +101,7 @@ pub struct ProductLiveAgentLoopHarnessConfig {
     pub pause_model_until_released: bool,
     pub model_responses: Vec<HostManagedModelResponse>,
     pub capability: Option<HarnessCapabilityConfig>,
+    pub host_runtime_capability: Option<HostRuntimeCapabilityConfig>,
 }
 
 impl Default for ProductLiveAgentLoopHarnessConfig {
@@ -103,6 +117,7 @@ impl Default for ProductLiveAgentLoopHarnessConfig {
             pause_model_until_released: false,
             model_responses: Vec::new(),
             capability: None,
+            host_runtime_capability: None,
         }
     }
 }
@@ -113,6 +128,12 @@ pub struct HarnessCapabilityConfig {
     pub result_ref: String,
     pub safe_summary: String,
     pub terminate_hint: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostRuntimeCapabilityConfig {
+    pub capability_id: String,
+    pub input: serde_json::Value,
 }
 
 pub fn capability_call_response(
@@ -154,20 +175,64 @@ impl ProductLiveAgentLoopHarness {
         let model_release = config
             .pause_model_until_released
             .then(CancellationToken::new);
+        let host_runtime_root = config
+            .host_runtime_capability
+            .as_ref()
+            .map(|_| tempfile::tempdir().expect("host runtime harness tempdir"));
+        let host_runtime_services = if let Some(root) = &host_runtime_root {
+            Some(Arc::new(
+                build_reborn_services(RebornBuildInput::local_dev(
+                    "planned-harness-host-runtime",
+                    root.path().join("local-dev"),
+                ))
+                .await
+                .expect("host runtime harness services"),
+            ))
+        } else {
+            None
+        };
+        let host_runtime_io = config
+            .host_runtime_capability
+            .as_ref()
+            .map(|_| Arc::new(ProductLiveCapabilityIo::default()));
+        let host_runtime_staged_inputs = Arc::new(Mutex::new(HashMap::new()));
+        let host_runtime_tool_call =
+            config
+                .host_runtime_capability
+                .as_ref()
+                .map(|capability| ScriptedHostRuntimeToolCall {
+                    capability_id: harness_capability_id(&capability.capability_id),
+                    staged_inputs: Arc::clone(&host_runtime_staged_inputs),
+                });
         let model_gateway = Arc::new(RecordingModelGateway {
             reply: config.assistant_reply,
             requests: Arc::clone(&model_requests),
             responses: Mutex::new(model_responses),
             release: model_release.clone(),
+            host_runtime_tool_call,
         });
         let capability_invocations = Arc::new(Mutex::new(Vec::new()));
-        let capability_factory: Arc<dyn LoopCapabilityPortFactory> = match config.capability {
-            Some(capability) => Arc::new(RecordingCapabilityFactory {
-                capability,
-                invocations: Arc::clone(&capability_invocations),
-            }),
-            None => Arc::new(EmptyCapabilityFactory),
-        };
+        let capability_results = Arc::new(Mutex::new(Vec::new()));
+        let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
+            if let Some(capability) = config.host_runtime_capability {
+                Arc::new(ProductLiveHostRuntimeCapabilityFactory {
+                    services: host_runtime_services.expect("host runtime services"),
+                    io: host_runtime_io.expect("host runtime capability io"),
+                    staged_inputs: Arc::clone(&host_runtime_staged_inputs),
+                    invocations: Arc::clone(&capability_invocations),
+                    results: Arc::clone(&capability_results),
+                    capability_id: harness_capability_id(&capability.capability_id),
+                    input: capability.input,
+                    user_id: binding.user_id.clone(),
+                })
+            } else if let Some(capability) = config.capability {
+                Arc::new(RecordingCapabilityFactory {
+                    capability,
+                    invocations: Arc::clone(&capability_invocations),
+                })
+            } else {
+                Arc::new(EmptyCapabilityFactory)
+            };
         let model_route_resolver = Arc::new(
             StaticModelRouteResolver::new(ModelRoutePolicy::new(
                 ModelSelectionMode::DeveloperAnyConfigured,
@@ -225,7 +290,9 @@ impl ProductLiveAgentLoopHarness {
             composition,
             model_requests,
             capability_invocations,
+            capability_results,
             model_release,
+            _host_runtime_root: host_runtime_root,
             worker_cancel,
             worker_handle,
         }
@@ -242,6 +309,13 @@ impl ProductLiveAgentLoopHarness {
         self.capability_invocations
             .lock()
             .expect("harness capability invocation lock poisoned")
+            .clone()
+    }
+
+    pub fn capability_results(&self) -> Vec<serde_json::Value> {
+        self.capability_results
+            .lock()
+            .expect("harness capability results lock poisoned")
             .clone()
     }
 
@@ -377,6 +451,7 @@ struct RecordingModelGateway {
     requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
     responses: Mutex<VecDeque<HostManagedModelResponse>>,
     release: Option<CancellationToken>,
+    host_runtime_tool_call: Option<ScriptedHostRuntimeToolCall>,
 }
 
 #[async_trait]
@@ -385,12 +460,21 @@ impl HostManagedModelGateway for RecordingModelGateway {
         &self,
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-        self.requests
-            .lock()
-            .expect("recording model gateway requests lock poisoned")
-            .push(request);
+        let request_count = {
+            let mut requests = self
+                .requests
+                .lock()
+                .expect("recording model gateway requests lock poisoned");
+            requests.push(request.clone());
+            requests.len()
+        };
         if let Some(release) = &self.release {
             release.cancelled().await;
+        }
+        if request_count == 1
+            && let Some(tool_call) = &self.host_runtime_tool_call
+        {
+            return tool_call.response_for_request(&request).await;
         }
         if let Some(response) = self
             .responses
@@ -403,6 +487,209 @@ impl HostManagedModelGateway for RecordingModelGateway {
         Ok(HostManagedModelResponse::assistant_reply(
             self.reply.clone(),
         ))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScriptedHostRuntimeToolCall {
+    capability_id: CapabilityId,
+    staged_inputs: Arc<Mutex<HashMap<TurnRunId, CapabilityInputRef>>>,
+}
+
+impl ScriptedHostRuntimeToolCall {
+    async fn response_for_request(
+        &self,
+        request: &HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let input_ref = self.wait_for_input_ref(request.run_id).await?;
+        let Some(surface_version) = request.surface_version.clone() else {
+            return Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "capability tool call requires a visible surface version",
+            ));
+        };
+        Ok(HostManagedModelResponse {
+            safe_text_deltas: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+                surface_version,
+                capability_id: self.capability_id.clone(),
+                input_ref,
+            }]),
+        })
+    }
+
+    async fn wait_for_input_ref(
+        &self,
+        run_id: TurnRunId,
+    ) -> Result<CapabilityInputRef, HostManagedModelError> {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(input_ref) = self
+                    .staged_inputs
+                    .lock()
+                    .expect("host-runtime staged input lock poisoned")
+                    .get(&run_id)
+                    .cloned()
+                {
+                    return input_ref;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "timed out waiting for host-runtime staged tool input",
+            )
+        })
+    }
+}
+
+struct ProductLiveHostRuntimeCapabilityFactory {
+    services: Arc<RebornServices>,
+    io: Arc<ProductLiveCapabilityIo>,
+    staged_inputs: Arc<Mutex<HashMap<TurnRunId, CapabilityInputRef>>>,
+    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    results: Arc<Mutex<Vec<serde_json::Value>>>,
+    capability_id: CapabilityId,
+    input: serde_json::Value,
+    user_id: UserId,
+}
+
+#[async_trait]
+impl LoopCapabilityPortFactory for ProductLiveHostRuntimeCapabilityFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let input_ref = self
+            .io
+            .stage_input(run_context, self.input.clone())
+            .map_err(|error| {
+                AgentLoopHostError::new(error.kind, format!("failed to stage tool input: {error}"))
+            })?;
+        self.staged_inputs
+            .lock()
+            .expect("host-runtime staged input lock poisoned")
+            .insert(run_context.run_id, input_ref);
+        let visible_capability_request = visible_capability_request_for_run(
+            run_context,
+            ProductLiveVisibleCapabilityRequestConfig::new(
+                self.user_id.clone(),
+                ExtensionId::new("planned-driver").expect("valid planned driver extension"),
+                RuntimeKind::FirstParty,
+                TrustClass::FirstParty,
+                SurfaceKind::new("agent_loop").expect("valid surface kind"),
+                CapabilitySurfacePolicy::allow_all(),
+            )
+            .with_grants(dispatch_grants_for_user(
+                self.user_id.clone(),
+                [&self.capability_id],
+            ))
+            .with_provider_trust(
+                ExtensionId::new("builtin").expect("valid builtin provider id"),
+                EffectiveTrustClass::user_trusted(),
+            ),
+        )
+        .map_err(adapter_error)?;
+        let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+            &self.services,
+            ProductLivePlannedRuntimeAdapterConfig {
+                visible_capability_request,
+                capability_input_resolver: self.io.clone(),
+                capability_result_writer: self.io.clone(),
+                capability_allow_set: capability_allowlist([self.capability_id.clone()]),
+                model_routes: ProductLiveModelRouteSettings::new("nearai", "qwen3-coder")
+                    .map_err(adapter_error)?,
+                cancellation_factory: Arc::new(ReadyRunCancellationFactory::default()),
+                input_queue: Arc::new(EmptyInputQueue),
+                identity_context_source: Arc::new(EmptyIdentityContextSource),
+                model_policy_guard: Arc::new(NoOpPolicyGuard),
+                model_budget_accountant: Arc::new(NoOpBudgetAccountant),
+                safety_context: test_safety_context(),
+                milestone_sink: None,
+            },
+        )
+        .map_err(adapter_error)?;
+        adapters
+            .capability_factory
+            .create_capability_port(run_context)
+            .await
+            .map(|inner| {
+                Arc::new(RecordingDelegatingCapabilityPort {
+                    inner,
+                    run_context: run_context.clone(),
+                    io: Arc::clone(&self.io),
+                    invocations: Arc::clone(&self.invocations),
+                    results: Arc::clone(&self.results),
+                }) as Arc<dyn LoopCapabilityPort>
+            })
+    }
+}
+
+struct RecordingDelegatingCapabilityPort {
+    inner: Arc<dyn LoopCapabilityPort>,
+    run_context: LoopRunContext,
+    io: Arc<ProductLiveCapabilityIo>,
+    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    results: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+#[async_trait]
+impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
+    async fn visible_capabilities(
+        &self,
+        request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        self.inner.visible_capabilities(request).await
+    }
+
+    async fn invoke_capability(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        self.invocations
+            .lock()
+            .expect("harness capability invocation lock poisoned")
+            .push(request.clone());
+        let outcome = self.inner.invoke_capability(request).await?;
+        self.record_completed_result(&outcome)?;
+        Ok(outcome)
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        self.invocations
+            .lock()
+            .expect("harness capability invocation lock poisoned")
+            .extend(request.invocations.iter().cloned());
+        let outcome = self.inner.invoke_capability_batch(request).await?;
+        for item in &outcome.outcomes {
+            self.record_completed_result(item)?;
+        }
+        Ok(outcome)
+    }
+}
+
+impl RecordingDelegatingCapabilityPort {
+    fn record_completed_result(
+        &self,
+        outcome: &CapabilityOutcome,
+    ) -> Result<(), AgentLoopHostError> {
+        let CapabilityOutcome::Completed(completed) = outcome else {
+            return Ok(());
+        };
+        let value = self
+            .io
+            .result_for_ref(&self.run_context, &completed.result_ref)?;
+        self.results
+            .lock()
+            .expect("harness capability results lock poisoned")
+            .push(value);
+        Ok(())
     }
 }
 
@@ -671,4 +958,37 @@ fn harness_surface_version() -> CapabilitySurfaceVersion {
 
 fn harness_capability_id(capability_id: impl Into<String>) -> CapabilityId {
     CapabilityId::new(capability_id.into()).expect("valid harness capability id")
+}
+
+fn dispatch_grants_for_user<const N: usize>(
+    user_id: UserId,
+    capabilities: [&CapabilityId; N],
+) -> CapabilitySet {
+    CapabilitySet {
+        grants: capabilities
+            .into_iter()
+            .map(|capability| CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: capability.clone(),
+                grantee: Principal::User(user_id.clone()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: ironclaw_host_api::MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            })
+            .collect(),
+    }
+}
+
+fn adapter_error(error: impl Display) -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+        error.to_string(),
+    )
 }

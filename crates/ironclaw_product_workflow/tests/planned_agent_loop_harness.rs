@@ -8,8 +8,8 @@ use ironclaw_turns::TurnStatus;
 use ironclaw_loop_support::HostManagedModelResponse;
 
 use support::planned_agent_loop::{
-    HarnessCapabilityConfig, ProductLiveAgentLoopHarness, ProductLiveAgentLoopHarnessConfig,
-    capability_call_response,
+    HarnessCapabilityConfig, HostRuntimeCapabilityConfig, ProductLiveAgentLoopHarness,
+    ProductLiveAgentLoopHarnessConfig, capability_call_response,
 };
 
 #[tokio::test]
@@ -178,6 +178,55 @@ async fn product_live_harness_invokes_capability_then_persists_final_reply() {
         message.status == MessageStatus::Finalized
             && message.turn_run_id.as_deref() == Some(submitted_run_id.to_string().as_str())
             && message.content.as_deref() == Some("final reply after capability")
+    }));
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn product_live_harness_invokes_builtin_echo_through_host_runtime() {
+    let harness = ProductLiveAgentLoopHarness::new(ProductLiveAgentLoopHarnessConfig {
+        assistant_reply: "final reply after builtin echo".to_string(),
+        host_runtime_capability: Some(HostRuntimeCapabilityConfig {
+            capability_id: ironclaw_host_runtime::ECHO_CAPABILITY_ID.to_string(),
+            input: serde_json::json!({ "message": "hello from builtin echo" }),
+        }),
+        ..ProductLiveAgentLoopHarnessConfig::default()
+    })
+    .await;
+    let envelope = harness.user_message("planned-harness-builtin-echo", "use builtin echo");
+
+    let outcome = harness
+        .accept_user_message(&envelope)
+        .await
+        .expect("harness inbound turn should submit");
+    let InboundTurnOutcome::Submitted {
+        submitted_run_id, ..
+    } = outcome
+    else {
+        panic!("expected submitted outcome, got {outcome:?}");
+    };
+    let state = harness.wait_for_terminal(submitted_run_id).await;
+
+    assert_eq!(state.status, TurnStatus::Completed);
+    let requests = harness.model_requests();
+    assert_eq!(requests.len(), 2);
+    let invocations = harness.capability_invocations();
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(
+        invocations[0].capability_id.as_str(),
+        ironclaw_host_runtime::ECHO_CAPABILITY_ID
+    );
+    assert_eq!(
+        harness.capability_results(),
+        vec![serde_json::json!("hello from builtin echo")]
+    );
+
+    let history = harness.thread_history().await;
+    assert!(history.iter().any(|message| {
+        message.status == MessageStatus::Finalized
+            && message.turn_run_id.as_deref() == Some(submitted_run_id.to_string().as_str())
+            && message.content.as_deref() == Some("final reply after builtin echo")
     }));
 
     harness.shutdown().await;
