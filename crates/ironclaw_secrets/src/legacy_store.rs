@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::SecretsCrypto;
+use crate::crypto::secret_record_aad;
 
 #[derive(Clone)]
 pub struct Secret {
@@ -212,13 +213,13 @@ pub trait SecretsStore: Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct InMemorySecretsStore {
+pub(crate) struct InMemorySecretsStore {
     secrets: RwLock<HashMap<(String, String), Secret>>,
     crypto: Arc<SecretsCrypto>,
 }
 
 impl InMemorySecretsStore {
-    pub fn new(crypto: Arc<SecretsCrypto>) -> Self {
+    pub(crate) fn new(crypto: Arc<SecretsCrypto>) -> Self {
         Self {
             secrets: RwLock::new(HashMap::new()),
             crypto,
@@ -234,7 +235,8 @@ impl SecretsStore for InMemorySecretsStore {
         params: CreateSecretParams,
     ) -> Result<Secret, SecretError> {
         let plaintext = params.value.expose_secret().as_bytes();
-        let (encrypted_value, key_salt) = self.crypto.encrypt(plaintext)?;
+        let aad = secret_record_aad(user_id, &params.name);
+        let (encrypted_value, key_salt) = self.crypto.encrypt(plaintext, &aad)?;
         let now = Utc::now();
         let secret = Secret {
             id: Uuid::new_v4(),
@@ -279,8 +281,9 @@ impl SecretsStore for InMemorySecretsStore {
         name: &str,
     ) -> Result<DecryptedSecret, SecretError> {
         let secret = self.get(user_id, name).await?;
+        let aad = secret_record_aad(user_id, &secret.name);
         self.crypto
-            .decrypt(&secret.encrypted_value, &secret.key_salt)
+            .decrypt(&secret.encrypted_value, &secret.key_salt, &aad)
     }
 
     async fn consume_if_matches(
@@ -300,9 +303,10 @@ impl SecretsStore for InMemorySecretsStore {
         {
             return Err(SecretError::Expired);
         }
+        let aad = secret_record_aad(user_id, &secret.name);
         let decrypted = self
             .crypto
-            .decrypt(&secret.encrypted_value, &secret.key_salt)?;
+            .decrypt(&secret.encrypted_value, &secret.key_salt, &aad)?;
         if decrypted.expose() != expected_value {
             return Ok(SecretConsumeResult::Mismatched);
         }

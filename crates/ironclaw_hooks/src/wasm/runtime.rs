@@ -253,21 +253,24 @@ impl WasmHookRuntime {
         let mut output = self.execute(prepared, WasmHookPoint::BeforeCapability)?;
         match output.gate.take() {
             Some(GateWasmDecision::Pass) => Ok(GateHookOutcome::Pass),
-            Some(GateWasmDecision::Deny(reason)) => Ok(GateHookOutcome::Decision(
-                crate::kinds::gate::BeforeCapabilityHookDecision::deny(
+            Some(GateWasmDecision::Deny(reason)) => Ok(GateHookOutcome::Decision {
+                decision: crate::kinds::gate::BeforeCapabilityHookDecision::deny(
                     SanitizedReason::from_static(reason),
                 ),
-            )),
-            Some(GateWasmDecision::PauseApproval(reason)) => Ok(GateHookOutcome::Decision(
-                crate::kinds::gate::BeforeCapabilityHookDecision::pause_approval(
+                audit_reason: None,
+            }),
+            Some(GateWasmDecision::PauseApproval(reason)) => Ok(GateHookOutcome::Decision {
+                decision: crate::kinds::gate::BeforeCapabilityHookDecision::pause_approval(
                     SanitizedReason::from_static(reason),
                 ),
-            )),
-            Some(GateWasmDecision::PauseAuth(reason)) => Ok(GateHookOutcome::Decision(
-                crate::kinds::gate::BeforeCapabilityHookDecision::pause_auth(
+                audit_reason: None,
+            }),
+            Some(GateWasmDecision::PauseAuth(reason)) => Ok(GateHookOutcome::Decision {
+                decision: crate::kinds::gate::BeforeCapabilityHookDecision::pause_auth(
                     SanitizedReason::from_static(reason),
                 ),
-            )),
+                audit_reason: None,
+            }),
             None => Err(WasmHookFailure::malformed(
                 "wasm gate hook completed without minting a decision",
             )),

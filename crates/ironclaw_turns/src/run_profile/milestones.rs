@@ -9,8 +9,9 @@ use crate::{
 };
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopCheckpointKind,
-    LoopDriverNoteKind, LoopPromptBundleRef, LoopRunContext, LoopSafeSummary, PromptMode,
+    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilitySurfaceVersion,
+    LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind, LoopPromptBundleRef, LoopRunContext,
+    LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
 use crate::{LoopCompletionKind, LoopFailureKind};
@@ -55,6 +56,9 @@ pub struct PromptSkillContextMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopHostMilestoneKind {
+    IterationStarted {
+        iteration: u32,
+    },
     PromptBundleBuilt {
         bundle_ref: LoopPromptBundleRef,
         mode: PromptMode,
@@ -74,6 +78,22 @@ pub enum LoopHostMilestoneKind {
     },
     CapabilityInvoked {
         capability_id: CapabilityId,
+    },
+    CapabilityBatchStarted {
+        iteration: u32,
+        call_count: u32,
+        policy: BatchPolicyKind,
+    },
+    CapabilityBatchCompleted {
+        iteration: u32,
+        result_count: u32,
+        denied_count: u32,
+        gated_count: u32,
+        failed_count: u32,
+    },
+    GateBlocked {
+        iteration: u32,
+        gate_kind: LoopGateKind,
     },
     CheckpointCreated {
         checkpoint_id: TurnCheckpointId,
@@ -115,6 +135,15 @@ pub enum LoopHostMilestoneKind {
     HookDecisionEmitted {
         hook_id: String,
         decision: HookDecisionSummary,
+        /// Audit-only free-form reason. Distinct from any reason embedded in
+        /// `decision` (which is the closed-vocab, model-visible label). This
+        /// field carries the manifest-supplied operator context behind a
+        /// closed-vocab label like `hook_rate_limit` and flows only to
+        /// audit/SSE consumers — never to the model. `None` for hooks that
+        /// did not record an audit reason (Builtin/Trusted gate hooks, or
+        /// any `Pass` outcome).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audit_reason: Option<String>,
     },
     /// A hook misbehaved during dispatch. Captures the failure category and
     /// the dispatcher's disposition (fail-closed vs fail-isolated).
@@ -156,11 +185,15 @@ impl HookDecisionSummary {
 impl LoopHostMilestoneKind {
     pub fn kind_name(&self) -> &'static str {
         match self {
+            Self::IterationStarted { .. } => "iteration_started",
             Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
             Self::ModelStarted { .. } => "model_started",
             Self::ModelCompleted { .. } => "model_completed",
             Self::ModelFailed { .. } => "model_failed",
             Self::CapabilityInvoked { .. } => "capability_invoked",
+            Self::CapabilityBatchStarted { .. } => "capability_batch_started",
+            Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
+            Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointCreated { .. } => "checkpoint_created",
             Self::AssistantReplyFinalized { .. } => "assistant_reply_finalized",
             Self::Blocked { .. } => "blocked",
@@ -306,6 +339,11 @@ where
         Self { context, sink }
     }
 
+    pub async fn iteration_started(&self, iteration: u32) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::IterationStarted { iteration })
+            .await
+    }
+
     pub async fn prompt_bundle_built(
         &self,
         bundle_ref: LoopPromptBundleRef,
@@ -358,6 +396,50 @@ where
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::CapabilityInvoked { capability_id })
             .await
+    }
+
+    pub async fn capability_batch_started(
+        &self,
+        iteration: u32,
+        call_count: u32,
+        policy: BatchPolicyKind,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::CapabilityBatchStarted {
+            iteration,
+            call_count,
+            policy,
+        })
+        .await
+    }
+
+    pub async fn capability_batch_completed(
+        &self,
+        iteration: u32,
+        result_count: u32,
+        denied_count: u32,
+        gated_count: u32,
+        failed_count: u32,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::CapabilityBatchCompleted {
+            iteration,
+            result_count,
+            denied_count,
+            gated_count,
+            failed_count,
+        })
+        .await
+    }
+
+    pub async fn gate_blocked(
+        &self,
+        iteration: u32,
+        gate_kind: LoopGateKind,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::GateBlocked {
+            iteration,
+            gate_kind,
+        })
+        .await
     }
 
     pub async fn checkpoint_created(
@@ -443,9 +525,14 @@ where
         &self,
         hook_id: String,
         decision: HookDecisionSummary,
+        audit_reason: Option<String>,
     ) -> Result<(), AgentLoopHostError> {
-        self.publish(LoopHostMilestoneKind::HookDecisionEmitted { hook_id, decision })
-            .await
+        self.publish(LoopHostMilestoneKind::HookDecisionEmitted {
+            hook_id,
+            decision,
+            audit_reason,
+        })
+        .await
     }
 
     pub async fn hook_failed(
@@ -515,6 +602,7 @@ mod hook_milestone_schema_snapshots {
         let value = LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id: "abcdef0123456789".to_string(),
             decision: HookDecisionSummary::Allow,
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -532,6 +620,7 @@ mod hook_milestone_schema_snapshots {
             decision: HookDecisionSummary::Deny {
                 reason: "blocked by policy".to_string(),
             },
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -553,6 +642,7 @@ mod hook_milestone_schema_snapshots {
             decision: HookDecisionSummary::PauseApproval {
                 reason: "user approval required".to_string(),
             },
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -574,6 +664,7 @@ mod hook_milestone_schema_snapshots {
             decision: HookDecisionSummary::PauseAuth {
                 reason: "re-authentication required".to_string(),
             },
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -593,6 +684,7 @@ mod hook_milestone_schema_snapshots {
         let value = LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id: "abcdef0123456789".to_string(),
             decision: HookDecisionSummary::Pass,
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -608,6 +700,7 @@ mod hook_milestone_schema_snapshots {
         let value = LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id: "abcdef0123456789".to_string(),
             decision: HookDecisionSummary::Patch,
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {

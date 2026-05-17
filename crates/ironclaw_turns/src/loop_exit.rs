@@ -422,7 +422,8 @@ pub struct LoopFailed {
     pub exit_id: LoopExitId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopFailureKind {
     ModelError,
@@ -431,9 +432,19 @@ pub enum LoopFailureKind {
     IterationLimit,
     InvalidModelOutput,
     CheckpointRejected,
+    CheckpointUnavailable,
     TranscriptWriteFailed,
     DriverBug,
     InterruptedUnexpectedly,
+    /// Emitted by `DefaultStopConditionStrategy` when repetition or
+    /// repeated-same-error escapes fire.
+    NoProgressDetected,
+    /// Emitted when a `CapabilityOutcome::Denied` reaches the recovery path
+    /// with no further retry possible. Distinct from `CapabilityProtocolError`
+    /// so the no-progress detector can count repeated denials without
+    /// conflating them with transport faults. Hook-induced denials (via the
+    /// middleware composition seam) accumulate through this variant.
+    PolicyDenied,
 }
 
 impl LoopFailureKind {
@@ -445,9 +456,12 @@ impl LoopFailureKind {
             Self::IterationLimit => "iteration_limit",
             Self::InvalidModelOutput => "invalid_model_output",
             Self::CheckpointRejected => "checkpoint_rejected",
+            Self::CheckpointUnavailable => "checkpoint_unavailable",
             Self::TranscriptWriteFailed => "transcript_write_failed",
             Self::DriverBug => "driver_bug",
             Self::InterruptedUnexpectedly => "interrupted_unexpectedly",
+            Self::NoProgressDetected => "no_progress_detected",
+            Self::PolicyDenied => "policy_denied",
         })
     }
 }

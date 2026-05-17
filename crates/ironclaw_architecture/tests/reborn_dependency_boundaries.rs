@@ -409,6 +409,35 @@ fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
 }
 
 #[test]
+fn wasm_sandbox_core_is_standalone_v1_parity_kernel() {
+    let root = workspace_root().join("crates/ironclaw_wasm_sandbox_core");
+    assert!(
+        root.join("Cargo.toml").exists(),
+        "shared WASM sandbox core should exist before ProductAdapters duplicate v1 sandbox setup"
+    );
+    assert!(
+        root.join("CLAUDE.md").exists(),
+        "shared WASM sandbox core needs local guardrails"
+    );
+
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_wasm_sandbox_core")
+        .expect("ironclaw_wasm_sandbox_core must be a workspace package");
+    let workspace_deps = workspace_dependency_names(package)
+        .filter_map(|dependency| dependency["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        workspace_deps.is_empty(),
+        "WASM sandbox core should stay independent of IronClaw domain crates; got {workspace_deps:?}"
+    );
+}
+
+#[test]
 fn wasm_product_adapter_crate_has_local_guardrails() {
     let guardrails = workspace_root().join("crates/ironclaw_wasm_product_adapters/CLAUDE.md");
     assert!(
@@ -443,6 +472,9 @@ fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
     //   * hex                 — HMAC signature encoding in the auth verifier.
     //   * tracing             — structured logging for hardened error paths
     //                           added in the zmanian review.
+    //   * serde_json          — validates temporary JSON-shim WIT payloads.
+    //   * ironclaw_wasm_sandbox_core — shared v1-style minimal WASI sandbox kernel.
+    //   * wasmtime            — component type and generated binding instantiation.
     // Every addition is justified by a concrete call site in src/. Adding a
     // dep here without a matching call site is a contract violation — and
     // adding workflow/runtime crates beyond this list still requires
@@ -454,16 +486,62 @@ fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
         "hmac",
         "http",
         "ironclaw_product_adapters",
+        "ironclaw_wasm_sandbox_core",
+        "serde_json",
         "sha2",
         "subtle",
         "thiserror",
         "tokio",
         "tracing",
+        "wasmtime",
     ];
     assert_eq!(
         deps, expected,
         "ironclaw_wasm_product_adapters should stay thin host glue; add runtime/workflow dependencies only when a call-site proves they are required"
     );
+}
+
+#[test]
+fn wasm_product_adapter_runtime_uses_v1_style_minimal_wasi() {
+    let root = workspace_root();
+    let core = std::fs::read_to_string(root.join("crates/ironclaw_wasm_sandbox_core/src/lib.rs"))
+        .expect("WASM sandbox core must be readable");
+    let adapter_store =
+        std::fs::read_to_string(root.join("crates/ironclaw_wasm_product_adapters/src/store.rs"))
+            .expect("ProductAdapter WASM store must be readable");
+    let adapter_runtime = std::fs::read_to_string(
+        root.join("crates/ironclaw_wasm_product_adapters/src/component_runtime.rs"),
+    )
+    .expect("ProductAdapter WASM runtime must be readable");
+
+    assert!(
+        adapter_store.contains("SandboxStoreCore")
+            && adapter_runtime.contains("add_minimal_wasi_to_linker"),
+        "ProductAdapter components should use the shared v1-style WASM sandbox core instead of duplicating WASI setup"
+    );
+    assert!(
+        core.contains("wasmtime_wasi::p2::add_to_linker_sync"),
+        "shared sandbox core should register WASI p2 like v1 tools/channels"
+    );
+    assert!(
+        core.contains("WasiCtxBuilder::new().build()"),
+        "shared sandbox core should use the v1 minimal default: no env, args, preopens, or inherited network"
+    );
+    for forbidden in [
+        "inherit_env",
+        "inherit_stdio",
+        "preopened_dir",
+        "inherit_network",
+        "allow_ip_name_lookup(true)",
+        "socket_addr_check(|_, _| Box::pin(async { true }))",
+    ] {
+        assert!(
+            !core.contains(forbidden)
+                && !adapter_store.contains(forbidden)
+                && !adapter_runtime.contains(forbidden),
+            "ProductAdapter minimal WASI must not enable `{forbidden}`; HTTP egress stays host-mediated"
+        );
+    }
 }
 
 #[test]
@@ -671,7 +749,81 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
     );
 }
 
+#[test]
+fn reborn_product_api_crates_do_not_bind_http_ingress() {
+    let forbidden = [
+        ForbiddenRebornIngressUse {
+            pattern: "tokio::net::TcpListener::bind",
+            reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "std::net::TcpListener::bind",
+            reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "TcpListener::bind",
+            reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "axum::serve",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "hyper::Server",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "Server::bind",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "axum_server::bind",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+    ];
+
+    let root = workspace_root();
+    let reborn_product_api_src_roots = [
+        "crates/ironclaw_reborn/src",
+        "crates/ironclaw_reborn_cli/src",
+        "crates/ironclaw_reborn_composition/src",
+        "crates/ironclaw_reborn_config/src",
+        "crates/ironclaw_reborn_event_store/src",
+        "crates/ironclaw_reborn_api/src",
+        "crates/ironclaw_product_adapters/src",
+        "crates/ironclaw_product_adapter_registry/src",
+        "crates/ironclaw_product_workflow/src",
+        "crates/ironclaw_wasm_product_adapters/src",
+        "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_outbound/src",
+        "crates/ironclaw_conversations/src",
+        "crates/ironclaw_turns/src",
+        "crates/ironclaw_threads/src",
+        "crates/ironclaw_loop_support/src",
+    ];
+
+    let mut violations = Vec::new();
+    for relative_root in reborn_product_api_src_roots {
+        let dir = root.join(relative_root);
+        if !dir.exists() {
+            continue;
+        }
+        collect_forbidden_reborn_ingress_uses(&dir, &root, &forbidden, &mut violations);
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Reborn HTTP ingress must be host-owned; product/API crates may expose descriptors or route fragments but must not bind/serve listeners:\n{}",
+        violations.join("\n")
+    );
+}
+
 struct ForbiddenRuntimeNetworkUse {
+    pattern: &'static str,
+    reason: &'static str,
+}
+
+struct ForbiddenRebornIngressUse {
     pattern: &'static str,
     reason: &'static str,
 }
@@ -728,7 +880,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // Registry is a contracts-only Reborn crate. Runtime/dispatcher/engine
+            // Registry projects ProductAdapter host-api sections from the single
+            // Extension Manifest v2 and owns activation state. Runtime/dispatcher/engine
             // crates would invert ownership, secrets crates could expose raw
             // material instead of opaque handles, and v1 WASM/channel crates
             // would bypass the Reborn registry boundary.
@@ -742,7 +895,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
-                "ironclaw_extensions",
                 "ironclaw_filesystem",
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
@@ -1497,6 +1649,43 @@ fn collect_forbidden_runtime_network_uses(
         let path = entry.path();
         if path.is_dir() {
             collect_forbidden_runtime_network_uses(&path, root, forbidden, violations);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for (line_number, line) in contents.lines().enumerate() {
+            for rule in forbidden {
+                if line.contains(rule.pattern) {
+                    let relative = path.strip_prefix(root).unwrap_or(&path);
+                    violations.push(format!(
+                        "{}:{} contains `{}` ({})",
+                        relative.display(),
+                        line_number + 1,
+                        rule.pattern,
+                        rule.reason
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn collect_forbidden_reborn_ingress_uses(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    forbidden: &[ForbiddenRebornIngressUse],
+    violations: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_forbidden_reborn_ingress_uses(&path, root, forbidden, violations);
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {

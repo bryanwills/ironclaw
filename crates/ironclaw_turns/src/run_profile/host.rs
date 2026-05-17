@@ -1,11 +1,17 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
+
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef, RunProfileVersion,
-    TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef, RedactedCheckpointPayload,
+    RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
 };
 
 use super::{
@@ -219,6 +225,7 @@ bounded_loop_ref!(
     "input-cursor:",
     256
 );
+bounded_loop_ref!(LoopInputAckToken, "loop input ack token", "input-ack:", 256);
 bounded_loop_ref!(LoopProcessRef, "loop process ref", "process:", 256);
 
 impl LoopCheckpointStateRef {
@@ -524,6 +531,9 @@ pub enum AgentLoopHostErrorKind {
     ScopeMismatch,
     StaleSurface,
     InvalidInvocation,
+    /// The request payload itself is well-formed but its content is invalid in
+    /// the current host state (e.g. schema id/version mismatch on checkpoint load).
+    Invalid,
     PolicyDenied,
     BudgetExceeded,
     Unavailable,
@@ -541,6 +551,7 @@ impl AgentLoopHostErrorKind {
             Self::ScopeMismatch => "scope_mismatch",
             Self::StaleSurface => "stale_surface",
             Self::InvalidInvocation => "invalid_invocation",
+            Self::Invalid => "invalid",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
             Self::Unavailable => "unavailable",
@@ -583,6 +594,12 @@ pub trait LoopRunInfoPort: Send + Sync {
 pub struct LoopContextRequest {
     pub after: Option<LoopInputCursor>,
     pub limit: usize,
+    #[serde(default = "default_prompt_mode")]
+    pub mode: PromptMode,
+}
+
+fn default_prompt_mode() -> PromptMode {
+    PromptMode::TextOnly
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -596,7 +613,13 @@ pub struct LoopContextBundle {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopContextMessage {
-    pub message_ref: LoopMessageRef,
+    /// Reference to the persisted message content.
+    ///
+    /// `None` means "summary-only entry; prompt port MUST NOT resolve content —
+    /// use `safe_summary` verbatim instead." Mirrors the
+    /// `SkillTrustLevel::Installed` carrying `prompt_content: None` pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_ref: Option<LoopMessageRef>,
     pub role: String,
     pub safe_summary: String,
 }
@@ -670,7 +693,15 @@ impl LoopInputCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopInputBatch {
     pub inputs: Vec<LoopInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_acks: Vec<LoopInputAck>,
     pub next_cursor: LoopInputCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopInputAck {
+    pub cursor: LoopInputCursor,
+    pub token: LoopInputAckToken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -708,7 +739,7 @@ pub trait LoopInputPort: Send + Sync {
         limit: usize,
     ) -> Result<LoopInputBatch, AgentLoopHostError>;
 
-    async fn ack_inputs(&self, cursor: LoopInputCursor) -> Result<(), AgentLoopHostError>;
+    async fn ack_inputs(&self, tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -783,6 +814,20 @@ impl PromptMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopInlineMessageRole {
+    System,
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopInlineMessage {
+    pub role: LoopInlineMessageRole,
+    pub safe_body: LoopSafeSummary,
+}
+
 /// Request for a host-managed prompt bundle.
 ///
 /// The optional cursor and checkpoint refs are run-scoped and are validated by
@@ -795,6 +840,8 @@ pub struct LoopPromptBundleRequest {
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub checkpoint_state_ref: Option<LoopCheckpointStateRef>,
     pub max_messages: Option<u32>,
+    #[serde(default)]
+    pub inline_messages: Vec<LoopInlineMessage>,
 }
 
 /// Prompt bundle returned to a driver.
@@ -809,6 +856,109 @@ pub struct LoopPromptBundle {
     pub surface_version: Option<CapabilitySurfaceVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+    #[serde(default)]
+    pub identity_message_count: u32,
+    #[serde(default)]
+    pub instruction_snippet_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopPromptBundleGrant {
+    pub bundle_ref: LoopPromptBundleRef,
+    pub messages: Vec<LoopModelMessage>,
+    pub surface_version: Option<CapabilitySurfaceVersion>,
+    pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+}
+
+#[derive(Clone, Default)]
+pub struct LoopPromptBundleAuthority {
+    inner: Arc<Mutex<LoopPromptBundleAuthorityState>>,
+}
+
+#[derive(Default)]
+struct LoopPromptBundleAuthorityState {
+    latest_by_run: HashMap<String, LoopPromptBundleGrant>,
+}
+
+impl LoopPromptBundleAuthority {
+    pub fn shared() -> Self {
+        static AUTHORITY: OnceLock<LoopPromptBundleAuthority> = OnceLock::new();
+        AUTHORITY.get_or_init(Self::default).clone()
+    }
+
+    pub fn issue_bundle(
+        &self,
+        context: &LoopRunContext,
+        bundle: &LoopPromptBundle,
+    ) -> Result<(), AgentLoopHostError> {
+        if !bundle.bundle_ref.is_for_run(context) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "prompt bundle ref is not scoped to this loop run",
+            ));
+        }
+
+        self.lock_state()?.latest_by_run.insert(
+            context.run_id.to_string(),
+            LoopPromptBundleGrant {
+                bundle_ref: bundle.bundle_ref.clone(),
+                messages: bundle.messages.clone(),
+                surface_version: bundle.surface_version.clone(),
+                instruction_fingerprint: bundle.instruction_fingerprint.clone(),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn authorize_latest_model_request(
+        &self,
+        context: &LoopRunContext,
+        messages: &[LoopModelMessage],
+        surface_version: &Option<CapabilitySurfaceVersion>,
+    ) -> Result<LoopPromptBundleGrant, AgentLoopHostError> {
+        let grant = self
+            .lock_state()?
+            .latest_by_run
+            .remove(&context.run_id.to_string())
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "model request has no host-built prompt bundle",
+                )
+            })?;
+
+        if !grant.bundle_ref.is_for_run(context) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "prompt bundle ref is not scoped to this loop run",
+            ));
+        }
+        if grant.messages != messages {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "model request messages do not match the host-built prompt bundle",
+            ));
+        }
+        if &grant.surface_version != surface_version {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::StaleSurface,
+                "model request surface version does not match the host-built prompt bundle",
+            ));
+        }
+
+        Ok(grant)
+    }
+
+    fn lock_state(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, LoopPromptBundleAuthorityState>, AgentLoopHostError> {
+        self.inner.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "prompt bundle authority is unavailable",
+            )
+        })
+    }
 }
 
 /// Host boundary for building prompt bundles before model invocation.
@@ -915,6 +1065,23 @@ pub struct VisibleCapabilitySurface {
     pub descriptors: Vec<CapabilityDescriptorView>,
 }
 
+/// Concurrency hint for a capability surfaced to an agent loop driver.
+///
+/// Derived at the adapter boundary from the underlying
+/// `CapabilityDescriptor.effects` Vec. The lower-layer `CapabilityDescriptor`
+/// is NOT modified; `effects` remains the source of truth and the hint is a
+/// computed projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConcurrencyHint {
+    /// Capability has no exclusive side effects; multiple invocations may run
+    /// in parallel without ordering hazards.
+    SafeForParallel,
+    /// Capability must be invoked serially within a loop run — parallel
+    /// invocation would violate ordering or isolation constraints.
+    Exclusive,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDescriptorView {
     pub capability_id: CapabilityId,
@@ -922,6 +1089,7 @@ pub struct CapabilityDescriptorView {
     pub runtime: RuntimeKind,
     pub safe_name: String,
     pub safe_description: String,
+    pub concurrency_hint: ConcurrencyHint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -980,6 +1148,11 @@ impl CapabilityOutcome {
 pub struct CapabilityResultMessage {
     pub result_ref: LoopResultRef,
     pub safe_summary: String,
+    /// Host hint that this completed capability result should end the loop
+    /// naturally after the current batch. Defaults to false for compatibility
+    /// with older hosts.
+    #[serde(default)]
+    pub terminate_hint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -994,6 +1167,7 @@ pub struct CapabilityDenied {
     pub safe_summary: String,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CapabilityDeniedReasonKind {
     EmptySurface,
@@ -1056,8 +1230,111 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityFailure {
-    pub error_kind: String,
+    pub error_kind: CapabilityFailureKind,
     pub safe_summary: String,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CapabilityFailureKind {
+    Authorization,
+    Backend,
+    Cancelled,
+    Dispatcher,
+    InvalidInput,
+    MissingRuntime,
+    Network,
+    OutputTooLarge,
+    PolicyDenied,
+    Process,
+    Resource,
+    Transient,
+    Unavailable,
+    Internal,
+    Permanent,
+    Unknown(CapabilityFailureKindValue),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CapabilityFailureKindValue(String);
+
+impl CapabilityFailureKindValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_loop_safe_identifier(value.into(), "capability failure kind", 128).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl CapabilityFailureKind {
+    pub fn unknown(value: impl Into<String>) -> Result<Self, String> {
+        CapabilityFailureKindValue::new(value).map(Self::Unknown)
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Authorization => "authorization",
+            Self::Backend => "backend",
+            Self::Cancelled => "cancelled",
+            Self::Dispatcher => "dispatcher",
+            Self::InvalidInput => "invalid_input",
+            Self::MissingRuntime => "missing_runtime",
+            Self::Network => "network",
+            Self::OutputTooLarge => "output_too_large",
+            Self::PolicyDenied => "policy_denied",
+            Self::Process => "process",
+            Self::Resource => "resource",
+            Self::Transient => "transient",
+            Self::Unavailable => "unavailable",
+            Self::Internal => "internal",
+            Self::Permanent => "permanent",
+            Self::Unknown(value) => value.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for CapabilityFailureKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for CapabilityFailureKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilityFailureKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "authorization" => Ok(Self::Authorization),
+            "backend" => Ok(Self::Backend),
+            "cancelled" => Ok(Self::Cancelled),
+            "dispatcher" => Ok(Self::Dispatcher),
+            "invalid_input" => Ok(Self::InvalidInput),
+            "missing_runtime" => Ok(Self::MissingRuntime),
+            "network" => Ok(Self::Network),
+            "output_too_large" => Ok(Self::OutputTooLarge),
+            "policy_denied" => Ok(Self::PolicyDenied),
+            "process" => Ok(Self::Process),
+            "resource" => Ok(Self::Resource),
+            "transient" => Ok(Self::Transient),
+            "unavailable" => Ok(Self::Unavailable),
+            "internal" => Ok(Self::Internal),
+            "permanent" => Ok(Self::Permanent),
+            _ => Self::unknown(value).map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 #[async_trait]
@@ -1135,6 +1412,48 @@ pub struct LoopCheckpointRequest {
     pub state_ref: LoopCheckpointStateRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadCheckpointPayloadRequest {
+    pub checkpoint_id: TurnCheckpointId,
+    pub expected_schema_id: CheckpointSchemaId,
+    pub expected_schema_version: RunProfileVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedCheckpointPayload {
+    pub kind: LoopCheckpointKind,
+    pub schema_id: CheckpointSchemaId,
+    pub schema_version: RunProfileVersion,
+    pub payload: RedactedCheckpointPayload,
+}
+
+/// Request to stage a checkpoint payload's raw bytes before calling
+/// [`LoopCheckpointPort::checkpoint`] with the resulting state ref.
+///
+/// The two-step write keeps byte-storage and metadata-write responsibilities
+/// cleanly split.
+///
+/// `kind` is required so adapters that bridge to
+/// `CheckpointStateStore::put_checkpoint_state` can persist the correct kind
+/// without having to guess. The subsequent `checkpoint(kind, state_ref)` call
+/// must use the same `kind`; the read-side `get_checkpoint_state` validates
+/// the staged kind against the metadata write's kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageCheckpointPayloadRequest {
+    /// Checkpoint boundary the staged payload belongs to. Must match the
+    /// `kind` passed to the subsequent `LoopCheckpointPort::checkpoint(...)`
+    /// call.
+    pub kind: LoopCheckpointKind,
+    /// Schema id of the payload — usually the framework's
+    /// `CHECKPOINT_SCHEMA_ID` constant. Stored alongside the bytes so the
+    /// read-side can authenticate the boundary on resume.
+    pub schema_id: String,
+    /// Canonical payload bytes (e.g. `serde_json::to_vec(&state)`). The
+    /// implementation does not parse the bytes; it persists them and returns
+    /// an opaque ref.
+    pub payload: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopCheckpointKind {
@@ -1161,6 +1480,34 @@ pub trait LoopCheckpointPort: Send + Sync {
         &self,
         request: LoopCheckpointRequest,
     ) -> Result<TurnCheckpointId, AgentLoopHostError>;
+
+    /// Stage a checkpoint payload's raw bytes and return an opaque
+    /// [`LoopCheckpointStateRef`] that subsequent `checkpoint(...)` calls
+    /// can reference. The default impl fails closed; concrete impls live in
+    /// `ironclaw_loop_support` and wrap the host's `CheckpointStateStore`.
+    ///
+    /// The executor's checkpoint helper calls this method before invoking
+    /// `LoopCheckpointPort::checkpoint(...)` so the metadata write references
+    /// a payload that's already durably stored.
+    async fn stage_checkpoint_payload(
+        &self,
+        _request: StageCheckpointPayloadRequest,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "stage_checkpoint_payload not implemented",
+        ))
+    }
+
+    /// Load the redacted state payload behind a previously-written
+    /// checkpoint. Resume callers go through this host port so metadata
+    /// validation stays with the backend that owns checkpoint storage.
+    async fn load_checkpoint_payload(
+        &self,
+        _request: LoadCheckpointPayloadRequest,
+    ) -> Result<LoadedCheckpointPayload, AgentLoopHostError> {
+        Err(unsupported_host_method("load_checkpoint_payload"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1169,6 +1516,38 @@ pub enum LoopProgressEvent {
     DriverNote {
         kind: LoopDriverNoteKind,
         safe_summary: LoopSafeSummary,
+    },
+    IterationStarted {
+        iteration: u32,
+    },
+    PromptBundleBuilt {
+        iteration: u32,
+        bundle_ref: LoopPromptBundleRef,
+        mode: PromptMode,
+        surface_version: Option<CapabilitySurfaceVersion>,
+        message_count: u32,
+        identity_message_count: u32,
+        instruction_snippet_count: u32,
+    },
+    CapabilityBatchStarted {
+        iteration: u32,
+        call_count: u32,
+        policy: BatchPolicyKind,
+    },
+    CapabilityBatchCompleted {
+        iteration: u32,
+        result_count: u32,
+        denied_count: u32,
+        gated_count: u32,
+        failed_count: u32,
+    },
+    GateBlocked {
+        iteration: u32,
+        gate_kind: LoopGateKind,
+    },
+    CheckpointWritten {
+        iteration: u32,
+        kind: LoopCheckpointKind,
     },
 }
 
@@ -1186,8 +1565,29 @@ impl LoopProgressEvent {
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::DriverNote { .. } => "driver_note",
+            Self::IterationStarted { .. } => "iteration_started",
+            Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
+            Self::CapabilityBatchStarted { .. } => "capability_batch_started",
+            Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
+            Self::GateBlocked { .. } => "gate_blocked",
+            Self::CheckpointWritten { .. } => "checkpoint_written",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchPolicyKind {
+    Sequential,
+    Parallel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopGateKind {
+    Approval,
+    Auth,
+    ResourceWait,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1200,7 +1600,42 @@ pub enum LoopDriverNoteKind {
 
 #[async_trait]
 pub trait LoopProgressPort: Send + Sync {
+    /// Emit observational progress for UI/status consumers.
+    ///
+    /// Progress events are best-effort and must not be used as
+    /// recoverability-critical durability markers. A failed progress emission
+    /// must not invalidate already-completed durable work; callers should treat
+    /// this like host model milestone projection, where sink failures are
+    /// logged/observed without changing the provider or checkpoint outcome.
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError>;
+}
+
+/// Per-run cancellation observation point.
+///
+/// The canonical executor consults this between strategy calls. The method is
+/// intentionally synchronous and non-blocking: implementations should expose a
+/// cheap snapshot, usually backed by an atomic flag plus immutable signal data.
+///
+/// **Cancellation is cooperative and boundary-observation only — it is not
+/// preempted across in-flight host calls.** `build_prompt_bundle`,
+/// `stream_model`, and `invoke_capability` are awaited to completion before
+/// the next observation point is reached. A stuck model stream or long-running
+/// capability call will not observe cancellation until control returns to the
+/// executor. Implementations of those host methods that need finer-grained
+/// cancellation must integrate their own abort signal internally; this port
+/// only covers the between-call boundaries that the executor controls.
+pub trait LoopCancellationPort: Send + Sync {
+    /// Returns `Some(signal)` once cancellation has been requested for this run.
+    ///
+    /// Implementations must be idempotent across reads. After the request fires,
+    /// repeated calls must keep returning the same signal.
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopCancellationSignal {
+    pub reason_kind: LoopCancelReasonKind,
+    pub requested_at: DateTime<Utc>,
 }
 
 pub trait AgentLoopDriverHost:
@@ -1213,6 +1648,7 @@ pub trait AgentLoopDriverHost:
     + LoopTranscriptPort
     + LoopCheckpointPort
     + LoopProgressPort
+    + LoopCancellationPort
     + Send
     + Sync
 {
@@ -1228,6 +1664,7 @@ impl<T> AgentLoopDriverHost for T where
         + LoopTranscriptPort
         + LoopCheckpointPort
         + LoopProgressPort
+        + LoopCancellationPort
         + Send
         + Sync
 {

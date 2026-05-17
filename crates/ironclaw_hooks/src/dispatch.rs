@@ -96,7 +96,15 @@ pub struct BeforeCapabilityDispatchOutcome {
 #[derive(Debug)]
 pub(crate) enum GateHookOutcome {
     Pass,
-    Decision(BeforeCapabilityHookDecision),
+    Decision {
+        decision: BeforeCapabilityHookDecision,
+        /// Free-form audit-only reason set by the hook via
+        /// [`crate::sink::PrivilegedGateSink::record_audit_reason`] /
+        /// [`crate::sink::RestrictedGateSink::record_audit_reason`]. The
+        /// model-visible reason inside `decision` is the closed-vocab
+        /// label; this carries the manifest-supplied context for audit/SSE.
+        audit_reason: Option<String>,
+    },
 }
 
 /// Per-hook record of misbehavior surfaced during a dispatch.
@@ -519,6 +527,25 @@ impl HookDispatcher {
         scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<(), crate::error::HookError> {
+        // Reject non-observer points at install time. Previously this path
+        // accepted any `HookPointSpec`, populated the binding registry, but
+        // only inserted into the observer map — so a `BeforeCapability`
+        // observer installation would later cause `dispatch_before_capability`
+        // to see a binding without a gate impl, poison the slot, and
+        // fail-close the capability. Catch the misuse at install time
+        // instead. (serrrfirat P2 #2 on PR #3573.)
+        match point {
+            HookPointSpec::AfterModel
+            | HookPointSpec::AfterCapability
+            | HookPointSpec::AfterCheckpoint => {}
+            HookPointSpec::BeforeCapability | HookPointSpec::BeforePrompt => {
+                return Err(crate::error::HookError::RegistryConstruction(format!(
+                    "observer hooks cannot be installed at {point:?}; that \
+                     point dispatches gate/mutator implementations, not \
+                     observers"
+                )));
+            }
+        }
         let binding = HookBinding {
             hook_id,
             hook_version: HookVersion::ONE,
@@ -685,9 +712,13 @@ impl HookDispatcher {
                     self.emit_decision(&binding, HookDecisionSummary::Pass)
                         .await;
                 }
-                Ok(GateHookOutcome::Decision(decision)) => {
+                Ok(GateHookOutcome::Decision {
+                    decision,
+                    audit_reason,
+                }) => {
                     let summary = telemetry::gate_decision_summary(&decision);
-                    self.emit_decision(&binding, summary).await;
+                    self.emit_decision_with_audit(&binding, summary, audit_reason)
+                        .await;
                     composed = compose_gate_decision(composed, decision);
                     if !matches!(composed.inner(), GateDecisionInner::Allow) {
                         short_circuited = true;
@@ -788,6 +819,21 @@ impl HookDispatcher {
         point: HookPointSpec,
         tenant: ironclaw_host_api::TenantId,
     ) -> ObserverDispatchOutcome {
+        self.dispatch_observer_at_with_provider(point, tenant, None)
+            .await
+    }
+
+    /// As [`Self::dispatch_observer_at`], but carries the capability provider
+    /// for scope-filter enforcement at [`HookPointSpec::AfterCapability`].
+    /// Other observer points pass `None`; the dispatcher rejects
+    /// `OwnCapabilities`-scoped bindings at non-capability points in the
+    /// registry, so this is just defense in depth there.
+    pub async fn dispatch_observer_at_with_provider(
+        &self,
+        point: HookPointSpec,
+        tenant: ironclaw_host_api::TenantId,
+        provider: Option<ironclaw_host_api::ExtensionId>,
+    ) -> ObserverDispatchOutcome {
         let ordered = self.ordered_bindings(point);
         let mut facts = Vec::new();
         let mut failures = Vec::new();
@@ -815,10 +861,24 @@ impl HookDispatcher {
                     return ObserverDispatchOutcome { facts, failures };
                 }
             },
+            provider: provider.clone(),
         };
 
         for (_key, binding) in ordered {
             if self.is_poisoned(binding.hook_id) {
+                continue;
+            }
+            // Scope filtering (serrrfirat finding #3). `OwnCapabilities` is
+            // legal at `AfterCapability` because that dispatch carries a
+            // resolved provider; for `AfterModel` and `AfterCheckpoint` the
+            // registry already rejects `OwnCapabilities` at install time
+            // (finding #2), so `provider` is `None` and the scope check would
+            // refuse to fire — but the only way to get here at those points
+            // is `Global`/`SameTenant`, which `permits` always allows.
+            if !binding
+                .scope
+                .permits(binding.owning_extension.as_ref(), provider.as_ref())
+            {
                 continue;
             }
             let Some(hook) = self.observers.get(&binding.hook_id) else {
@@ -913,7 +973,7 @@ impl HookDispatcher {
                         .catch_unwind()
                         .await
                         .map_err(|_| ())
-                        .map(|()| sink.state)
+                        .map(|()| (sink.state, sink.audit_reason))
                 }
                 BeforeCapabilityHookImpl::Restricted(h) => {
                     let mut sink = RecordingGateSink::new();
@@ -921,7 +981,7 @@ impl HookDispatcher {
                         .catch_unwind()
                         .await
                         .map_err(|_| ())
-                        .map(|()| sink.state)
+                        .map(|()| (sink.state, sink.audit_reason))
                 }
                 BeforeCapabilityHookImpl::RestrictedWasm(_) => {
                     // henrypark133 must-fix #2 on PR #3634: WASM gate
@@ -942,9 +1002,14 @@ impl HookDispatcher {
         };
 
         match tokio::time::timeout(timeout, run).await {
-            Ok(Ok(GateSinkState::Decided(decision))) => Ok(GateHookOutcome::Decision(decision)),
-            Ok(Ok(GateSinkState::Passed)) => Ok(GateHookOutcome::Pass),
-            Ok(Ok(GateSinkState::Unset)) => {
+            Ok(Ok((GateSinkState::Decided(decision), audit_reason))) => {
+                Ok(GateHookOutcome::Decision {
+                    decision,
+                    audit_reason,
+                })
+            }
+            Ok(Ok((GateSinkState::Passed, _))) => Ok(GateHookOutcome::Pass),
+            Ok(Ok((GateSinkState::Unset, _))) => {
                 let failure = self.classify_failure(
                     binding,
                     FailureCategory::Malformed,
@@ -1180,12 +1245,22 @@ impl HookDispatcher {
     }
 
     async fn emit_decision(&self, binding: &HookBinding, decision: HookDecisionSummary) {
+        self.emit_decision_with_audit(binding, decision, None).await;
+    }
+
+    async fn emit_decision_with_audit(
+        &self,
+        binding: &HookBinding,
+        decision: HookDecisionSummary,
+        audit_reason: Option<String>,
+    ) {
         if self.milestone_sink.is_none() {
             return;
         }
         self.emit_milestone(LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id: telemetry::hook_id_string(binding.hook_id),
             decision,
+            audit_reason,
         })
         .await;
     }
@@ -1918,6 +1993,72 @@ mod tests {
         assert!(outcome.failures.is_empty());
     }
 
+    /// serrrfirat finding #3: an Installed observer scoped to
+    /// `OwnCapabilities` must fire only when the dispatch's resolved
+    /// capability provider equals the binding's owning extension. The
+    /// pre-fix dispatcher fired the observer for every invocation
+    /// regardless of provider.
+    #[tokio::test]
+    async fn own_capabilities_observer_filters_foreign_providers() {
+        let owner = ironclaw_host_api::ExtensionId::new("ext.owner").expect("ok");
+        let other = ironclaw_host_api::ExtensionId::new("ext.other").expect("ok");
+        let id = HookId::derive(
+            &crate::identity::ExtensionId("ext.owner".to_string()),
+            "1.0",
+            &crate::identity::HookLocalId("obs".to_string()),
+            HookVersion::ONE,
+        );
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(HookBinding {
+                hook_id: id,
+                hook_version: HookVersion::ONE,
+                trust_class: HookTrustClass::Installed,
+                phase: HookPhase::Telemetry,
+                priority: HookPriority::DEFAULT,
+                point: HookPointSpec::AfterCapability,
+                owning_extension: Some(owner.clone()),
+                scope: HookBindingScope::OwnCapabilities,
+                poisoned: false,
+            })
+            .expect("ok");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_observer_impl(id, ObserverHookImpl::Any(Box::new(NotingObserver)));
+
+        // Foreign provider — observer must NOT fire.
+        let outcome = dispatcher
+            .dispatch_observer_at_with_provider(
+                HookPointSpec::AfterCapability,
+                tenant(),
+                Some(other.clone()),
+            )
+            .await;
+        assert!(
+            outcome.facts.is_empty(),
+            "OwnCapabilities observer fired for foreign provider"
+        );
+
+        // Matching provider — observer fires.
+        let outcome = dispatcher
+            .dispatch_observer_at_with_provider(
+                HookPointSpec::AfterCapability,
+                tenant(),
+                Some(owner.clone()),
+            )
+            .await;
+        assert_eq!(outcome.facts.len(), 1);
+
+        // Unresolved provider (`None`) — observer must NOT fire (conservative
+        // default in `HookBindingScope::permits`).
+        let outcome = dispatcher
+            .dispatch_observer_at_with_provider(HookPointSpec::AfterCapability, tenant(), None)
+            .await;
+        assert!(
+            outcome.facts.is_empty(),
+            "OwnCapabilities observer fired against unresolved provider"
+        );
+    }
+
     // ── C1 regression: trust-class × impl-tier pairing is sealed ────────────
 
     /// Compile-time seal. `BeforeCapabilityHookImpl::Privileged(...)` is
@@ -2365,6 +2506,51 @@ mod tests {
             &kinds[1],
             LoopHostMilestoneKind::HookDecisionEmitted { decision, .. }
                 if decision.kind_name() == "pass"
+        ));
+    }
+
+    /// serrrfirat P2 #2 on PR #3573: installing an observer at a
+    /// gate/mutator point used to succeed (binding was inserted, but only
+    /// the observer map was populated). Dispatch would later poison the
+    /// slot and fail-close the capability. Reject at install time.
+    #[test]
+    fn install_observer_rejects_before_capability_point() {
+        let id = HookId::for_builtin("test::observer::misuse-bc", HookVersion::ONE);
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        let err = dispatcher
+            .install_builtin_observer(
+                id,
+                HookPhase::Telemetry,
+                HookPointSpec::BeforeCapability,
+                Box::new(NotingObserver),
+            )
+            .expect_err("observer install at before_capability must be rejected");
+        match err {
+            crate::error::HookError::RegistryConstruction(msg) => {
+                assert!(
+                    msg.contains("observer") && msg.contains("BeforeCapability"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected RegistryConstruction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_observer_rejects_before_prompt_point() {
+        let id = HookId::for_builtin("test::observer::misuse-bp", HookVersion::ONE);
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        let err = dispatcher
+            .install_builtin_observer(
+                id,
+                HookPhase::Telemetry,
+                HookPointSpec::BeforePrompt,
+                Box::new(NotingObserver),
+            )
+            .expect_err("observer install at before_prompt must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::HookError::RegistryConstruction(_)
         ));
     }
 

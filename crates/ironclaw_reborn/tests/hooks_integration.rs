@@ -60,8 +60,8 @@ use ironclaw_hooks::wasm::{
 };
 use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    AlwaysAliveRunCancellationFactory, HostManagedModelError, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn::{
     LoopCapabilityInputResolver, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
@@ -73,7 +73,7 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CheckpointStateStore, EventCursor, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, LoopResultRef,
+    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopResultRef,
     PutCheckpointStateRequest, ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest,
     RunProfileResolver, RunProfileVersion, SourceBindingRef, TurnLeaseToken, TurnRunId,
     TurnRunnerId, TurnScope, TurnStatus,
@@ -144,6 +144,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
             safe_summary: "stub capability completed".to_string(),
+            terminate_hint: false,
         }))
     }
 
@@ -213,6 +214,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
             safe_summary: "stub capability completed".to_string(),
+            terminate_hint: false,
         }))
     }
 
@@ -245,6 +247,7 @@ fn descriptor_with_provider(
         runtime: ironclaw_host_api::RuntimeKind::Wasm,
         safe_name: capability_id.to_string(),
         safe_description: format!("test capability {capability_id}"),
+        concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::Exclusive,
     }
 }
 
@@ -604,6 +607,7 @@ const WASM_UNSUPPORTED_IMPORT: &str = r#"
 struct Fixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    turn_state_store: Arc<InMemoryTurnStateStore>,
     loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     gateway: Arc<UnusedGateway>,
@@ -617,6 +621,7 @@ impl Fixture {
     async fn new() -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+        let turn_state_store = Arc::new(InMemoryTurnStateStore::default());
         let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let gateway = Arc::new(UnusedGateway);
@@ -702,6 +707,7 @@ impl Fixture {
         Self {
             thread_service,
             checkpoint_state_store,
+            turn_state_store,
             loop_checkpoint_store,
             milestone_sink,
             gateway,
@@ -719,6 +725,7 @@ impl Fixture {
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
             Arc::clone(&self.checkpoint_state_store) as _,
+            Arc::clone(&self.turn_state_store) as _,
             Arc::clone(&self.loop_checkpoint_store) as _,
             Arc::clone(&self.milestone_sink) as _,
             TextOnlyLoopHostConfig {
@@ -726,6 +733,7 @@ impl Fixture {
                 require_model_route_snapshot: false,
             },
         )
+        .with_cancellation_factory(Arc::new(AlwaysAliveRunCancellationFactory))
     }
 
     fn request(&self) -> RebornLoopDriverHostRequest {
@@ -1594,16 +1602,6 @@ fn observer_dispatcher_at(point: HookPointSpec, seen: Arc<Mutex<u32>>) -> Arc<Ho
         .build_arc()
 }
 
-/// Build a `LoopModelRequest` referencing the inbound message added by the
-/// fixture so `ThreadBackedLoopModelPort` resolves real context messages.
-fn model_request() -> LoopModelRequest {
-    LoopModelRequest {
-        messages: Vec::new(),
-        surface_version: None,
-        model_preference: None,
-    }
-}
-
 #[tokio::test]
 async fn after_model_fires_exactly_once_at_durable_boundary() {
     // henrypark133 Concerning #5 regression: previously, both the model
@@ -1628,9 +1626,29 @@ async fn after_model_fires_exactly_once_at_durable_boundary() {
         .await
         .expect("host builds with AfterModel observer installed");
 
-    host.stream_model(model_request())
+    // Base now requires `build_prompt_bundle` to pre-authorize each
+    // `stream_model` call ("model request has no host-built prompt
+    // bundle"). Build the bundle first so the authority is registered;
+    // the bundle ref is referenced from `LoopModelRequest::messages`
+    // (empty here is fine because no inline messages are needed).
+    let bundle = host
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: vec![],
+        })
         .await
-        .expect("stream_model returns Ok via the wrapped model port");
+        .expect("build_prompt_bundle succeeds before stream_model");
+    host.stream_model(LoopModelRequest {
+        messages: bundle.messages.clone(),
+        surface_version: None,
+        model_preference: None,
+    })
+    .await
+    .expect("stream_model returns Ok via the wrapped model port");
     assert_eq!(
         *seen.lock().expect("observer counter not poisoned"),
         0,
@@ -2324,6 +2342,7 @@ async fn before_prompt_hook_message_is_resolvable_via_factory_wiring() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: vec![],
         })
         .await
         .expect(

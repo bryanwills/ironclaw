@@ -22,7 +22,7 @@ use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted};
 use ironclaw_turns::LoopMessageRef;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopModelMessage, LoopPromptBundle,
-    LoopPromptBundleRequest, LoopPromptPort,
+    LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
 };
 
 /// Narrow seam for materializing hook-emitted `msg:hook.*` content refs so
@@ -69,6 +69,16 @@ pub struct HookedLoopPromptPort {
     /// [`ironclaw_turns::run_profile::InstructionMaterializationStore`]);
     /// tests can use any [`HookPromptMaterializationSink`] impl.
     materialization_sink: Option<Arc<dyn HookPromptMaterializationSink>>,
+    /// Authority + run-context pair used to re-issue the prompt bundle grant
+    /// after hook patches are appended. The inner port (typically
+    /// `HostManagedLoopPromptPort`) issues the initial grant for the
+    /// pre-hook bundle; we then mutate `bundle.messages`, which causes the
+    /// downstream `grant.messages != messages` rejection in
+    /// `LoopPromptBundleAuthority::authorize_latest_model_request`. Wiring
+    /// the authority + run context here lets us refresh the grant to match
+    /// the post-hook bundle that actually reaches the model.
+    /// serrrfirat P1 #1 on PR #3573.
+    bundle_authority: Option<(LoopPromptBundleAuthority, LoopRunContext)>,
 }
 
 impl HookedLoopPromptPort {
@@ -91,7 +101,24 @@ impl HookedLoopPromptPort {
             tenant_id,
             snippet_byte_budget: DEFAULT_SNIPPET_BYTE_BUDGET,
             materialization_sink: None,
+            bundle_authority: None,
         }
+    }
+
+    /// Required for production: wire the prompt bundle authority + run
+    /// context so the wrapper can re-issue the grant for the post-hook
+    /// bundle. Without this, hook-emitted snippets cause downstream model
+    /// requests to fail with `model request messages do not match the
+    /// host-built prompt bundle` because the inner port issued the grant
+    /// for the pre-hook messages. serrrfirat P1 #1 on PR #3573.
+    #[must_use]
+    pub fn with_bundle_authority(
+        mut self,
+        authority: LoopPromptBundleAuthority,
+        run_context: LoopRunContext,
+    ) -> Self {
+        self.bundle_authority = Some((authority, run_context));
+        self
     }
 
     /// Override the maximum total bytes hook patches may contribute to a
@@ -127,11 +154,10 @@ impl LoopPromptPort for HookedLoopPromptPort {
             "before_prompt dispatch completed"
         );
 
-        let extra_messages =
-            wrap_patches_to_messages(&dispatched.patches, self.snippet_byte_budget)?;
+        let wrapped = wrap_patches_to_messages(&dispatched.patches, self.snippet_byte_budget)?;
 
         let mut bundle = self.inner.build_prompt_bundle(request).await?;
-        if !extra_messages.is_empty() {
+        if !wrapped.is_empty() {
             // Production correctness: hook-emitted `msg:hook.*` refs are
             // synthetic — they exist in the bundle but the downstream model
             // resolver doesn't know about them. Materialize them through
@@ -147,56 +173,104 @@ impl LoopPromptPort for HookedLoopPromptPort {
                      HookedLoopPromptPort::with_materialization_sink)",
                 )
             })?;
-            for (msg, patch) in extra_messages.iter().zip(dispatched.patches.iter()) {
-                if let Some(safe_content) = safe_content_for_patch(patch) {
-                    sink.put(&msg.role, &msg.content_ref, safe_content)?;
-                }
+            // The wrapper returns paired `(message, safe_content)` so
+            // materialization can't drift relative to filtering
+            // (serrrfirat P1 #2 on PR #3573). Previously this loop
+            // zipped surviving messages back against the original
+            // unfiltered patch list, which silently misaligned whenever
+            // a patch was skipped (metadata or over-budget).
+            for entry in &wrapped {
+                sink.put(
+                    &entry.message.role,
+                    &entry.message.content_ref,
+                    entry.safe_content.clone(),
+                )?;
             }
         }
-        bundle.messages.extend(extra_messages);
+        let wrapped_was_nonempty = !wrapped.is_empty();
+        bundle
+            .messages
+            .extend(wrapped.into_iter().map(|w| w.message));
+        // Re-issue the prompt bundle authority grant so it covers the
+        // post-hook messages. The inner port issued a grant for the
+        // pre-hook bundle; without this refresh the downstream model
+        // request fails closed at
+        // `LoopPromptBundleAuthority::authorize_latest_model_request`
+        // because `grant.messages != messages`. serrrfirat P1 #1.
+        if wrapped_was_nonempty
+            && let Some((authority, run_context)) = self.bundle_authority.as_ref()
+        {
+            authority.issue_bundle(run_context, &bundle)?;
+        }
         Ok(bundle)
     }
 }
 
-/// Recover the safe-to-emit content string for a hook patch, mirroring the
-/// branches inside [`wrap_patches_to_messages`] (the wrapping is what the
-/// model sees; the materialized store records that same string keyed by ref).
-/// Returns `None` for metadata-only patches that don't produce a message.
-fn safe_content_for_patch(patch: &HookPatch) -> Option<String> {
-    match patch.view() {
-        HookPatchView::AddSnippet {
-            body: SnippetBodyView::Enveloped { wrapped },
-            ..
-        } => Some(wrapped.to_string()),
-        HookPatchView::AddSnippet {
-            body: SnippetBodyView::Trusted { text },
-            ..
-        } => wrap_untrusted(EnvelopeSource::Hook, EnvelopeTrust::Trusted, text)
-            .ok()
-            .map(|env| env.into_string()),
-        HookPatchView::AddMilestoneMetadata { .. } => None,
+/// Map a hook's trust class to the model-message role it's allowed to
+/// produce. **Load-bearing security boundary**: Installed-tier hooks
+/// (third-party extensions) must NOT inject `system`-role content,
+/// because that's the channel the model treats as authoritative
+/// instructions. Envelope-wrapping the body with `"Untrusted hook
+/// content: ..."` is a text-level label, not an authority attenuation —
+/// the model still receives a `system` message and may follow its
+/// content as if it were a real system instruction.
+///
+/// Builtin / Trusted / SelfAuthored hooks remain `system`-role because
+/// they're trusted-by-construction at the type level (sink seals
+/// guarantee no Installed code reaches those paths). Installed hooks
+/// drop to `user`-role: the content still reaches the model but with
+/// user-channel authority, which is the appropriate ceiling for
+/// third-party-extension-supplied context.
+///
+/// serrrfirat review finding #1 (PR #3573).
+fn role_for_trust_class(trust_class: crate::trust::HookTrustClass) -> &'static str {
+    match trust_class {
+        crate::trust::HookTrustClass::Builtin
+        | crate::trust::HookTrustClass::Trusted
+        | crate::trust::HookTrustClass::SelfAuthored => "system",
+        crate::trust::HookTrustClass::Installed => "user",
     }
 }
 
-/// Convert hook patches into envelope-wrapped `system`-role model messages,
-/// enforcing the aggregate snippet byte budget across all patches.
+/// A model message produced by hook-patch wrapping, paired with the
+/// safe-to-emit content the materialization sink must store so the
+/// downstream resolver can find the `msg:hook.*` ref. The two fields
+/// must stay aligned — see [`wrap_patches_to_messages`] for the bug
+/// this type prevents (serrrfirat P1 #2 on PR #3573).
+struct WrappedHookMessage {
+    message: LoopModelMessage,
+    safe_content: String,
+}
+
+/// Convert hook patches into envelope-wrapped model messages, enforcing
+/// the aggregate snippet byte budget across all patches. Each message's
+/// role is determined by the source patch's `trust_class` via
+/// [`role_for_trust_class`]. The returned `(message, safe_content)`
+/// pairs stay aligned by construction — the caller materializes
+/// `safe_content` under `message.content_ref`. The previous shape
+/// returned only `Vec<LoopModelMessage>` and forced the caller to
+/// recover content by zipping against the original patch list, which
+/// silently misaligned whenever a patch was skipped (metadata-only or
+/// over-budget) — serrrfirat P1 #2 on PR #3573.
 fn wrap_patches_to_messages(
     patches: &[HookPatch],
     budget: u32,
-) -> Result<Vec<LoopModelMessage>, AgentLoopHostError> {
+) -> Result<Vec<WrappedHookMessage>, AgentLoopHostError> {
     let budget = budget as usize;
     let mut total_bytes: usize = 0;
-    let mut messages = Vec::new();
+    let mut out = Vec::new();
     let mut ordinal: usize = 0;
 
     for patch in patches {
-        let wrapped_string = match patch.view() {
+        let (wrapped_string, trust_class) = match patch.view() {
             HookPatchView::AddSnippet {
                 body: SnippetBodyView::Enveloped { wrapped },
+                trust_class,
                 ..
-            } => wrapped.to_string(),
+            } => (wrapped.to_string(), trust_class),
             HookPatchView::AddSnippet {
                 body: SnippetBodyView::Trusted { text },
+                trust_class,
                 ..
             } => {
                 // Trusted-tier hook content still flows through the envelope
@@ -214,7 +288,7 @@ fn wrap_patches_to_messages(
                         "trusted hook snippet rejected by prompt envelope",
                     )
                 })?;
-                envelope.into_string()
+                (envelope.into_string(), trust_class)
             }
             HookPatchView::AddMilestoneMetadata { .. } => continue,
         };
@@ -233,13 +307,16 @@ fn wrap_patches_to_messages(
 
         let content_ref = synthesize_hook_message_ref(ordinal, &wrapped_string)?;
         ordinal = ordinal.saturating_add(1);
-        messages.push(LoopModelMessage {
-            role: "system".to_string(),
-            content_ref,
+        out.push(WrappedHookMessage {
+            message: LoopModelMessage {
+                role: role_for_trust_class(trust_class).to_string(),
+                content_ref,
+            },
+            safe_content: wrapped_string,
         });
     }
 
-    Ok(messages)
+    Ok(out)
 }
 
 /// Build a deterministic `msg:hook.<ordinal>.<hash>` ref for an envelope-
@@ -290,6 +367,12 @@ mod tests {
         entries: Mutex<HashMap<String, (String, String)>>,
     }
 
+    impl RecordingMaterializationSink {
+        fn get(&self, content_ref: &str) -> Option<(String, String)> {
+            self.entries.lock().expect("ok").get(content_ref).cloned()
+        }
+    }
+
     impl HookPromptMaterializationSink for RecordingMaterializationSink {
         fn put(
             &self,
@@ -337,6 +420,8 @@ mod tests {
                 messages: Vec::new(),
                 surface_version: None,
                 instruction_fingerprint: None,
+                identity_message_count: 0,
+                instruction_snippet_count: 0,
             })
         }
     }
@@ -373,6 +458,7 @@ mod tests {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(16),
+            inline_messages: vec![],
         }
     }
 
@@ -432,8 +518,14 @@ mod tests {
         );
     }
 
+    /// Installed hooks must NOT escalate to `system`-role authority
+    /// (serrrfirat review finding #1, PR #3573). The textual envelope
+    /// label "Untrusted hook content:" doesn't strip system-role
+    /// authority — the model treats `system` messages as authoritative
+    /// instructions regardless of their text content. Installed-tier
+    /// hook output drops to `user` role.
     #[tokio::test]
-    async fn hook_patch_appended_as_envelope_wrapped_message() {
+    async fn installed_hook_patch_drops_to_user_role() {
         let inner = Arc::new(StubPromptPort::new());
         let dispatcher = make_dispatcher(
             HookTrustClass::Installed,
@@ -447,7 +539,11 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(bundle.messages.len(), 1, "envelope patch must be appended");
-        assert_eq!(bundle.messages[0].role, "system");
+        assert_eq!(
+            bundle.messages[0].role, "user",
+            "Installed-tier hook content must NOT reach the model as system-role; \
+             that's a prompt-authority escalation. Use user-role (or lower)."
+        );
         assert!(
             bundle.messages[0]
                 .content_ref
@@ -455,6 +551,94 @@ mod tests {
                 .starts_with("msg:hook."),
             "hook snippet ref must use the hook namespace, got `{}`",
             bundle.messages[0].content_ref.as_str()
+        );
+    }
+
+    /// Builtin / Trusted / SelfAuthored hooks are trusted at the type
+    /// level (sealed sinks ensure no Installed code reaches the
+    /// Privileged path), so they keep `system`-role authority. Pins the
+    /// trust-class → role mapping so a future refactor that accidentally
+    /// flips Installed to system or downgrades Trusted to user is loud.
+    #[tokio::test]
+    async fn trusted_tier_hook_patch_keeps_system_role() {
+        let inner = Arc::new(StubPromptPort::new());
+        let dispatcher = make_dispatcher(
+            HookTrustClass::Trusted,
+            BeforePromptHookImpl::Privileged(Box::new(TrustedHook)),
+        );
+        let wrapped = HookedLoopPromptPort::new(inner, Arc::new(dispatcher), tenant())
+            .with_materialization_sink(Arc::new(RecordingMaterializationSink::default()));
+
+        let bundle = wrapped
+            .build_prompt_bundle(default_request())
+            .await
+            .expect("ok");
+        assert_eq!(bundle.messages.len(), 1);
+        assert_eq!(
+            bundle.messages[0].role, "system",
+            "Trusted-tier hook content stays system-role (Builtin/Trusted/SelfAuthored \
+             are trusted by construction at the type level)"
+        );
+    }
+
+    /// Hook that emits a metadata patch BEFORE the snippet patch. Used to
+    /// exercise the alignment bug serrrfirat P1 #2 flagged: the previous
+    /// implementation zipped surviving messages against the original
+    /// patch list, which meant the metadata-skipped patch[0] paired with
+    /// snippet message[0]'s ref — content materialization would either
+    /// fail or store the wrong text under the snippet's ref.
+    struct MetadataThenSnippetHook;
+    #[async_trait]
+    impl RestrictedBeforePromptHook for MetadataThenSnippetHook {
+        async fn evaluate(
+            &self,
+            _ctx: &BeforePromptHookContext,
+            sink: &mut dyn RestrictedMutatorSink,
+        ) {
+            sink.add_milestone_metadata("source", "ignored-by-prompt-path".to_string());
+            let _ = sink.add_envelope_snippet(
+                "load-bearing snippet text".to_string(),
+                PatchOrdinalHint::Last,
+            );
+        }
+    }
+
+    /// serrrfirat P1 #2 regression on PR #3573: when a hook emits a
+    /// metadata patch (which is skipped by `wrap_patches_to_messages`)
+    /// followed by a snippet patch, the resulting model message's
+    /// content_ref must materialize the snippet's wrapped body in the
+    /// sink — NOT the metadata's body, and NOT empty content. The
+    /// previous implementation zipped surviving messages against the
+    /// original unfiltered patch list, which silently misaligned.
+    #[tokio::test]
+    async fn materialization_stays_aligned_when_metadata_patches_are_filtered() {
+        let inner = Arc::new(StubPromptPort::new());
+        let dispatcher = make_dispatcher(
+            HookTrustClass::Installed,
+            BeforePromptHookImpl::Restricted(Box::new(MetadataThenSnippetHook)),
+        );
+        let sink = Arc::new(RecordingMaterializationSink::default());
+        let wrapped = HookedLoopPromptPort::new(inner, Arc::new(dispatcher), tenant())
+            .with_materialization_sink(Arc::clone(&sink) as _);
+
+        let bundle = wrapped
+            .build_prompt_bundle(default_request())
+            .await
+            .expect("ok");
+        assert_eq!(
+            bundle.messages.len(),
+            1,
+            "metadata patch is skipped; only the snippet produces a message"
+        );
+        let content_ref = bundle.messages[0].content_ref.as_str();
+        let (role, materialized) = sink
+            .get(content_ref)
+            .expect("snippet must have been materialized under its own ref");
+        assert_eq!(role, "user", "Installed-tier role attenuation still holds");
+        assert!(
+            materialized.contains("load-bearing snippet text"),
+            "materialized content must be the snippet's wrapped body, not \
+             the metadata patch's body; got: {materialized:?}"
         );
     }
 

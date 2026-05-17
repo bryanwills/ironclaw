@@ -4006,10 +4006,13 @@ dependencies = [
  "ironclaw_gateway",
  "ironclaw_host_api",
  "ironclaw_llm",
+ "ironclaw_loop_support",
+ "ironclaw_memory",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_tui",
+ "ironclaw_turns",
  "json5",
  "jsonschema",
  "jsonwebtoken",
@@ -4070,6 +4073,24 @@ dependencies = [
  "webpki-roots 0.26.11",
  "zbus",
  "zip",
+]
+
+[[package]]
+name = "ironclaw_agent_loop"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "futures",
+ "ironclaw_agent_loop",
+ "ironclaw_host_api",
+ "ironclaw_turns",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -4269,11 +4290,14 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_safety",
  "libsql",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4420,10 +4444,14 @@ name = "ironclaw_loop_support"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_memory",
  "ironclaw_skills",
  "ironclaw_threads",
  "ironclaw_turns",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4528,9 +4556,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_extensions",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
- "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4561,13 +4589,17 @@ dependencies = [
  "async-trait",
  "chrono",
  "ironclaw_host_api",
+ "ironclaw_loop_support",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
+ "ironclaw_reborn",
  "ironclaw_threads",
  "ironclaw_turns",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -4586,6 +4618,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
+ "ironclaw_agent_loop",
  "ironclaw_authorization",
  "ironclaw_event_projections",
  "ironclaw_events",
@@ -4651,10 +4684,13 @@ dependencies = [
  "ironclaw_turns",
  "libsql",
  "secrecy",
+ "serde",
+ "serde_json",
  "tempfile",
  "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4952,11 +4988,27 @@ dependencies = [
  "hmac 0.12.1",
  "http 1.4.0",
  "ironclaw_product_adapters",
+ "ironclaw_wasm_sandbox_core",
+ "serde_json",
  "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wasmtime",
+ "wat",
+ "wit-component 0.245.1",
+ "wit-parser 0.245.1",
+]
+
+[[package]]
+name = "ironclaw_wasm_sandbox_core"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tracing",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
@@ -7678,6 +7730,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "ryu-js"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6518fc26bced4d53678a22d6e423e9d8716377def84545fe328236e3af070e7f"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7921,6 +7979,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "serde_jcs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3a60f3fda61525e439ef6d67422118f11e986566997d9021c56867ad814a0aa"
+dependencies = [
+ "ryu-js",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -53,6 +53,17 @@ pub const MAX_HOOKS_PER_EXTENSION_PER_KIND: usize = 8;
 pub struct HookRegistrar {
     evaluator: Arc<PredicateEvaluator>,
     wasm_runtime: Option<Arc<WasmHookRuntime>>,
+    /// Grant tokens the host has verified for the current extension.
+    /// `HookManifestEntry::requires_grant` is checked against this set
+    /// at install time — a manifest claiming `requires_grant = "X"` is
+    /// only accepted when `X` is in the verified set. Empty by default
+    /// (default-deny): a manifest with any `requires_grant` is rejected
+    /// unless callers explicitly thread the verified grants through
+    /// [`Self::with_verified_grants`]. Closes the trust-boundary gap
+    /// serrrfirat P1 #1 on PR #3573 flagged: previously the registrar
+    /// validated only that the field was *set*, not that the host had
+    /// actually issued the grant.
+    verified_grants: std::collections::HashSet<String>,
 }
 
 impl HookRegistrar {
@@ -60,11 +71,24 @@ impl HookRegistrar {
         Self {
             evaluator,
             wasm_runtime: None,
+            verified_grants: std::collections::HashSet::new(),
         }
     }
 
     pub fn with_wasm_runtime(mut self, runtime: Arc<WasmHookRuntime>) -> Self {
         self.wasm_runtime = Some(runtime);
+        self
+    }
+
+    /// Attach the set of grant tokens the host has verified for the
+    /// extension being installed. Required for `same_tenant`-scoped
+    /// hooks (and any other manifest entry declaring `requires_grant`)
+    /// to install successfully. The host should populate this from its
+    /// extension-grants store after authenticating the installing
+    /// extension's grants.
+    #[must_use]
+    pub fn with_verified_grants(mut self, grants: impl IntoIterator<Item = String>) -> Self {
+        self.verified_grants = grants.into_iter().collect();
         self
     }
 
@@ -172,6 +196,23 @@ impl HookRegistrar {
                 entry.id, e
             ))
         })?;
+
+        // serrrfirat P1 #1 on PR #3573: enforce verified-grant binding.
+        // `validate()` only confirmed the field is present; the registrar
+        // must now confirm the host has actually issued that grant.
+        // Default-deny: an empty `verified_grants` set rejects any
+        // manifest claiming `requires_grant`.
+        if let Some(grant) = entry.requires_grant.as_ref()
+            && !self.verified_grants.contains(grant)
+        {
+            return Err(HookError::RegistryConstruction(format!(
+                "manifest entry `{}` declares `requires_grant = {:?}` but the \
+                 host has not verified this grant for the installing extension; \
+                 wire `HookRegistrar::with_verified_grants` from the extension \
+                 grants store before installing",
+                entry.id, grant
+            )));
+        }
 
         let hook_version = HookVersion::ONE;
         let binding_scope = manifest_scope_to_binding_scope(entry.scope);
@@ -418,6 +459,70 @@ mod tests {
         assert!(matches!(err, HookError::RegistryConstruction(_)));
     }
 
+    /// End-to-end registrar test for `DenyWithCode`: a manifest carrying
+    /// `OnExceededAction::DenyWithCode { code, reason }` installs cleanly
+    /// AND dispatches with the code's static label as the model-visible
+    /// reason. Bridges the gap codex flagged: prior tests covered the
+    /// enum serde + direct hook evaluation; this one drives the full
+    /// install-then-dispatch path the registrar exposes.
+    #[tokio::test]
+    async fn install_deny_with_code_manifest_surfaces_code_label_on_dispatch() {
+        use crate::predicate::{DenyReasonCode, OnExceededAction, ValueOrRateBound};
+
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
+        let builder = HookDispatcherBuilder::new(HookRegistry::new());
+        let entry = HookManifestEntry {
+            id: HookLocalId("rate-cap-with-code".to_string()),
+            kind: HookManifestKind::BeforeCapability,
+            scope: HookManifestScope::OwnCapabilities,
+            phase: HookPhase::Policy,
+            priority: HookPriority::DEFAULT,
+            description: None,
+            requires_grant: None,
+            body: HookManifestBody::Predicate {
+                spec: HookPredicateSpec::RateOrValueCap {
+                    when: CapabilityPredicate::NameEquals {
+                        name: "polymarket.place_order".to_string(),
+                    },
+                    bound: ValueOrRateBound::InvocationCount {
+                        max: 0,
+                        window: "1h".to_string(),
+                    },
+                    on_exceeded: OnExceededAction::DenyWithCode {
+                        code: DenyReasonCode::RateLimit,
+                        reason: "audit-only".to_string(),
+                    },
+                },
+            },
+        };
+        let (builder, ids) = registrar
+            .install(extension(), "0.4.2".to_string(), vec![entry], builder)
+            .expect("install ok");
+        assert_eq!(ids.len(), 1);
+        let dispatcher = builder.build_arc();
+
+        let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+        let ctx = BeforeCapabilityHookContext::new(
+            tenant,
+            "polymarket.place_order".to_string(),
+            [0u8; 32],
+            crate::points::SanitizedArguments::unresolved(),
+            Some(extension()),
+        );
+        let outcome = dispatcher.dispatch_before_capability(&ctx).await;
+        match outcome.decision.view() {
+            crate::kinds::gate::GateDecisionView::Deny { reason } => {
+                assert_eq!(
+                    reason.as_str(),
+                    "hook_rate_limit",
+                    "DenyWithCode manifest must surface the code's label \
+                     (hook_rate_limit) through the registrar→dispatcher path"
+                );
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn install_returns_hook_ids_in_input_order() {
         let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
@@ -560,7 +665,8 @@ mod tests {
     async fn installer_propagates_owning_extension_and_scope_from_manifest() {
         // Two entries, distinct manifest scopes; assert each is reflected in
         // the resulting `HookBinding`.
-        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()))
+            .with_verified_grants(["cross_extension_observation".to_string()]);
         let builder = HookDispatcherBuilder::new(HookRegistry::new());
 
         let mut own = predicate_entry("own-scope");
@@ -617,5 +723,66 @@ mod tests {
             tenant_binding.owning_extension.as_ref(),
             Some(&host_extension)
         );
+    }
+
+    /// serrrfirat P1 #1 regression on PR #3573: a manifest declaring
+    /// `requires_grant` must NOT install when the host has not verified
+    /// that grant for the extension. Previously the manifest's mere
+    /// presence of the field was sufficient — anyone could write
+    /// `requires_grant = "anything"` and get a cross-extension binding.
+    #[tokio::test]
+    async fn install_rejects_same_tenant_without_verified_grant() {
+        // Registrar with NO verified grants — default-deny.
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
+        let builder = HookDispatcherBuilder::new(HookRegistry::new());
+
+        let mut tenant_scope = predicate_entry("tenant-scope-no-grant");
+        tenant_scope.scope = HookManifestScope::SameTenant;
+        tenant_scope.requires_grant = Some("cross_extension_observation".to_string());
+
+        let err = registrar
+            .install(
+                extension(),
+                "0.1.0".to_string(),
+                vec![tenant_scope],
+                builder,
+            )
+            .expect_err("install must reject when the host has not verified the requested grant");
+        match err {
+            HookError::RegistryConstruction(msg) => {
+                assert!(
+                    msg.contains("cross_extension_observation"),
+                    "error must cite the missing grant; got: {msg}"
+                );
+                assert!(
+                    msg.contains("requires_grant"),
+                    "error must cite the manifest field; got: {msg}"
+                );
+            }
+            other => panic!("expected RegistryConstruction, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn install_rejects_same_tenant_when_verified_grants_mismatch() {
+        // Registrar with a verified grant, but the manifest asks for a
+        // different one — still rejected.
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()))
+            .with_verified_grants(["some_other_grant".to_string()]);
+        let builder = HookDispatcherBuilder::new(HookRegistry::new());
+
+        let mut tenant_scope = predicate_entry("tenant-scope-wrong-grant");
+        tenant_scope.scope = HookManifestScope::SameTenant;
+        tenant_scope.requires_grant = Some("cross_extension_observation".to_string());
+
+        let err = registrar
+            .install(
+                extension(),
+                "0.1.0".to_string(),
+                vec![tenant_scope],
+                builder,
+            )
+            .expect_err("install must reject when the requested grant is not in the verified set");
+        assert!(matches!(err, HookError::RegistryConstruction(_)));
     }
 }

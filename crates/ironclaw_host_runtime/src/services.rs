@@ -24,7 +24,7 @@ use ironclaw_dispatcher::{
 };
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
-    InMemoryAuditSink, InMemoryEventSink,
+    InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 #[cfg(feature = "libsql")]
@@ -73,8 +73,8 @@ use ironclaw_turns::LibSqlTurnStateStore;
 #[cfg(feature = "postgres")]
 use ironclaw_turns::PostgresTurnStateStore;
 use ironclaw_turns::{
-    DefaultTurnCoordinator, InMemoryTurnStateStore, NoopTurnRunWakeNotifier, TurnRunWakeNotifier,
-    TurnStateStore, runner::TurnRunTransitionPort,
+    DefaultTurnCoordinator, InMemoryTurnStateStore, NoopTurnRunWakeNotifier, RunProfileResolver,
+    TurnRunWakeNotifier, TurnStateStore, runner::TurnRunTransitionPort,
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
@@ -169,6 +169,7 @@ pub enum ProductionWiringComponent {
     WasmRuntime,
     FirstPartyRuntime,
     TurnState,
+    RunProfileResolver,
     TurnRunWakeNotifier,
 }
 
@@ -194,6 +195,7 @@ impl ProductionWiringComponent {
             Self::WasmRuntime => "wasm_runtime",
             Self::FirstPartyRuntime => "first_party_runtime",
             Self::TurnState => "turn_state",
+            Self::RunProfileResolver => "run_profile_resolver",
             Self::TurnRunWakeNotifier => "turn_run_wake_notifier",
         }
     }
@@ -275,6 +277,7 @@ struct ProductionComponentTypes {
     mcp_runtime: Option<ProductionComponentType>,
     first_party_runtime: Option<ProductionComponentType>,
     turn_state: Option<ProductionComponentType>,
+    run_profile_resolver: Option<ProductionComponentType>,
     turn_run_transition_port: Option<ProductionComponentType>,
     turn_run_transition_port_verified: bool,
     turn_run_wake_notifier: Option<ProductionComponentType>,
@@ -324,7 +327,9 @@ fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
             || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
             || type_id == TypeId::of::<InMemoryCapabilityLeaseStore>()
             || type_id == TypeId::of::<InMemoryEventSink>()
+            || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()
+            || type_id == TypeId::of::<InMemoryDurableAuditLog>()
             || type_id == TypeId::of::<InMemorySecretStore>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
@@ -381,6 +386,7 @@ where
     first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
     wasm_runtime: Option<Arc<WasmRuntimeAdapter>>,
     turn_state: Option<Arc<dyn TurnStateStore>>,
+    run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     component_types: ProductionComponentTypes,
@@ -411,7 +417,7 @@ where
         ));
         Self {
             registry,
-            trust_policy: Arc::new(HostTrustPolicy::empty()),
+            trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
             trust_policy_configured: false,
             filesystem,
             governor,
@@ -436,6 +442,7 @@ where
             first_party_runtime: None,
             wasm_runtime: None,
             turn_state: None,
+            run_profile_resolver: None,
             turn_run_transition_port: None,
             turn_run_wake_notifier: None,
             component_types: ProductionComponentTypes {
@@ -460,6 +467,7 @@ where
                 mcp_runtime: None,
                 first_party_runtime: None,
                 turn_state: None,
+                run_profile_resolver: None,
                 turn_run_transition_port: None,
                 turn_run_transition_port_verified: false,
                 turn_run_wake_notifier: None,
@@ -499,6 +507,7 @@ where
             first_party_runtime,
             wasm_runtime,
             turn_state,
+            run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
             mut component_types,
@@ -531,6 +540,7 @@ where
             first_party_runtime,
             wasm_runtime,
             turn_state,
+            run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
             component_types,
@@ -585,6 +595,7 @@ where
             first_party_runtime,
             wasm_runtime,
             turn_state,
+            run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
             mut component_types,
@@ -627,6 +638,7 @@ where
             first_party_runtime,
             wasm_runtime,
             turn_state,
+            run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
             component_types,
@@ -665,7 +677,7 @@ where
 
     /// Attaches the host-owned trust policy used by the produced
     /// [`DefaultHostRuntime`]. Without this, the service graph keeps the
-    /// default empty policy and capability dispatch fails closed.
+    /// default fail-closed policy and capability dispatch is denied.
     pub fn with_trust_policy<T>(mut self, trust_policy: Arc<T>) -> Self
     where
         T: TrustPolicy + 'static,
@@ -814,6 +826,15 @@ where
         self.component_types.turn_run_transition_port = Some(ProductionComponentType::of::<T>());
         self.component_types.turn_run_transition_port_verified = false;
         self.turn_run_transition_port = Some(transition_port);
+        self
+    }
+
+    pub fn with_run_profile_resolver<T>(mut self, resolver: Arc<T>) -> Self
+    where
+        T: RunProfileResolver + 'static,
+    {
+        self.component_types.run_profile_resolver = Some(ProductionComponentType::of::<T>());
+        self.run_profile_resolver = Some(resolver);
         self
     }
 
@@ -1119,6 +1140,11 @@ where
         );
         self.push_missing(
             &mut issues,
+            ProductionWiringComponent::RunProfileResolver,
+            self.run_profile_resolver.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
             ProductionWiringComponent::TurnRunWakeNotifier,
             self.turn_run_wake_notifier.is_some(),
         );
@@ -1406,6 +1432,13 @@ where
                 None,
             ));
         };
+        let Some(run_profile_resolver) = self.run_profile_resolver.as_ref() else {
+            return Err(production_wiring_report(
+                ProductionWiringComponent::RunProfileResolver,
+                ProductionWiringIssueKind::Missing,
+                None,
+            ));
+        };
         let Some(notifier) = self.turn_run_wake_notifier.as_ref() else {
             return Err(production_wiring_report(
                 ProductionWiringComponent::TurnRunWakeNotifier,
@@ -1414,6 +1447,7 @@ where
             ));
         };
         Ok(DefaultTurnCoordinator::new(Arc::clone(turn_state))
+            .with_run_profile_resolver(Arc::clone(run_profile_resolver))
             .with_wake_notifier(Arc::clone(notifier)))
     }
 
@@ -1482,6 +1516,11 @@ where
             &mut issues,
             ProductionWiringComponent::TurnState,
             self.turn_state.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::RunProfileResolver,
+            self.run_profile_resolver.is_some(),
         );
         self.push_missing(
             &mut issues,
@@ -1882,7 +1921,7 @@ struct FirstPartyRuntimeAdapter {
 }
 
 impl FirstPartyRuntimeAdapter {
-    pub fn from_registry(
+    pub(crate) fn from_registry(
         registry: Arc<FirstPartyCapabilityRegistry>,
         filesystem: Arc<dyn RootFilesystem>,
     ) -> Self {
@@ -1998,7 +2037,7 @@ struct WasmRuntimeAdapter {
 }
 
 impl WasmRuntimeAdapter {
-    pub fn new(
+    pub(crate) fn new(
         runtime: WitToolRuntime,
         host: WitToolHost,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
@@ -2015,7 +2054,7 @@ impl WasmRuntimeAdapter {
         }
     }
 
-    pub fn try_new(
+    pub(crate) fn try_new(
         config: WitToolRuntimeConfig,
         host: WitToolHost,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
@@ -2145,7 +2184,7 @@ struct RuntimeDispatchProcessExecutor {
 }
 
 impl RuntimeDispatchProcessExecutor {
-    pub fn new(dispatcher: Arc<dyn CapabilityDispatcher>) -> Self {
+    pub(crate) fn new(dispatcher: Arc<dyn CapabilityDispatcher>) -> Self {
         Self { dispatcher }
     }
 }

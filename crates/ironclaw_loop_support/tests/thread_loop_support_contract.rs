@@ -6,11 +6,13 @@ use std::sync::{
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
-    EmptyLoopCapabilityPort, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostSkillContextBuildError, HostSkillContextCandidate,
-    HostSkillContextSource, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot,
+    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
+    HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
+    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityBudget,
+    IdentityFileName, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -33,8 +35,9 @@ use ironclaw_turns::{
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle, LoopContextMessage,
         LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopHostMilestoneKind,
         LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopPromptPort, LoopRunContext, LoopTranscriptPort,
-        ParentLoopOutput, PromptSkillContextMetadata, SkillVisibility, UpdateAssistantDraft,
+        LoopModelRouteSnapshot, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
+        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput, PromptMode,
+        PromptSkillContextMetadata, SkillVisibility, UpdateAssistantDraft,
         VisibleCapabilityRequest,
     },
 };
@@ -54,6 +57,7 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -63,7 +67,11 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
     assert_eq!(bundle.messages[0].safe_summary, "user message available");
     assert!(!bundle.messages[0].safe_summary.contains("hello reborn"));
     assert_eq!(
-        bundle.messages[0].message_ref.as_str(),
+        bundle.messages[0]
+            .message_ref
+            .as_ref()
+            .expect("message_ref")
+            .as_str(),
         format!("msg:{}", fixture.user_message_id).as_str()
     );
     assert!(bundle.memory_snippets.is_empty());
@@ -96,6 +104,7 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -110,6 +119,8 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
     assert!(
         bundle.messages[0]
             .message_ref
+            .as_ref()
+            .expect("message_ref")
             .as_str()
             .starts_with("msg:summary-")
     );
@@ -142,6 +153,7 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_m
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -159,6 +171,243 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_m
             .contains("Use alpha prompt content.")
     );
     assert!(!bundle.instruction_snippets[0].safe_summary.contains("/tmp"));
+}
+
+#[tokio::test]
+async fn context_port_populates_identity_when_source_set() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![trusted_identity(
+        "AGENTS.md",
+        "agent instructions",
+        IdentityApplicability::Always,
+    )]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_identity_context_source(source);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.identity_messages.len(), 1);
+    assert_eq!(
+        bundle.identity_messages[0].safe_summary,
+        "identity file AGENTS.md available"
+    );
+    assert!(bundle.identity_messages[0].message_ref.is_some());
+}
+
+#[tokio::test]
+async fn context_port_applies_identity_budget_to_trusted_content() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![trusted_identity(
+        "AGENTS.md",
+        "trusted identity content that exceeds the tiny budget",
+        IdentityApplicability::Always,
+    )]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_identity_context_source(source)
+    .with_identity_budget(IdentityBudget::new(4).unwrap());
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert!(bundle.identity_messages.is_empty());
+}
+
+#[tokio::test]
+async fn context_port_empty_identity_when_source_unset() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert!(bundle.identity_messages.is_empty());
+}
+
+#[tokio::test]
+async fn context_port_caches_stable_identity_within_run() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![trusted_identity(
+        "AGENTS.md",
+        "agent instructions",
+        IdentityApplicability::Always,
+    )]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_identity_context_source(source.clone());
+
+    let first = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+    let second = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.identity_messages, second.identity_messages);
+    assert_eq!(source.load_calls(), 1);
+}
+
+#[tokio::test]
+async fn context_port_caches_identity_candidates_per_prompt_mode() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(ModeAwareIdentityContextSource::new(
+        Vec::new(),
+        vec![
+            trusted_identity(
+                "TOOLS.md",
+                "codeact-only tool identity",
+                IdentityApplicability::OnCodeAct,
+            )
+            .0,
+        ],
+    ));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_identity_context_source(source.clone());
+
+    let text_only = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+    let codeact = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::CodeAct,
+        })
+        .await
+        .unwrap();
+
+    assert!(text_only.identity_messages.is_empty());
+    assert_eq!(codeact.identity_messages.len(), 1);
+    assert_eq!(
+        codeact.identity_messages[0].safe_summary,
+        "identity file TOOLS.md available"
+    );
+    assert_eq!(source.load_calls(), 2);
+}
+
+#[tokio::test]
+async fn prompt_and_model_ports_materialize_trusted_identity_content() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![trusted_identity(
+        "AGENTS.md",
+        "trusted identity content",
+        IdentityApplicability::Always,
+    )]));
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_identity_context_source(source.clone()),
+    );
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let prompt_port =
+        HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones)
+            .with_instruction_materialization_store(materialization_store);
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: None,
+            inline_messages: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(prompt_bundle.messages[0].role, "system");
+    assert!(
+        prompt_bundle.messages[0]
+            .content_ref
+            .as_str()
+            .starts_with("msg:identity.agents.md.")
+    );
+
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_identity_context_source(source);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(
+        calls[0].messages[0].role,
+        HostManagedModelMessageRole::System
+    );
+    assert_eq!(calls[0].messages[0].content, "trusted identity content");
 }
 
 #[tokio::test]
@@ -193,6 +442,7 @@ async fn thread_context_port_filters_skill_visibility_and_installed_prompt_conte
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -269,6 +519,7 @@ async fn thread_context_port_ignores_malformed_hidden_skill_content() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -303,6 +554,7 @@ async fn thread_context_port_fails_closed_when_visible_skill_content_is_missing(
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -336,6 +588,7 @@ async fn thread_context_port_fails_closed_when_skill_policy_data_is_missing() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -377,6 +630,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -432,13 +686,14 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
     let context_port = Arc::new(StaticLoopContextPort {
         bundle: LoopContextBundle {
             identity_messages: vec![LoopContextMessage {
-                message_ref: LoopMessageRef::new("msg:identity-policy").unwrap(),
+                message_ref: Some(LoopMessageRef::new("msg:identity-policy").unwrap()),
                 role: "system".to_string(),
                 safe_summary: "identity policy summary".to_string(),
             }],
             messages: vec![LoopContextMessage {
-                message_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
+                message_ref: Some(
+                    LoopMessageRef::new(format!("msg:{}", fixture.user_message_id)).unwrap(),
+                ),
                 role: "user".to_string(),
                 safe_summary: "user message available".to_string(),
             }],
@@ -465,6 +720,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -543,6 +799,7 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -602,6 +859,7 @@ async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -665,6 +923,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -730,6 +989,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -779,6 +1039,7 @@ async fn thread_context_port_rejects_non_origin_context_cursor() {
                 LoopInputCursorToken::new("input-cursor:after-first-input").unwrap(),
             )),
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -802,6 +1063,7 @@ async fn thread_ports_reject_thread_scope_mismatch_before_thread_access() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -832,6 +1094,7 @@ async fn context_port_rejects_cursor_from_another_run() {
                 LoopInputCursorToken::new("input-cursor:foreign-run").unwrap(),
             )),
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -1199,14 +1462,12 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
         gateway.clone(),
         16,
     );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     let response = port
         .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
+            messages,
             surface_version: None,
             model_preference: None,
         })
@@ -1247,12 +1508,11 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
         gateway.clone(),
         16,
     );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     port.stream_model(LoopModelRequest {
-        messages: vec![LoopModelMessage {
-            role: "user".to_string(),
-            content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id)).unwrap(),
-        }],
+        messages,
         surface_version: None,
         model_preference: None,
     })
@@ -1290,12 +1550,11 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
         gateway.clone(),
         1,
     );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     port.stream_model(LoopModelRequest {
-        messages: vec![LoopModelMessage {
-            role: "user".to_string(),
-            content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id)).unwrap(),
-        }],
+        messages,
         surface_version: None,
         model_preference: None,
     })
@@ -1336,6 +1595,7 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1366,11 +1626,12 @@ async fn model_port_round_trips_tool_result_reference_context_as_system_model_in
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
         })
         .await
         .unwrap();
     assert_eq!(context.messages[0].role, "tool_result_reference");
-    assert_eq!(context.messages[0].message_ref, tool_result_ref);
+    assert_eq!(context.messages[0].message_ref, Some(tool_result_ref));
 
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
     let model_port = ThreadBackedLoopModelPort::new(
@@ -1380,17 +1641,21 @@ async fn model_port_round_trips_tool_result_reference_context_as_system_model_in
         gateway.clone(),
         16,
     );
+    let messages = context
+        .messages
+        .into_iter()
+        .filter_map(|message| {
+            message.message_ref.map(|content_ref| LoopModelMessage {
+                role: message.role,
+                content_ref,
+            })
+        })
+        .collect::<Vec<_>>();
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     model_port
         .stream_model(LoopModelRequest {
-            messages: context
-                .messages
-                .into_iter()
-                .map(|message| LoopModelMessage {
-                    role: message.role,
-                    content_ref: message.message_ref,
-                })
-                .collect(),
+            messages,
             surface_version: None,
             model_preference: None,
         })
@@ -1423,14 +1688,12 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
         16,
         milestone_sink.clone(),
     );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     let response = port
         .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
+            messages,
             surface_version: None,
             model_preference: Some(
                 fixture
@@ -1487,14 +1750,12 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
         16,
         milestone_sink.clone(),
     );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     let error = port
         .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
+            messages,
             surface_version: None,
             model_preference: None,
         })
@@ -1545,14 +1806,12 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
         16,
         milestone_sink.clone(),
     );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     let response = port
         .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
+            messages,
             surface_version: None,
             model_preference: None,
         })
@@ -1586,14 +1845,12 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
         16,
         milestone_sink.clone(),
     );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     let response = port
         .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
+            messages,
             surface_version: None,
             model_preference: None,
         })
@@ -1622,14 +1879,15 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
         gateway.clone(),
         16,
     );
+    let messages = vec![LoopModelMessage {
+        role: "system".to_string(),
+        content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id)).unwrap(),
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     let error = port
         .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "system".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
+            messages,
             surface_version: None,
             model_preference: None,
         })
@@ -1651,14 +1909,12 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
         gateway,
         16,
     );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     let error = port
         .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
+            messages,
             surface_version: None,
             model_preference: None,
         })
@@ -1683,14 +1939,12 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
         gateway,
         16,
     );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
 
     let error = port
         .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
+            messages,
             surface_version: None,
             model_preference: None,
         })
@@ -1746,6 +2000,118 @@ impl HostSkillContextSource for StaticSkillContextSource {
     }
 }
 
+#[derive(Clone)]
+struct StaticIdentityContextSource {
+    candidates: Vec<HostIdentityContextCandidate>,
+    content_by_ref: std::collections::HashMap<String, HostIdentityMessageContent>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl StaticIdentityContextSource {
+    fn new(candidates: Vec<(HostIdentityContextCandidate, String)>) -> Self {
+        let mut context_candidates = Vec::with_capacity(candidates.len());
+        let mut content_by_ref = std::collections::HashMap::new();
+        for (candidate, content) in candidates {
+            if let Some(message_ref) = candidate.message_ref.as_ref() {
+                content_by_ref.insert(
+                    message_ref.as_str().to_string(),
+                    HostIdentityMessageContent {
+                        name: candidate.name.clone(),
+                        content,
+                    },
+                );
+            }
+            context_candidates.push(candidate);
+        }
+        Self {
+            candidates: context_candidates,
+            content_by_ref,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn load_calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+struct ModeAwareIdentityContextSource {
+    text_only: Vec<HostIdentityContextCandidate>,
+    codeact: Vec<HostIdentityContextCandidate>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl ModeAwareIdentityContextSource {
+    fn new(
+        text_only: Vec<HostIdentityContextCandidate>,
+        codeact: Vec<HostIdentityContextCandidate>,
+    ) -> Self {
+        Self {
+            text_only,
+            codeact,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn load_calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl HostIdentityContextSource for ModeAwareIdentityContextSource {
+    async fn load_identity_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        mode: PromptMode,
+    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match mode {
+            PromptMode::TextOnly => Ok(self.text_only.clone()),
+            PromptMode::CodeAct => Ok(self.codeact.clone()),
+        }
+    }
+}
+
+#[async_trait]
+impl HostIdentityContextSource for StaticIdentityContextSource {
+    async fn load_identity_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        _mode: PromptMode,
+    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.candidates.clone())
+    }
+
+    async fn resolve_identity_message_content(
+        &self,
+        _run_context: &LoopRunContext,
+        message_ref: &LoopMessageRef,
+    ) -> Result<Option<HostIdentityMessageContent>, HostIdentityContextBuildError> {
+        Ok(self.content_by_ref.get(message_ref.as_str()).cloned())
+    }
+}
+
+fn trusted_identity(
+    name: &str,
+    content: &str,
+    applies_when: IdentityApplicability,
+) -> (HostIdentityContextCandidate, String) {
+    let name = IdentityFileName::new(name).unwrap();
+    let message_ref = identity_message_ref(&name, content).unwrap();
+    (
+        HostIdentityContextCandidate::new_trusted(
+            name.clone(),
+            message_ref,
+            format!("identity file {} available", name.as_str()),
+            applies_when,
+            content.len(),
+        ),
+        content.to_string(),
+    )
+}
+
 struct MutableSkillContextSource {
     candidates: Mutex<Vec<HostSkillContextCandidate>>,
 }
@@ -1776,6 +2142,27 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
     format!(
         "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [{name}]\n---\n\n{prompt}\n"
     )
+}
+
+fn user_model_messages(fixture: &ThreadFixture) -> Vec<LoopModelMessage> {
+    vec![LoopModelMessage {
+        role: "user".to_string(),
+        content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id)).unwrap(),
+    }]
+}
+
+fn issue_prompt_grant(context: &LoopRunContext, messages: &[LoopModelMessage]) {
+    let bundle = LoopPromptBundle {
+        bundle_ref: LoopPromptBundleRef::for_run(context, "test-bundle").unwrap(),
+        messages: messages.to_vec(),
+        surface_version: None,
+        instruction_fingerprint: None,
+        identity_message_count: 0,
+        instruction_snippet_count: 0,
+    };
+    LoopPromptBundleAuthority::shared()
+        .issue_bundle(context, &bundle)
+        .unwrap();
 }
 
 struct ThreadFixture {

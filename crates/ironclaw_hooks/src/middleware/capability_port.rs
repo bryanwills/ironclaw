@@ -113,15 +113,15 @@ impl HookedLoopCapabilityPort {
         self
     }
 
-    async fn hook_context(&self, invocation: &CapabilityInvocation) -> BeforeCapabilityHookContext {
+    async fn hook_context(
+        &self,
+        invocation: &CapabilityInvocation,
+        provider: Option<ironclaw_host_api::ExtensionId>,
+    ) -> BeforeCapabilityHookContext {
         let arguments = match self.resolver.resolve(invocation).await {
             Some(value) => SanitizedArguments::from_json(value),
             None => SanitizedArguments::unresolved(),
         };
-        let provider = self
-            .provider_resolver
-            .provider_for(&invocation.capability_id.to_string())
-            .await;
         BeforeCapabilityHookContext::new(
             self.tenant_id.clone(),
             invocation.capability_id.to_string(),
@@ -134,8 +134,9 @@ impl HookedLoopCapabilityPort {
     async fn run_dispatch(
         &self,
         invocation: &CapabilityInvocation,
+        provider: Option<ironclaw_host_api::ExtensionId>,
     ) -> BeforeCapabilityDispatchOutcome {
-        let ctx = self.hook_context(invocation).await;
+        let ctx = self.hook_context(invocation, provider).await;
         self.dispatcher.dispatch_before_capability(&ctx).await
     }
 }
@@ -156,7 +157,11 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        let outcome = self.run_dispatch(&request).await;
+        let provider = self
+            .provider_resolver
+            .provider_for(&request.capability_id.to_string())
+            .await;
+        let outcome = self.run_dispatch(&request, provider.clone()).await;
         let result = match self.decision_to_outcome(&outcome).await {
             Some(translated) => Ok(translated),
             None => self.inner.invoke_capability(request).await,
@@ -164,12 +169,15 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         // Fire AfterCapability observers regardless of whether the hook
         // short-circuited or the inner port ran. Observer-only point — no
         // gate decisions composed here. Telemetry must reflect both denied
-        // and allowed invocations.
+        // and allowed invocations. The resolved provider is threaded so the
+        // dispatcher can enforce `OwnCapabilities` scope on Installed
+        // observers (serrrfirat finding #3).
         let _ = self
             .dispatcher
-            .dispatch_observer_at(
+            .dispatch_observer_at_with_provider(
                 crate::registry::HookPointSpec::AfterCapability,
                 self.tenant_id.clone(),
+                provider,
             )
             .await;
         result
@@ -192,21 +200,34 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
             if stopped_on_suspension {
                 break;
             }
-            let dispatch = self.run_dispatch(&invocation).await;
-            let outcome = match self.decision_to_outcome(&dispatch).await {
-                Some(translated) => translated,
-                None => self.inner.invoke_capability(invocation).await?,
-            };
+            let provider = self
+                .provider_resolver
+                .provider_for(&invocation.capability_id.to_string())
+                .await;
+            let dispatch = self.run_dispatch(&invocation, provider.clone()).await;
+            // Capture the inner result (Ok or Err) before dispatching
+            // AfterCapability observers — propagating an error with `?`
+            // here would skip observers for failed batch entries, which
+            // is inconsistent with the single-invocation path and hides
+            // failures from audit/telemetry (serrrfirat P2 #3, PR #3573).
+            let invocation_result: Result<CapabilityOutcome, AgentLoopHostError> =
+                match self.decision_to_outcome(&dispatch).await {
+                    Some(translated) => Ok(translated),
+                    None => self.inner.invoke_capability(invocation).await,
+                };
             // Fire AfterCapability observers per batch entry, mirroring the
-            // single-invocation path. Telemetry must reflect every batched
-            // invocation regardless of whether the hook short-circuited.
+            // single-invocation path. The provider is resolved per-invocation
+            // so the dispatcher can enforce `OwnCapabilities` scope on
+            // Installed observers (serrrfirat finding #3).
             let _ = self
                 .dispatcher
-                .dispatch_observer_at(
+                .dispatch_observer_at_with_provider(
                     crate::registry::HookPointSpec::AfterCapability,
                     self.tenant_id.clone(),
+                    provider,
                 )
                 .await;
+            let outcome = invocation_result?;
             if outcome.is_suspension() && stop_on_first_suspension {
                 stopped_on_suspension = true;
             }
@@ -353,6 +374,7 @@ mod tests {
                     runtime: RuntimeKind::Wasm,
                     safe_name: "cap.x".to_string(),
                     safe_description: "test capability".to_string(),
+                    concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::Exclusive,
                 }],
             })
         }
@@ -369,6 +391,7 @@ mod tests {
                 result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                     .expect("ok"),
                 safe_summary: format!("ran {}", request.capability_id),
+                terminate_hint: false,
             }))
         }
 
@@ -647,6 +670,103 @@ mod tests {
             other => panic!("expected Denied fallback, got {other:?}"),
         }
         assert!(inner.calls().is_empty(), "inner must not be invoked");
+    }
+
+    /// serrrfirat P2 #3 on PR #3573: when an inner-port `invoke_capability`
+    /// in the batch loop returns `Err`, the previous implementation
+    /// propagated the error before dispatching `AfterCapability` observers.
+    /// This dropped failed batch entries from observer telemetry, in
+    /// contrast with the single-invocation path which dispatches observers
+    /// regardless. Pin the fixed behavior: the observer fires for the
+    /// failing entry, and the error still propagates.
+    #[tokio::test]
+    async fn batch_dispatches_after_capability_observers_on_inner_error() {
+        use crate::points::ObserverHookContext;
+        use crate::sink::{ObserverHook, ObserverSink};
+
+        struct FailingPort;
+        #[async_trait]
+        impl LoopCapabilityPort for FailingPort {
+            async fn visible_capabilities(
+                &self,
+                _request: VisibleCapabilityRequest,
+            ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+                unreachable!()
+            }
+            async fn invoke_capability(
+                &self,
+                _request: CapabilityInvocation,
+            ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+                Err(AgentLoopHostError::new(
+                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                    "inner port failed",
+                ))
+            }
+            async fn invoke_capability_batch(
+                &self,
+                _request: CapabilityBatchInvocation,
+            ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+                unreachable!()
+            }
+        }
+
+        struct CountingObserver {
+            seen: Arc<Mutex<u32>>,
+        }
+        #[async_trait]
+        impl ObserverHook for CountingObserver {
+            async fn observe(&self, _ctx: &ObserverHookContext, _sink: &mut dyn ObserverSink) {
+                *self.seen.lock().expect("not poisoned") += 1;
+            }
+        }
+
+        // Dispatcher with only an AfterCapability observer (no before-cap
+        // gate → hooks allow → inner runs and fails).
+        let seen = Arc::new(Mutex::new(0u32));
+        let observer_id = HookId::for_builtin("test::after_cap_obs", HookVersion::ONE);
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(HookBinding {
+                hook_id: observer_id,
+                hook_version: HookVersion::ONE,
+                trust_class: HookTrustClass::Builtin,
+                phase: HookPhase::Telemetry,
+                priority: HookPriority::DEFAULT,
+                point: HookPointSpec::AfterCapability,
+                owning_extension: None,
+                scope: HookBindingScope::Global,
+                poisoned: false,
+            })
+            .expect("ok");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_observer_impl(
+            observer_id,
+            crate::dispatch::ObserverHookImpl::Any(Box::new(CountingObserver {
+                seen: seen.clone(),
+            })),
+        );
+
+        let wrapped =
+            HookedLoopCapabilityPort::new(Arc::new(FailingPort), Arc::new(dispatcher), tenant());
+
+        let batch = CapabilityBatchInvocation {
+            invocations: vec![invocation("cap.x")],
+            stop_on_first_suspension: false,
+        };
+        let err = wrapped
+            .invoke_capability_batch(batch)
+            .await
+            .expect_err("inner err propagates");
+        assert_eq!(
+            err.kind,
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable
+        );
+        assert_eq!(
+            *seen.lock().expect("not poisoned"),
+            1,
+            "AfterCapability observer must fire even when inner port errors \
+             so failed batch entries are visible to telemetry"
+        );
     }
 
     #[tokio::test]
