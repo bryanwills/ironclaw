@@ -1239,6 +1239,31 @@ pub async fn create_response_handler(
         Some(prev_id) => {
             let (_prev_resp, thread) = decode_response_id(prev_id)
                 .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
+            // Cross-tenant authz: `thread_uuid` flows into outbound
+            // tool notifications as `notify_thread_id`. Without this
+            // check, user A could POST `previous_response_id` carrying
+            // user B's thread_uuid and tag outbound notifications with
+            // B's correlation id — callbacks would route back to B's
+            // conversation. Mirror the retrieve-path check at L1994.
+            if let Some(store) = state.store.as_ref() {
+                let owns = store
+                    .conversation_belongs_to_user(thread, &user.user_id)
+                    .await
+                    .map_err(|e| {
+                        api_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to verify ownership: {e}"),
+                            "server_error",
+                        )
+                    })?;
+                if !owns {
+                    return Err(api_error(
+                        StatusCode::NOT_FOUND,
+                        format!("Response '{prev_id}' not found"),
+                        "invalid_request_error",
+                    ));
+                }
+            }
             thread
         }
         None => Uuid::new_v4(),
