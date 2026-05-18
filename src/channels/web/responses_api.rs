@@ -1247,6 +1247,7 @@ pub async fn create_response_handler(
 
     // Each POST gets its own unique response UUID.
     let response_uuid = Uuid::new_v4();
+    let resp_id = encode_response_id(&response_uuid, &thread_uuid);
 
     // Register caller-supplied tools in the engine's per-thread external
     // tool catalog. The engine's `EffectBridgeAdapter` consults this on
@@ -1388,8 +1389,21 @@ pub async fn create_response_handler(
     }
 
     // Build the message for the agent loop.
+    //
+    // `client_thread_id` and `client_response_id` are channel-explicit
+    // opt-ins for the notify-correlation contract: stamping them here
+    // (and only here) is what makes `notify_thread_id` carry the stable
+    // Responses-API thread UUID and `notify_response_id` carry the
+    // per-turn `resp_…` for outbound notifications (see
+    // `abound_send_wire`). Other channels (Telegram, Slack, web) do not
+    // stamp these keys, so tools fall back to the engine `ThreadId` —
+    // matches v1 behavior. `response_id` / `thread_id` keys are also
+    // kept for legacy consumers.
     let mut metadata = serde_json::json!({
         "thread_id": &thread_id_str,
+        "response_id": &resp_id,
+        "client_thread_id": &thread_id_str,
+        "client_response_id": &resp_id,
         "user_id": &user.user_id,
         "source": "responses_api",
     });
@@ -1403,8 +1417,6 @@ pub async fn create_response_handler(
         Some(&thread_id_str),
         metadata,
     );
-
-    let resp_id = encode_response_id(&response_uuid, &thread_uuid);
     let model = req.model.clone();
     let stream = req.stream.unwrap_or(false);
     let user_id = user.user_id.clone();

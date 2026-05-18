@@ -205,6 +205,16 @@ impl ConversationManager {
     /// so the engine reload picks it up. Extending this method to
     /// also write metadata on inject/resume is a future change, not
     /// the current contract.
+    ///
+    /// `client_thread_id` / `client_response_id` are stable channel-
+    /// supplied correlation ids (e.g. the thread UUID embedded in a
+    /// Responses API `previous_response_id`). They flow into thread
+    /// metadata so tools can stamp them on outbound notifications
+    /// (`notify_thread_id` / `notify_response_id`) for async callback
+    /// round-trips. `client_response_id` is refreshed on inject/resume
+    /// (best-effort persist, in-memory thread copy is a turn behind);
+    /// `client_thread_id` is spawn-only — drift on inject/resume is
+    /// logged but not overwritten.
     // Bundling these into an options struct would just push the
     // argument list around without making any caller easier to read —
     // every caller passes literal None for the optional fields and
@@ -219,6 +229,8 @@ impl ConversationManager {
         thread_config: ThreadConfig,
         user_timezone: Option<&str>,
         extra_initial_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+        client_thread_id: Option<&str>,
+        client_response_id: Option<&str>,
     ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
@@ -248,12 +260,40 @@ impl ConversationManager {
                     thread_id = %thread_id,
                     "injecting message into active thread"
                 );
-                // Known limitation: a tz change mid-turn (user travels between
-                // messages of the same active thread) is not propagated. The
-                // running ExecutionLoop holds an in-memory copy of the Thread
-                // and cannot be updated externally without a new signal type.
-                // Updating the persisted record here would not affect the live
-                // step. Rare in practice; defer to a follow-up if needed.
+                // Known limitation: the running loop holds an in-memory Thread
+                // copy; set_thread_metadata writes only reach it on reload, so
+                // tz/client_response_id changes mid-turn are best-effort. Safe
+                // because the thread_uuid half stays stable — a stale
+                // response_uuid still routes previous_response_id correctly.
+                if let Some(rid) = client_response_id
+                    && let Err(e) = self
+                        .thread_manager
+                        .set_thread_metadata(thread_id, "client_response_id", rid)
+                        .await
+                {
+                    debug!(
+                        thread_id = %thread_id,
+                        error = %e,
+                        "failed to refresh client_response_id on inject"
+                    );
+                }
+                // Spawn-only contract; log if a later turn changes it.
+                if let Some(new_cid) = client_thread_id
+                    && let Ok(Some(thread)) = self.store.load_thread(thread_id).await
+                    && let Some(stored) = thread
+                        .metadata
+                        .get("client_thread_id")
+                        .and_then(|v| v.as_str())
+                    && stored != new_cid
+                {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        stored = %stored,
+                        incoming = %new_cid,
+                        phase = "inject",
+                        "client_thread_id drift detected; keeping stored value"
+                    );
+                }
                 self.thread_manager
                     .inject_message(thread_id, user_id, ThreadMessage::user(content))
                     .await?;
@@ -281,6 +321,18 @@ impl ConversationManager {
                         thread_id = %thread_id,
                         error = %e,
                         "failed to refresh user_timezone on resume; thread will use previous value"
+                    );
+                }
+                if let Some(rid) = client_response_id
+                    && let Err(e) = self
+                        .thread_manager
+                        .set_thread_metadata(thread_id, "client_response_id", rid)
+                        .await
+                {
+                    debug!(
+                        thread_id = %thread_id,
+                        error = %e,
+                        "failed to refresh client_response_id on resume; thread will use previous value"
                     );
                 }
                 self.thread_manager
@@ -346,6 +398,18 @@ impl ConversationManager {
                     for (k, v) in extra {
                         initial_metadata.entry(k).or_insert(v);
                     }
+                }
+                if let Some(cid) = client_thread_id {
+                    initial_metadata.insert(
+                        "client_thread_id".into(),
+                        serde_json::Value::String(cid.to_string()),
+                    );
+                }
+                if let Some(rid) = client_response_id {
+                    initial_metadata.insert(
+                        "client_response_id".into(),
+                        serde_json::Value::String(rid.to_string()),
+                    );
                 }
 
                 // Spawn new foreground thread with conversation history.
@@ -905,6 +969,8 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -972,6 +1038,8 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
+                None,
                 None,
                 None,
             )
@@ -1074,6 +1142,8 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1124,6 +1194,8 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 None,
+                None,
+                None,
             )
             .await
         });
@@ -1134,6 +1206,8 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
+                None,
                 None,
                 None,
             )
@@ -1211,6 +1285,8 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
+                None,
                 None,
                 None,
             )
