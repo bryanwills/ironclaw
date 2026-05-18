@@ -251,7 +251,6 @@ async fn build_libsql_production(
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_authorization::LibSqlCapabilityLeaseStore;
     use ironclaw_filesystem::LibSqlRootFilesystem;
-    use ironclaw_secrets::{LibSqlSecretsStore, ScopedSecretsStoreAdapter};
 
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
@@ -259,16 +258,8 @@ async fn build_libsql_production(
     let leases = Arc::new(LibSqlCapabilityLeaseStore::new(Arc::clone(&db)));
     leases.run_migrations().await?;
 
-    let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
-    let legacy_secret_store = Arc::new(LibSqlSecretsStore::new(
-        Arc::clone(&db),
-        Arc::clone(&secret_crypto),
-    ));
-    legacy_secret_store.run_migrations().await?;
-    legacy_secret_store
-        .verify_can_decrypt_existing_secrets()
-        .await?;
-    let secret_store = Arc::new(ScopedSecretsStoreAdapter::new(legacy_secret_store));
+    let secret_store =
+        crate::secret_store::build_libsql_secret_store(Arc::clone(&db), secret_master_key).await?;
 
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
         path_or_url,
@@ -320,7 +311,6 @@ async fn build_postgres_production(
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_authorization::PostgresCapabilityLeaseStore;
     use ironclaw_filesystem::PostgresRootFilesystem;
-    use ironclaw_secrets::{PostgresSecretsStore, ScopedSecretsStoreAdapter};
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
@@ -328,13 +318,8 @@ async fn build_postgres_production(
     let leases = Arc::new(PostgresCapabilityLeaseStore::new(pool.clone()));
     leases.run_migrations().await?;
 
-    let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
-    let legacy_secret_store = Arc::new(PostgresSecretsStore::new(pool.clone(), secret_crypto));
-    legacy_secret_store.run_migrations().await?;
-    legacy_secret_store
-        .verify_can_decrypt_existing_secrets()
-        .await?;
-    let secret_store = Arc::new(ScopedSecretsStoreAdapter::new(legacy_secret_store));
+    let secret_store =
+        crate::secret_store::build_postgres_secret_store(pool.clone(), secret_master_key).await?;
 
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url };
 

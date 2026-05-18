@@ -25,6 +25,8 @@ mod profile;
 mod readiness;
 mod runtime;
 mod runtime_input;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod secret_store;
 
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
@@ -115,8 +117,6 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use async_trait::async_trait;
 use ironclaw_authorization::CapabilityLeaseError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::GrantAuthorizer;
@@ -126,8 +126,6 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_api::{ResourceScope, SecretHandle};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -145,16 +143,9 @@ use ironclaw_resources::PersistentResourceGovernor;
 use ironclaw_resources::PostgresResourceGovernorStore;
 use ironclaw_resources::ResourceError;
 use ironclaw_run_state::RunStateError;
-#[cfg(feature = "libsql")]
-use ironclaw_secrets::LibSqlSecretsStore;
-#[cfg(feature = "postgres")]
-use ironclaw_secrets::PostgresSecretsStore;
 use ironclaw_secrets::SecretError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_secrets::{
-    ScopedSecretsStoreAdapter, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
-    SecretStore, SecretStoreError, SecretsCrypto,
-};
+use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::TrustPolicy;
 use ironclaw_turns::TurnError;
@@ -247,8 +238,12 @@ where
     TPolicy: TrustPolicy + 'static,
     TWake: TurnRunWakeNotifier + 'static,
 {
+    let secret_master_key = config
+        .secret_master_key
+        .ok_or(RebornCompositionError::MissingSecretMasterKey)?;
     let secret_store =
-        build_libsql_secret_store(Arc::clone(&config.database), config.secret_master_key).await?;
+        secret_store::build_libsql_secret_store(Arc::clone(&config.database), secret_master_key)
+            .await?;
 
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
@@ -313,8 +308,11 @@ where
     TPolicy: TrustPolicy + 'static,
     TWake: TurnRunWakeNotifier + 'static,
 {
+    let secret_master_key = config
+        .secret_master_key
+        .ok_or(RebornCompositionError::MissingSecretMasterKey)?;
     let secret_store =
-        build_postgres_secret_store(config.pool.clone(), config.secret_master_key).await?;
+        secret_store::build_postgres_secret_store(config.pool.clone(), secret_master_key).await?;
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(config.pool.clone()));
     filesystem.run_migrations().await?;
@@ -363,107 +361,4 @@ where
         .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)
-}
-
-#[cfg(feature = "libsql")]
-async fn build_libsql_secret_store(
-    database: Arc<libsql::Database>,
-    master_key: Option<SecretMaterial>,
-) -> Result<Arc<SharedSecretStore>, RebornCompositionError> {
-    let crypto = secrets_crypto(master_key)?;
-    let backend = Arc::new(LibSqlSecretsStore::new(database, crypto));
-    backend.run_migrations().await?;
-    backend.verify_can_decrypt_existing_secrets().await?;
-    let store: Arc<dyn SecretStore> = Arc::new(ScopedSecretsStoreAdapter::new(backend));
-    Ok(Arc::new(SharedSecretStore::new(store)))
-}
-
-#[cfg(feature = "postgres")]
-async fn build_postgres_secret_store(
-    pool: deadpool_postgres::Pool,
-    master_key: Option<SecretMaterial>,
-) -> Result<Arc<SharedSecretStore>, RebornCompositionError> {
-    let crypto = secrets_crypto(master_key)?;
-    let backend = Arc::new(PostgresSecretsStore::new(pool, crypto));
-    backend.run_migrations().await?;
-    backend.verify_can_decrypt_existing_secrets().await?;
-    let store: Arc<dyn SecretStore> = Arc::new(ScopedSecretsStoreAdapter::new(backend));
-    Ok(Arc::new(SharedSecretStore::new(store)))
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn secrets_crypto(
-    master_key: Option<SecretMaterial>,
-) -> Result<Arc<SecretsCrypto>, RebornCompositionError> {
-    let master_key = master_key.ok_or(RebornCompositionError::MissingSecretMasterKey)?;
-    Ok(Arc::new(SecretsCrypto::new(master_key)?))
-}
-
-// TODO(#3571): remove this adapter when the host-runtime services builder
-// accepts `Arc<dyn SecretStore>` directly. Until then, this newtype lets the
-// composition root pass a single concrete `SecretStore` impl to both the
-// substrate wiring and any future per-store adapters.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[derive(Clone)]
-struct SharedSecretStore {
-    inner: Arc<dyn SecretStore>,
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-impl SharedSecretStore {
-    fn new(inner: Arc<dyn SecretStore>) -> Self {
-        Self { inner }
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[async_trait]
-impl SecretStore for SharedSecretStore {
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        material: SecretMaterial,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        self.inner.put(scope, handle, material).await
-    }
-
-    async fn metadata(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        self.inner.metadata(scope, handle).await
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.lease_once(scope, handle).await
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        self.inner.consume(scope, lease_id).await
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.revoke(scope, lease_id).await
-    }
-
-    async fn leases_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        self.inner.leases_for_scope(scope).await
-    }
 }
