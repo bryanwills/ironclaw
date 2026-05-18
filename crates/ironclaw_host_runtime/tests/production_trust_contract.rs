@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome,
@@ -18,7 +18,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn production_runtime_ignores_caller_supplied_privileged_trust_decision() {
-    let registry = Arc::new(registry_with_manifest(FIRST_PARTY_REQUESTED_MANIFEST));
+    let registry = Arc::new(registry_with_manifest(LOCAL_INSTALLED_MANIFEST));
     let dispatcher = Arc::new(CountingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
@@ -51,7 +51,7 @@ async fn production_runtime_ignores_caller_supplied_privileged_trust_decision() 
 
 #[tokio::test]
 async fn production_runtime_uses_host_policy_decision_instead_of_request_claims() {
-    let registry = Arc::new(registry_with_manifest(FIRST_PARTY_REQUESTED_MANIFEST));
+    let registry = Arc::new(registry_with_manifest(LOCAL_INSTALLED_MANIFEST));
     let dispatcher = Arc::new(CountingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
@@ -88,7 +88,7 @@ async fn production_runtime_uses_host_policy_decision_instead_of_request_claims(
 
 #[tokio::test]
 async fn trust_downgrade_denies_future_invocation_before_dispatch_side_effects() {
-    let registry = Arc::new(registry_with_manifest(FIRST_PARTY_REQUESTED_MANIFEST));
+    let registry = Arc::new(registry_with_manifest(LOCAL_INSTALLED_MANIFEST));
     let dispatcher = Arc::new(CountingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let policy = Arc::new(privileged_local_manifest_policy());
@@ -201,7 +201,7 @@ impl CapabilityDispatcher for CountingDispatcher {
 }
 
 fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = parse_manifest(manifest);
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -210,6 +210,36 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
+}
+
+fn legacy_capability_fixture_to_v2(manifest: &str) -> String {
+    if manifest.contains("schema_version") {
+        return manifest.to_string();
+    }
+    let mut converted = "schema_version = \"reborn.extension_manifest.v2\"\n".to_string();
+    for line in manifest.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("parameters_schema") {
+            converted.push_str("visibility = \"model\"\n");
+            converted.push_str("input_schema_ref = \"schemas/test/input.v1.json\"\n");
+            converted.push_str("output_schema_ref = \"schemas/test/output.v1.json\"\n");
+            converted.push_str("prompt_doc_ref = \"prompts/test.md\"\n");
+        } else {
+            converted.push_str(line);
+            converted.push('\n');
+        }
+    }
+    converted
 }
 
 fn trust_input_for_registry(registry: &ExtensionRegistry) -> TrustPolicyInput {
@@ -289,12 +319,12 @@ fn local_manifest_path() -> String {
     "/system/extensions/echo/manifest.toml".to_string()
 }
 
-const FIRST_PARTY_REQUESTED_MANIFEST: &str = r#"
+const LOCAL_INSTALLED_MANIFEST: &str = r#"
 id = "echo"
 name = "Echo"
 version = "0.1.0"
 description = "Echo test extension"
-trust = "first_party_requested"
+trust = "third_party"
 
 [runtime]
 kind = "wasm"

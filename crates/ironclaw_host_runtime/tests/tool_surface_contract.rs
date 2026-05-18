@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
@@ -726,12 +726,49 @@ fn runtime_with(
 fn registry_from_manifests<const N: usize>(manifests: [(&str, &str); N]) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     for (manifest, root) in manifests {
-        let manifest = ExtensionManifest::parse(manifest).unwrap();
+        let manifest = parse_manifest(manifest);
         let package =
             ExtensionPackage::from_manifest(manifest, VirtualPath::new(root).unwrap()).unwrap();
         registry.insert(package).unwrap();
     }
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
+}
+
+fn legacy_capability_fixture_to_v2(manifest: &str) -> String {
+    if manifest.contains("schema_version") {
+        return manifest.to_string();
+    }
+    let mut converted = "schema_version = \"reborn.extension_manifest.v2\"\n".to_string();
+    for line in manifest.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("parameters_schema") {
+            let schema_suffix = line.bytes().fold(0_u64, |acc, byte| {
+                acc.wrapping_mul(31).wrapping_add(byte.into())
+            });
+            converted.push_str("visibility = \"model\"\n");
+            converted.push_str(&format!(
+                "input_schema_ref = \"schemas/test/{schema_suffix}.input.v1.json\"\n"
+            ));
+            converted.push_str(&format!(
+                "output_schema_ref = \"schemas/test/{schema_suffix}.output.v1.json\"\n"
+            ));
+            converted.push_str("prompt_doc_ref = \"prompts/test.md\"\n");
+        } else {
+            converted.push_str(line);
+            converted.push('\n');
+        }
+    }
+    converted
 }
 
 fn trust_policy_for<const N: usize>(

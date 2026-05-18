@@ -10,7 +10,7 @@ use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
@@ -296,7 +296,7 @@ fn runtime_dispatcher_stack(
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = parse_manifest(ECHO_MANIFEST);
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -305,6 +305,36 @@ fn registry_with_echo_capability() -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
+}
+
+fn legacy_capability_fixture_to_v2(manifest: &str) -> String {
+    if manifest.contains("schema_version") {
+        return manifest.to_string();
+    }
+    let mut converted = "schema_version = \"reborn.extension_manifest.v2\"\n".to_string();
+    for line in manifest.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("parameters_schema") {
+            converted.push_str("visibility = \"model\"\n");
+            converted.push_str("input_schema_ref = \"schemas/test/input.v1.json\"\n");
+            converted.push_str("output_schema_ref = \"schemas/test/output.v1.json\"\n");
+            converted.push_str("prompt_doc_ref = \"prompts/test.md\"\n");
+        } else {
+            converted.push_str(line);
+            converted.push('\n');
+        }
+    }
+    converted
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {

@@ -458,6 +458,10 @@ pub enum ManifestV2Error {
 }
 
 impl ExtensionManifestV2 {
+    pub fn runtime_kind(&self) -> RuntimeKind {
+        self.runtime.kind()
+    }
+
     /// Parse a v2 manifest TOML body and validate it against `host_port_catalog`.
     ///
     /// `source` is supplied by the loader/install path, never read from TOML.

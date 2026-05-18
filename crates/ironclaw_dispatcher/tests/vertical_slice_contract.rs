@@ -178,15 +178,27 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     let wasm_root = storage.join("echo-wasm");
     std::fs::create_dir_all(&wasm_root).unwrap();
-    std::fs::write(wasm_root.join("manifest.toml"), WASM_MANIFEST).unwrap();
+    std::fs::write(
+        wasm_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(WASM_MANIFEST),
+    )
+    .unwrap();
 
     let script_root = storage.join("echo-script");
     std::fs::create_dir_all(&script_root).unwrap();
-    std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST).unwrap();
+    std::fs::write(
+        script_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(SCRIPT_MANIFEST),
+    )
+    .unwrap();
 
     let mcp_root = storage.join("echo-mcp");
     std::fs::create_dir_all(&mcp_root).unwrap();
-    std::fs::write(mcp_root.join("manifest.toml"), MCP_MANIFEST).unwrap();
+    std::fs::write(
+        mcp_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(MCP_MANIFEST),
+    )
+    .unwrap();
 
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
@@ -195,6 +207,26 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     )
     .unwrap();
     fs
+}
+
+fn legacy_capability_fixture_to_v2(manifest: &str) -> String {
+    if manifest.contains("schema_version") {
+        return manifest.to_string();
+    }
+    let mut converted = "schema_version = \"reborn.extension_manifest.v2\"\n".to_string();
+    for line in manifest.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("parameters_schema") {
+            converted.push_str("visibility = \"model\"\n");
+            converted.push_str("input_schema_ref = \"schemas/test/input.v1.json\"\n");
+            converted.push_str("output_schema_ref = \"schemas/test/output.v1.json\"\n");
+            converted.push_str("prompt_doc_ref = \"prompts/test.md\"\n");
+        } else {
+            converted.push_str(line);
+            converted.push('\n');
+        }
+    }
+    converted
 }
 
 fn sample_scope() -> ResourceScope {

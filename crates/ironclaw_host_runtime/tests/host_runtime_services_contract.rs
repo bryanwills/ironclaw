@@ -29,7 +29,7 @@ use ironclaw_events::{
     EventReplay, EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
@@ -3461,7 +3461,7 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
 
 #[tokio::test]
 async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_handoff() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3523,7 +3523,7 @@ async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_ha
 
 #[tokio::test]
 async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_policy_handoff() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3587,7 +3587,7 @@ async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_po
 
 #[tokio::test]
 async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secret_handoffs() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3678,7 +3678,7 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
 
 #[tokio::test]
 async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_store() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3755,7 +3755,7 @@ async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_st
 
 #[tokio::test]
 async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_transport() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3824,7 +3824,7 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
 
 #[tokio::test]
 async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy_handoff() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -5863,13 +5863,43 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
 fn registry_with_manifests(manifests: &[&str]) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     for manifest in manifests {
-        let manifest = ExtensionManifest::parse(manifest).unwrap();
+        let manifest = parse_manifest(manifest);
         let root =
             VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
         let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
         registry.insert(package).unwrap();
     }
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
+}
+
+fn legacy_capability_fixture_to_v2(manifest: &str) -> String {
+    if manifest.contains("schema_version") {
+        return manifest.to_string();
+    }
+    let mut converted = "schema_version = \"reborn.extension_manifest.v2\"\n".to_string();
+    for line in manifest.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("parameters_schema") {
+            converted.push_str("visibility = \"model\"\n");
+            converted.push_str("input_schema_ref = \"schemas/test/input.v1.json\"\n");
+            converted.push_str("output_schema_ref = \"schemas/test/output.v1.json\"\n");
+            converted.push_str("prompt_doc_ref = \"prompts/test.md\"\n");
+        } else {
+            converted.push_str(line);
+            converted.push('\n');
+        }
+    }
+    converted
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
@@ -6127,7 +6157,7 @@ async fn wasm_runtime_for_component(
     module_path: &str,
     wat: &str,
 ) -> WasmRuntimeFixture {
-    let parsed_manifest = ExtensionManifest::parse(manifest).unwrap();
+    let parsed_manifest = parse_manifest(manifest);
     let component = tool_component(wat);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(parsed_manifest.id.as_str(), module_path, &component).await,
@@ -6168,7 +6198,7 @@ async fn wasm_runtime_for_component_with_slow_zero_body_http(
     module_path: &str,
     wat: &str,
 ) -> WasmWallClockRuntimeFixture {
-    let parsed_manifest = ExtensionManifest::parse(manifest).unwrap();
+    let parsed_manifest = parse_manifest(manifest);
     let component = tool_component(wat);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(parsed_manifest.id.as_str(), module_path, &component).await,

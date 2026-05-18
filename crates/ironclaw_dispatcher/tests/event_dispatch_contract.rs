@@ -490,17 +490,55 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
 fn write_echo_extensions(root: &std::path::Path) {
     let wasm_root = root.join("echo-wasm");
     std::fs::create_dir_all(wasm_root).unwrap();
-    std::fs::write(root.join("echo-wasm/manifest.toml"), WASM_MANIFEST).unwrap();
+    std::fs::write(
+        root.join("echo-wasm/manifest.toml"),
+        legacy_capability_fixture_to_v2(WASM_MANIFEST),
+    )
+    .unwrap();
 
     let script_root = root.join("echo-script");
     std::fs::create_dir_all(&script_root).unwrap();
-    std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST).unwrap();
+    std::fs::write(
+        script_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(SCRIPT_MANIFEST),
+    )
+    .unwrap();
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = parse_manifest(manifest);
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
+}
+
+fn legacy_capability_fixture_to_v2(manifest: &str) -> String {
+    if manifest.contains("schema_version") {
+        return manifest.to_string();
+    }
+    let mut converted = "schema_version = \"reborn.extension_manifest.v2\"\n".to_string();
+    for line in manifest.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("parameters_schema") {
+            converted.push_str("visibility = \"model\"\n");
+            converted.push_str("input_schema_ref = \"schemas/test/input.v1.json\"\n");
+            converted.push_str("output_schema_ref = \"schemas/test/output.v1.json\"\n");
+            converted.push_str("prompt_doc_ref = \"prompts/test.md\"\n");
+        } else {
+            converted.push_str(line);
+            converted.push('\n');
+        }
+    }
+    converted
 }
 
 fn sample_scope() -> ResourceScope {
