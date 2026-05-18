@@ -267,10 +267,11 @@ impl ToolDispatcher {
             crate::tools::registry::DISABLE_TOOLS_DENIAL_PREFIX
         );
 
-        // Structured warn-level event for log-based alerting. Don't include
-        // raw params (could contain sensitive values; the dispatch path's
-        // normal redaction hasn't happened yet at this point).
-        tracing::warn!(
+        // `debug!` not `warn!`: dispatch reachable from REPL/TUI where
+        // warn corrupts terminal. Alerting surface = persisted ActionRecord
+        // with `DISABLE_TOOLS_DENIAL_PREFIX`. Params raw here (tool
+        // unresolved → no `sensitive_params()` to consult for redaction).
+        debug!(
             tool = %tool_name,
             user_id = %user_id,
             source = %source,

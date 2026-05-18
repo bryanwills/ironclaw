@@ -192,10 +192,11 @@ impl ToolRegistry {
     }
 
     /// Seed the kill-switch deny-list from `DISABLE_TOOLS_LIST`. Names are
-    /// normalised by inserting both the underscore and hyphen alias variants
-    /// for each entry, so a deny-list of `["secret_delete"]` blocks an
-    /// extension that registers `secret-delete` (or vice versa) — without
-    /// requiring the operator to know which variant the extension picked.
+    /// lowercased and normalised by inserting both the underscore and hyphen
+    /// alias variants for each entry, so a deny-list of `["Secret_Delete"]`
+    /// blocks an extension that registers `secret-delete` (or vice versa) —
+    /// without requiring the operator to know which case or separator the
+    /// extension picked.
     /// Must be called before wrapping in `Arc` (consumes self).
     pub fn with_disabled_tools<I, S>(mut self, names: I) -> Self
     where
@@ -203,7 +204,7 @@ impl ToolRegistry {
         S: Into<String>,
     {
         for raw in names {
-            let name = raw.into();
+            let name = raw.into().to_ascii_lowercase();
             if name.is_empty() {
                 continue;
             }
@@ -216,15 +217,19 @@ impl ToolRegistry {
         self
     }
 
-    /// Returns true if `name` (or any hyphen/underscore alias) is on the
-    /// kill-switch deny-list. Cheap — synchronous set lookup, no locks.
+    /// Returns true if `name` (or any hyphen/underscore alias, case-folded)
+    /// is on the kill-switch deny-list. Cheap — synchronous set lookup, no
+    /// locks. Case is normalised so an operator typo like
+    /// `DISABLE_TOOLS_LIST=Shell` still blocks a tool registered as `shell`
+    /// (`.claude/rules/review-discipline.md` → case-insensitive comparisons).
     pub fn is_disabled(&self, name: &str) -> bool {
         if self.disabled_tools.is_empty() {
             return false;
         }
-        self.disabled_tools.contains(name)
-            || self.disabled_tools.contains(&name.replace('-', "_"))
-            || self.disabled_tools.contains(&name.replace('_', "-"))
+        let lower = name.to_ascii_lowercase();
+        self.disabled_tools.contains(&lower)
+            || self.disabled_tools.contains(&lower.replace('-', "_"))
+            || self.disabled_tools.contains(&lower.replace('_', "-"))
     }
 
     /// Create a registry with credential injection support.
@@ -907,6 +912,8 @@ impl ToolRegistry {
     }
 
     /// Register message tool for sending messages to channels.
+    /// Third registration path. Honours `DISABLE_TOOLS_LIST` like
+    /// `register()` / `register_sync()`.
     pub async fn register_message_tools(
         &self,
         channel_manager: Arc<crate::channels::ChannelManager>,
@@ -918,15 +925,21 @@ impl ToolRegistry {
             tool = tool.with_extension_manager(extension_manager);
         }
         let tool = Arc::new(tool);
+        let name = tool.name().to_string();
+        if self.is_disabled(&name) {
+            tracing::warn!(
+                tool = %name,
+                reason = "DISABLE_TOOLS_LIST",
+                "Rejected message tool registration: name is on the kill-switch deny-list"
+            );
+            return;
+        }
         *self.message_tool.write().await = Some(Arc::clone(&tool));
         self.tools
             .write()
             .await
-            .insert(tool.name().to_string(), tool as Arc<dyn Tool>);
-        self.builtin_names
-            .write()
-            .await
-            .insert("message".to_string());
+            .insert(name.clone(), tool as Arc<dyn Tool>);
+        self.builtin_names.write().await.insert(name);
         tracing::debug!("Registered message tool");
     }
 
@@ -1296,6 +1309,45 @@ mod tests {
         let registry2 = ToolRegistry::new().with_disabled_tools(["secret_delete".to_string()]);
         assert!(registry2.is_disabled("secret-delete"));
         assert!(registry2.is_disabled("secret_delete"));
+    }
+
+    #[tokio::test]
+    async fn is_disabled_is_case_insensitive_through_register() {
+        // Operator typo in `DISABLE_TOOLS_LIST=Echo` must still block a tool
+        // registered as `echo`. Drives `register()` (the caller) — not just
+        // `is_disabled()` — to satisfy "Test Through the Caller, Not Just the
+        // Helper".
+        let registry = ToolRegistry::new().with_disabled_tools(["Echo".to_string()]);
+        assert!(registry.is_disabled("echo"));
+        registry.register(Arc::new(EchoTool)).await;
+        assert!(
+            !registry.has("echo").await,
+            "register() must refuse a kill-switched name regardless of case"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_message_tools_refuses_kill_switched_name() {
+        // The third registration path (alongside register/register_sync) must
+        // also honour the deny-list. Drives the caller — register_message_tools
+        // — and asserts the message tool is not installed.
+        use crate::channels::ChannelManager;
+        let registry = ToolRegistry::new().with_disabled_tools(["message".to_string()]);
+        let channel_manager = Arc::new(ChannelManager::new());
+        registry.register_message_tools(channel_manager, None).await;
+
+        assert!(
+            !registry.has("message").await,
+            "register_message_tools must refuse a kill-switched name"
+        );
+        assert!(
+            registry.message_tool.read().await.is_none(),
+            "message_tool slot must remain unset when name is on the deny-list"
+        );
+        assert!(
+            !registry.builtin_names.read().await.contains("message"),
+            "builtin_names must not record a blocked message tool"
+        );
     }
 
     #[tokio::test]
