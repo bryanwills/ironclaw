@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2_with_schema_suffix as legacy_capability_fixture_to_v2;
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -742,33 +746,6 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &HostPortCatalog::empty(),
     )
     .unwrap()
-}
-
-fn legacy_capability_fixture_to_v2(manifest: &str) -> String {
-    if manifest.contains("schema_version") {
-        return manifest.to_string();
-    }
-    let mut converted = "schema_version = \"reborn.extension_manifest.v2\"\n".to_string();
-    for line in manifest.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("parameters_schema") {
-            let schema_suffix = line.bytes().fold(0_u64, |acc, byte| {
-                acc.wrapping_mul(31).wrapping_add(byte.into())
-            });
-            converted.push_str("visibility = \"model\"\n");
-            converted.push_str(&format!(
-                "input_schema_ref = \"schemas/test/{schema_suffix}.input.v1.json\"\n"
-            ));
-            converted.push_str(&format!(
-                "output_schema_ref = \"schemas/test/{schema_suffix}.output.v1.json\"\n"
-            ));
-            converted.push_str("prompt_doc_ref = \"prompts/test.md\"\n");
-        } else {
-            converted.push_str(line);
-            converted.push('\n');
-        }
-    }
-    converted
 }
 
 fn trust_policy_for<const N: usize>(

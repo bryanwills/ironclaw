@@ -8,7 +8,8 @@
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, ExtensionLifecycleOperation, HostApiError,
-    HostPortCatalog, PackageId, PackageIdentity, PackageSource, VirtualPath,
+    HostPortCatalog, PackageId, PackageIdentity, PackageSource, RequestedTrustClass, RuntimeKind,
+    TrustClass, VirtualPath,
 };
 use ironclaw_trust::TrustPolicyInput;
 use std::collections::{BTreeSet, HashSet};
@@ -70,6 +71,157 @@ impl ExtensionAssetPath {
             self.0
         ))
         .map_err(ExtensionError::from)
+    }
+}
+
+/// Declarative runtime metadata for an extension package after boundary
+/// validation has converted manifest strings into typed internal values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionRuntime {
+    Wasm {
+        module: ExtensionAssetPath,
+    },
+    Script {
+        runner: String,
+        image: Option<String>,
+        command: String,
+        args: Vec<String>,
+    },
+    Mcp {
+        transport: String,
+        command: Option<String>,
+        args: Vec<String>,
+        url: Option<String>,
+    },
+    FirstParty {
+        service: String,
+    },
+    System {
+        service: String,
+    },
+}
+
+impl ExtensionRuntime {
+    pub fn kind(&self) -> RuntimeKind {
+        match self {
+            Self::Wasm { .. } => RuntimeKind::Wasm,
+            Self::Script { .. } => RuntimeKind::Script,
+            Self::Mcp { .. } => RuntimeKind::Mcp,
+            Self::FirstParty { .. } => RuntimeKind::FirstParty,
+            Self::System { .. } => RuntimeKind::System,
+        }
+    }
+
+    fn from_v2(runtime: ExtensionRuntimeV2) -> Result<Self, ExtensionError> {
+        match runtime {
+            ExtensionRuntimeV2::Wasm { module } => Ok(Self::Wasm {
+                module: ExtensionAssetPath::new(module)?,
+            }),
+            ExtensionRuntimeV2::Script {
+                runner,
+                image,
+                command,
+                args,
+            } => Ok(Self::Script {
+                runner,
+                image,
+                command,
+                args,
+            }),
+            ExtensionRuntimeV2::Mcp {
+                transport,
+                command,
+                args,
+                url,
+            } => Ok(Self::Mcp {
+                transport,
+                command,
+                args,
+                url,
+            }),
+            ExtensionRuntimeV2::FirstParty { service } => Ok(Self::FirstParty { service }),
+            ExtensionRuntimeV2::System { service } => Ok(Self::System { service }),
+        }
+    }
+}
+
+/// Validated production extension manifest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtensionManifest {
+    pub schema_version: String,
+    pub id: ExtensionId,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub source: ManifestSource,
+    pub requested_trust: RequestedTrustClass,
+    pub descriptor_trust_default: TrustClass,
+    pub runtime: ExtensionRuntime,
+    pub host_apis: Vec<HostApiRefV2>,
+    pub capabilities: Vec<CapabilityManifest>,
+}
+
+impl ExtensionManifest {
+    pub fn parse(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+    ) -> Result<Self, ExtensionError> {
+        ExtensionManifestV2::parse(input, source, host_port_catalog)?.try_into()
+    }
+
+    pub fn parse_with_host_api_contracts(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
+    ) -> Result<Self, ExtensionError> {
+        ExtensionManifestV2::parse_with_host_api_contracts(
+            input,
+            source,
+            host_port_catalog,
+            registry,
+        )?
+        .try_into()
+    }
+
+    pub fn parse_with_optional_host_api_contracts(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
+    ) -> Result<Self, ExtensionError> {
+        ExtensionManifestV2::parse_with_optional_host_api_contracts(
+            input,
+            source,
+            host_port_catalog,
+            registry,
+        )?
+        .try_into()
+    }
+
+    pub fn runtime_kind(&self) -> RuntimeKind {
+        self.runtime.kind()
+    }
+}
+
+impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
+    type Error = ExtensionError;
+
+    fn try_from(manifest: ExtensionManifestV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            schema_version: manifest.schema_version,
+            id: manifest.id,
+            name: manifest.name,
+            version: manifest.version,
+            description: manifest.description,
+            source: manifest.source,
+            requested_trust: manifest.requested_trust,
+            descriptor_trust_default: manifest.descriptor_trust_default,
+            runtime: ExtensionRuntime::from_v2(manifest.runtime)?,
+            host_apis: manifest.host_apis,
+            capabilities: manifest.capabilities,
+        })
     }
 }
 
@@ -186,8 +338,6 @@ pub use v2::{
 };
 
 pub type CapabilityManifest = CapabilityDeclV2;
-pub type ExtensionManifest = ExtensionManifestV2;
-pub type ExtensionRuntime = ExtensionRuntimeV2;
 
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
@@ -201,6 +351,28 @@ impl ExtensionDiscovery {
     pub async fn discover<F>(
         fs: &F,
         root: &VirtualPath,
+    ) -> Result<ExtensionRegistry, ExtensionError>
+    where
+        F: RootFilesystem,
+    {
+        let host_port_catalog = HostPortCatalog::empty();
+        let host_api_contracts = HostApiContractRegistry::new();
+        Self::discover_with_manifest_contracts(
+            fs,
+            root,
+            ManifestSource::InstalledLocal,
+            &host_port_catalog,
+            &host_api_contracts,
+        )
+        .await
+    }
+
+    pub async fn discover_with_manifest_contracts<F>(
+        fs: &F,
+        root: &VirtualPath,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        host_api_contracts: &HostApiContractRegistry,
     ) -> Result<ExtensionRegistry, ExtensionError>
     where
         F: RootFilesystem,
@@ -225,10 +397,11 @@ impl ExtensionDiscovery {
             let text = String::from_utf8(bytes).map_err(|error| ExtensionError::ManifestParse {
                 reason: error.to_string(),
             })?;
-            let manifest = ExtensionManifest::parse(
+            let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
                 &text,
-                ManifestSource::InstalledLocal,
-                &HostPortCatalog::empty(),
+                source,
+                host_port_catalog,
+                host_api_contracts,
             )?;
             if manifest.id != expected {
                 return Err(ExtensionError::ManifestIdMismatch {

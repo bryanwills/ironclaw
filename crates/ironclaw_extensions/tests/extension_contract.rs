@@ -12,7 +12,7 @@ fn v2_manifest_builds_capability_descriptors_from_schema_refs() {
     assert_eq!(manifest.descriptor_trust_default, TrustClass::Sandbox);
     assert!(matches!(
         manifest.runtime,
-        ExtensionRuntime::Wasm { ref module } if module == "wasm/echo.wasm"
+        ExtensionRuntime::Wasm { ref module } if module.as_str() == "wasm/echo.wasm"
     ));
 
     let package = package_from_manifest(manifest, "echo");
@@ -140,6 +140,116 @@ async fn discovery_reads_v2_manifests_from_filesystem_virtual_root() {
         registry
             .get_capability(&CapabilityId::new("echo.say").unwrap())
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn discovery_rejects_installed_local_privileged_manifest() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("echo")).unwrap();
+    std::fs::write(
+        storage.path().join("echo/manifest.toml"),
+        WASM_MANIFEST.replace("trust = \"untrusted\"", "trust = \"first_party_requested\""),
+    )
+    .unwrap();
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let err = ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::ManifestV2(ManifestV2Error::TrustForbiddenForSource {
+            manifest_source: ManifestSource::InstalledLocal,
+            requested: RequestedTrustClass::FirstPartyRequested,
+        })
+    ));
+}
+
+#[tokio::test]
+async fn discovery_validates_host_api_manifest_with_supplied_contracts() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("telegram")).unwrap();
+    std::fs::write(
+        storage.path().join("telegram/manifest.toml"),
+        HOST_API_MANIFEST,
+    )
+    .unwrap();
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(TestProductAdapterContract {
+            id: HostApiId::new("ironclaw.product_adapter/v1").unwrap(),
+        }))
+        .unwrap();
+
+    let registry = ExtensionDiscovery::discover_with_manifest_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &contracts,
+    )
+    .await
+    .unwrap();
+
+    let package = registry
+        .get_extension(&ExtensionId::new("telegram").unwrap())
+        .unwrap();
+    assert_eq!(package.capabilities.len(), 0);
+    assert_eq!(package.manifest.host_apis.len(), 1);
+}
+
+#[tokio::test]
+async fn discovery_validates_capability_manifest_with_supplied_host_port_catalog() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("echo")).unwrap();
+    std::fs::write(
+        storage.path().join("echo/manifest.toml"),
+        WASM_MANIFEST_WITH_HOST_PORT,
+    )
+    .unwrap();
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let catalog = HostPortCatalog::new(vec![HostPortCatalogEntry::new(
+        HostPortId::new("host.runtime.http_egress").unwrap(),
+    )])
+    .unwrap();
+
+    let registry = ExtensionDiscovery::discover_with_manifest_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::InstalledLocal,
+        &catalog,
+        &HostApiContractRegistry::new(),
+    )
+    .await
+    .unwrap();
+
+    let package = registry
+        .get_extension(&ExtensionId::new("echo").unwrap())
+        .unwrap();
+    assert_eq!(
+        package.manifest.capabilities[0].required_host_ports,
+        vec![HostPortId::new("host.runtime.http_egress").unwrap()]
     );
 }
 
@@ -365,6 +475,36 @@ impl ExtensionLifecycleEventSink for FailingExtensionLifecycleEventSink {
     }
 }
 
+struct TestProductAdapterContract {
+    id: HostApiId,
+}
+
+impl HostApiManifestContract for TestProductAdapterContract {
+    fn id(&self) -> &HostApiId {
+        &self.id
+    }
+
+    fn accepts_section_path(&self, section: &ManifestSectionPath) -> bool {
+        section.as_str() == "product_adapter.inbound"
+    }
+
+    fn validate_section(
+        &self,
+        _host_api: &HostApiRefV2,
+        section: &toml::Value,
+    ) -> Result<(), String> {
+        let surface = section
+            .get("surface_kind")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| "surface_kind is required".to_string())?;
+        if surface == "telegram" {
+            Ok(())
+        } else {
+            Err("surface_kind must be telegram".to_string())
+        }
+    }
+}
+
 const WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "echo"
 name = "Echo"
@@ -385,6 +525,48 @@ visibility = "model"
 input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
 prompt_doc_ref = "prompts/echo/say.md"
+"#;
+
+const WASM_MANIFEST_WITH_HOST_PORT: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+description = "Echo demo extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/echo.wasm"
+
+[[capabilities]]
+id = "echo.say"
+description = "Echo text"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
+prompt_doc_ref = "prompts/echo/say.md"
+required_host_ports = ["host.runtime.http_egress"]
+"#;
+
+const HOST_API_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "telegram"
+name = "Telegram"
+version = "0.1.0"
+description = "Telegram adapter"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/telegram.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "telegram"
 "#;
 
 const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
