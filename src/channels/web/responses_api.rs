@@ -1239,12 +1239,9 @@ pub async fn create_response_handler(
         Some(prev_id) => {
             let (_prev_resp, thread) = decode_response_id(prev_id)
                 .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
-            // Cross-tenant authz: `thread_uuid` flows into outbound
-            // tool notifications as `notify_thread_id`. Without this
-            // check, user A could POST `previous_response_id` carrying
-            // user B's thread_uuid and tag outbound notifications with
-            // B's correlation id — callbacks would route back to B's
-            // conversation. Mirror the retrieve-path check at L1994.
+            // Mirror the GET-path `conversation_belongs_to_user` check.
+            // Without this, a foreign thread_uuid taints outbound
+            // `notify_thread_id` and routes callbacks to the wrong user.
             if let Some(store) = state.store.as_ref() {
                 let owns = store
                     .conversation_belongs_to_user(thread, &user.user_id)
