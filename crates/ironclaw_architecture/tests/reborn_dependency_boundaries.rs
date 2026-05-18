@@ -93,6 +93,43 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn reborn_dispatch_authority_is_sealed_to_authorized_request() {
+    let root = workspace_root();
+    let host_api_dispatch =
+        std::fs::read_to_string(root.join("crates/ironclaw_host_api/src/dispatch.rs"))
+            .expect("host API dispatch contract must be readable");
+    assert!(
+        host_api_dispatch.contains("request: AuthorizedDispatchRequest"),
+        "CapabilityDispatcher must accept only AuthorizedDispatchRequest"
+    );
+    assert!(
+        !host_api_dispatch.contains(
+            "request: CapabilityDispatchRequest,\n    ) -> Result<CapabilityDispatchResult"
+        ),
+        "CapabilityDispatcher must not accept raw CapabilityDispatchRequest"
+    );
+
+    let dispatch_contract = "crates/ironclaw_host_api/src/dispatch.rs";
+    let approved_capability_host = "crates/ironclaw_capabilities/src/host.rs";
+    let approved_process_executor = "crates/ironclaw_host_runtime/src/services.rs";
+    let mut violations = Vec::new();
+    collect_dispatch_authority_violations(&root.join("crates"), &root, &mut violations);
+
+    violations.retain(|violation| {
+        !violation.starts_with(dispatch_contract)
+            && !violation.starts_with(approved_capability_host)
+            && !violation.starts_with(approved_process_executor)
+            && !violation.contains("/tests/")
+    });
+
+    assert!(
+        violations.is_empty(),
+        "raw dispatch authority must stay sealed to approved host paths:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
@@ -1060,6 +1097,40 @@ fn collect_forbidden_turns_identifier_uses(
             if contents.contains(pattern) {
                 violations.push(format!(
                     "{} contains forbidden lower identifier `{pattern}`",
+                    path.strip_prefix(root).unwrap_or(&path).display()
+                ));
+            }
+        }
+    }
+}
+
+fn collect_dispatch_authority_violations(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    violations: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dispatch_authority_violations(&path, root, violations);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        for pattern in [
+            ".dispatch_json(CapabilityDispatchRequest",
+            "DispatchAuthorityProof::capability_host()",
+            "DispatchAuthorityProof::host_process_executor()",
+        ] {
+            if contents.contains(pattern) {
+                violations.push(format!(
+                    "{} contains forbidden dispatch authority pattern `{pattern}`",
                     path.strip_prefix(root).unwrap_or(&path).display()
                 ));
             }
