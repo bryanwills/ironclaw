@@ -1202,7 +1202,7 @@ fn validate_runtime_request(
             Some(&request.body),
         )
         .map_err(|_| runtime_request_leak_error())?;
-    scan_decoded_url_for_leaks(&guard, &request.url)?;
+    scan_decoded_url_for_leaks(guard, &request.url)?;
     Ok(())
 }
 

@@ -23,7 +23,6 @@ use ironclaw_host_api::{
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
 use ironclaw_resources::{ResourceError, ResourceGovernor};
-use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
 };
