@@ -3,112 +3,62 @@
 **Date:** 2026-05-18
 **Branch:** `reborn-integration` (~690 commits ahead of `main`)
 **Scope:** all 47 workspace crates + the legacy `src/` tree
-**Method:** six parallel research passes (loop/orchestration, security/policy, extensions/tools, storage/state, src↔crates legacy, channels/host), one synthesis pass, deduplication into 8 themes
-**Purpose:** surface ambiguous ownership so the team can resolve it async and update CLAUDE.md / AGENTS.md files, then send autonomous agents to fix the gaps with clear directions.
+**Purpose:** surface ambiguous ownership so the team can resolve it async, update CLAUDE.md / AGENTS.md, and direct autonomous agents at clearly-scoped gaps.
 
-This audit is intentionally findings + proposed resolution. Each "Proposed resolution" is a *starting position* for team discussion, not a decided plan.
+This is a findings + proposed resolution document. Each "Proposed resolution" is a starting position for team discussion, not a decided plan.
 
 ---
 
 ## TL;DR
 
-- The reborn migration is roughly half-done. Many `src/<x>/` modules (`src/agent/`, `src/tools/`, `src/workspace/`, `src/skills/`) coexist with their reborn replacements, with no documented v1/v2 status matrix.
-- Several concepts have **3–4 parallel names** across crates with no shared trait: "extension" vs "product_adapter" vs "channel" vs "tool"; "authorization" vs "trust" vs "capabilities" vs "approvals" vs "runtime_policy"; "memory" vs "workspace" vs "resources" vs "run_state".
-- `ironclaw_host_api` is depended on by every workspace crate (47/47) and is starting to grow concrete behavior (1,040-line `ingress.rs`, 849-line `runtime_policy.rs`) — risk of god-crate.
-- At least one crate is **orphaned with zero callers** (`ironclaw_outbound`) and one directory is on disk but excluded from the workspace (`crates/ironclaw_reborn_telegram_v2_host/`).
-- Several crates breach their own declared guardrails (`src/workspace/reborn_identity_context.rs` imports from `ironclaw_memory` despite `ironclaw_memory/CLAUDE.md` forbidding the inverse).
-
-8 themes, 25 individual findings, each with file-level evidence and a proposed resolution below. A **Deep Pass** appendix at the end adds architecture-test coverage data, documented-vs-delivered contradictions, an end-to-end trace, WIT contract drift, and git-history rationale.
+- One **P0 security-class** finding stands out from the rest: the caller's `trust_decision` is silently dropped at the host-runtime layer (see **I2** below). Triage as a security ticket before anything else.
+- The reborn migration is roughly half-done. Several `src/<x>/` modules (`src/agent/`, `src/tools/`, `src/workspace/`, `src/skills/`) coexist with their reborn replacements with no documented v1/v2 status matrix. **`ENGINE_V2` ships as `false` by default**, so v1 is live, not just maintained.
+- Several concepts have 3–4 parallel names with no shared owner-doc: "extension" vs "product_adapter" vs "channel" vs "tool"; "memory" vs "workspace" vs "resources" vs "run_state".
+- `ironclaw_host_api` is depended on by every workspace crate (47/47) at 5,245 LOC. The contents are vocabulary (newtypes + enums + serde), not concrete behavior — but the total size still warrants a split discussion.
+- **The biggest documentation-drift bug in the repo is not in any CLAUDE.md** — `crates/AGENTS.md` and `crates/README.md` both still list `ironclaw_storage` as an active crate. It was dissolved in commit `06090f4e6`. These are the first files a new contributor reads.
+- `ironclaw_outbound` is fully specified with a comprehensive `CLAUDE.md` but has zero workspace consumers — pre-production scaffolding waiting on integration.
+- `crates/ironclaw_reborn_telegram_v2_host/` is a fossil directory with no `Cargo.toml`, on disk since the consolidation in `af0ef699e`.
+- `src/workspace/reborn_identity_context.rs` imports `ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS` despite `ironclaw_memory/CLAUDE.md` forbidding the inverse direction — undeclared v1→v2 bootstrap shim.
 
 ---
 
-## ⚠️ Adversarial Review — Corrections (2026-05-18, post-publication)
+## Recommended order of work
 
-After publishing, a 10-agent hostile review of this doc was run. Several findings turned out to be wrong, overstated, or misframed. **This section is authoritative — when it conflicts with a per-theme finding below, this section wins.** The per-theme sections are preserved for traceability, not authority.
+The cheapest, most durable fixes first.
 
-### Top severity correction — I2 should be P0
-
-The highest-impact finding in this audit is buried as a Theme I sub-bullet. `host_runtime/src/production.rs:248` destructures the caller's `trust_decision` as `_caller_trust_decision` (underscore = intentionally discarded) and re-evaluates trust locally. The re-evaluation is correct design (host is authoritative). **But the public `RuntimeCapabilityRequest.trust_decision` field is plumbed through the API and silently dropped at the consumer.** This is a maintenance trap that could mask a future security regression. **Recommend: separate security ticket; remove the dead field or rename it `_advisory_trust_decision` + add a `#[doc]` warning. Triage this before any other audit follow-up.**
-
-### Findings retracted as FALSE
-
-- **B1** "Two composition crates is ambiguous" — `ironclaw_reborn/src/lib.rs` header explicitly declares the crate internal-only. The pattern is well-documented. (B1 has a residual finding only: the architecture test enforces upward isolation but does NOT forbid substrate crates from importing `ironclaw_reborn` directly. Reframe to "complete the inverse direction test", not "rename or relabel".)
-- **D5** "SessionThreadService double-export problem" — clean re-export pattern; `ironclaw_threads` owns the trait, `ironclaw_conversations` re-exports for caller convenience. No duplication.
-- **C4** "ironclaw_safety scope is sprawling (4 concerns)" — the four are sequential stages of one concern (data-in-motion defense). Scope is cohesive and the name is fine.
-- **F3** "event_projections imports memory in production" — the imports are *trait types* (`MemorySignificantEventSink`, `PromptWriteSafetyEventSink`); projections IS the read-model layer for memory audit logs. This is correct architecture, not coupling. Retract.
-- **H1** "ironclaw_network name too broad" — scope is narrow by design and `CLAUDE.md` is explicit. Drop.
-
-### Findings significantly OVERSTATED (severity downgraded)
-
-- **A1** "ironclaw_engine gutted / near-empty" — **WRONG**. The crate has 38K LOC of state machines, types, and traits. Only its *direct dependencies* are minimal (intentionally decoupled from the host crate per its `CLAUDE.md`). The diagrams below labeling it "gutted" / "near-empty" are wrong; treat it as canonical, not orphan.
-- **A2** "src/tools/dispatch.rs and ironclaw_dispatcher compete" — they operate at **different pipeline stages** (pre-authorization vs post-authorization), not as competitors. Reframe to "v1 entry point; v2 converges downstream".
-- **A3** "no shared trait across four tool runtimes" — `EffectExecutor` trait exists in `ironclaw_engine/traits/effect.rs`. Audit missed it. Reframe to "shared trait exists; document the boundary".
-- **A4** "skills/attenuation needs `#[deprecated]` now" — `ENGINE_V2` defaults to `false`; v1 is currently load-bearing. Adding `#[deprecated]` now would be premature. Defer to v2-default cutover.
-- **A5** "src/bridge/ invisible in CLAUDE.md" — bridge IS mentioned in CLAUDE.md prose; it's only missing from the Project Structure table and Module Specs table. Two-row fix.
-- **B2** "rename event crates to `ironclaw_reborn_events*`" — substrate (events) / projections / backend (reborn_event_store) split is intentional and reborn-agnostic by design. Keep CLAUDE.md documentation suggestion only; **drop the rename**.
-- **B3** "RebornCompositionProfile should move" — placement in composition is correct (composition profiles belong in the composition crate). At most, add a convenience re-export from `reborn_config`. Don't move the type.
-- **C2** "no shared policy interface" — `ironclaw_host_api` IS the shared vocabulary; types intentionally separate by role. Reframe to "document composition order" only.
-- **C5** "runtime_policy asymmetric re-export" — intentional design (return-type ergonomics). Downgrade to a one-line doc-note fix.
-- **D4** "ProcessStatus vs RunStatus overlap" — overlap is real but both CLAUDE.mds already document scope. Downgrade.
-- **E1** "extension overloaded at 3 layers" — partially valid: the registry uses "extension" in type names that could be more explicit, but it's naming noise, not semantic confusion. The audit conflates type-name choices with three distinct concepts.
-- **F1** "host_api god-crate creep with concrete behavior" — the 5,245 LOC figure is verified, but `ingress.rs` (1,040 LOC) and `runtime_policy.rs` (849 LOC) are pure newtypes + enums + validation + serde. The *total-size* concern is valid; the "concrete behavior creeping in" claim is wrong.
-- **G2** "telegram_v2_host excluded from workspace" — the directory has *no `Cargo.toml`*; it's not in `members` and not in `exclude`. Cargo simply ignores it. The directory is orphaned/fossil, not "excluded".
-- **I4** "WasmHostTools silent escape hatch" — planned extension point with deny-by-default. Overstated risk; reframe to "document the planned wiring contract".
-- **W2** "tool WIT version not pinned (silent break risk)" — single-repo WIT-file mechanics protect against silent breaks (bindgen reads the file at compile time; all consumers rebuild). Adding a constant is documentation-only.
-
-### Findings MISSED by both passes
-
-- **`crates/AGENTS.md` and `crates/README.md` still list `ironclaw_storage` as an active crate** — it was dissolved in `06090f4e6` (cited elsewhere in this audit). **Biggest documentation drift bug in the repo** — these are the first files a new contributor reads. Fix urgency: HIGH.
-- **`ironclaw_silk_decoder`** (in `crates/`, excluded for `libclang` reason) is the cleanest precedent for how excluded directories should be documented; never named in this audit.
-- **Workspace `exclude` semantics need a taxonomy.** The audit conflates "excluded for legitimate build reasons" (fuzz, silk_decoder, channels-src, tools-src) with "directory orphaned by accident" (telegram_v2_host). A status field per excluded entry is needed.
-- **`ENGINE_V2` feature gate defaults to `false`.** Important context for A1 and A4 — v1 is shipping, not just maintained.
-- **`src/secrets/CLAUDE.md` is missing.** Higher-consequence module than most other `src/` modules; absence of local guardrails is a real gap.
-- **`src/workspace/embedding_cache.rs`** still on disk (~23 KB) despite embeddings extracted into `ironclaw_embeddings` (`1e2f9850b`) — possibly vestigial.
-- **`CapabilityHost` optional-traits builder pattern is undocumented** — risks future contributors promoting an optional trait to a required field.
-- **No reachability tests** in `crates/ironclaw_architecture/tests/` — for G1 (zero callers) and F1 (LOC/dep census). Both are ~20-line additions.
-- **Diagram 4 omits the database layer** — `ironclaw_memory` persists to dedicated reborn_memory_* tables; filesystem is not the *universal* substrate as drawn.
-- **No "directories in `crates/` not in `members` and not in `exclude`" check** — would catch G2-class fossils.
-
-### Wrong / wasteful resolutions (DROP)
-
-- **F2** "rename `host_api` → `host_contracts`, `host_runtime` → `host_composition`" — workspace-wide rename touching all 47 crates' `Cargo.toml`, every import, every CLAUDE.md, every architecture test. Wildly disproportionate to the documented "new contributor confusion" problem. Keep only the alternative: "add a Host Layer section to top-level CLAUDE.md" (10-line edit).
-- **B2** "rename events → `ironclaw_reborn_events*`" — bakes a transitional epoch into permanent crate names. Drop entirely.
-- **I1** "move `WasmRuntimeAdapter` into a new `ironclaw_wasm_runtime_adapter` crate" — would create a 4th WASM-prefixed crate, worsening E4 (which calls out the existing three WASM crates as already ambiguous). Better: move it into existing `ironclaw_wasm` + architecture test forbidding `impl RuntimeAdapter for *` in `host_runtime`.
-
-### Architecture-test matrix correction
-
-- **B1 was tagged ASSERTED — actually PARTIAL.** The 3 tests at `reborn_composition_boundaries.rs:38-105` enforce upward isolation (nothing above the composition depends on it) but do NOT forbid substrate crates from importing `ironclaw_reborn` directly without going through `_composition`. The "no ambiguity for callers" claim is only half-asserted. Add the inverse test.
-
-### Re-prioritization (replaces the original "Cross-cutting recommendations" section below)
-
-The original list pushed doc work first. Architecture tests are more durable than any doc fix. New order:
-
-1. **Triage I2 as a security review item** — separate ticket, separate owner, before any other audit follow-up.
-2. **Architecture tests** (was #5) — converts every "NEITHER" row into permanent enforcement. Cheapest wins: D1 (workspace→memory inverse), D4 (status-type duplication), G1 (zero-callers), G2 (fossil-directories), F1 (host_api LOC census), B1 (inverse-direction).
-3. **Fix `crates/AGENTS.md` + `crates/README.md` (`ironclaw_storage` drift)** — biggest doc drift, fastest fix, blocks new-contributor onboarding.
-4. **Convert the 3 `24c7051d2` deferred follow-ups into tracked issues** — secrets master-key check, authorization Arc migration, run_state unified-dispatch migration. Already scoped.
-5. **Status matrix** (was #1) — still useful for autonomous-agent legibility, but decays without enforcement.
-6. **Glossary** — still useful, lowest churn target.
-
-### Trustworthiness of this doc
-
-After review: **trustworthy as a discussion starter, not as a prioritization plan as originally framed.** Several first-pass findings were too confident; severity scale is uncalibrated; the two-pass structure left stale claims behind. With this Corrections section as the authoritative overlay, the doc is useful for async review.
+1. **Triage I2 as a security review item** — separate ticket, separate owner. Don't bundle with cleanup work.
+2. **Add the missing architecture tests.** Every "NEITHER" row in the coverage matrix is a ~20-line `cargo metadata` test in `crates/ironclaw_architecture/tests/`. Tests are durable; CLAUDE.md text decays. The lowest-hanging six:
+   - D1 (workspace→memory inverse-import test)
+   - D4 (Process/Run status type duplication check)
+   - G1 (zero-callers reachability test for `ironclaw_outbound`)
+   - G2 (fossil-directories test — entries in `crates/` not in `members` and not in `exclude`)
+   - F1 (host_api LOC + dep count census)
+   - B1 (substrate crates must not import `ironclaw_reborn` directly)
+3. **Fix `crates/AGENTS.md` and `crates/README.md`** — both still list `ironclaw_storage` as an active crate. Highest-leverage docs fix because new contributors read these first.
+4. **Convert the 3 deferred follow-ups from `24c7051d2` into tracked issues** — already scoped, just need owners:
+   1. `ironclaw_secrets` master-key decryptability check on `FilesystemSecretStore` (blocks LibSql/Postgres deletion).
+   2. `ironclaw_authorization` `FilesystemCapabilityLeaseStore` move from `&'a ScopedFilesystem` to `Arc<ScopedFilesystem>`.
+   3. `ironclaw_run_state` migration to unified filesystem dispatch.
+5. **Status matrix** — single section in top-level `CLAUDE.md` listing every crate + `src/<x>/` module as **canonical / legacy(v1) / shim / frozen / orphan**. Useful for autonomous-agent legibility once #2 enforces the boundaries.
+6. **CLAUDE.md required per crate** — several workspace crates have none today (`ironclaw_gateway`, `ironclaw_network`). Make CLAUDE.md a workspace-level invariant.
+7. **Glossary at `docs/GLOSSARY.md`** — define overloaded terms (extension, product adapter, channel, tool, lease, policy, capability, process, run, turn, thread, conversation), each naming the canonical owning crate.
 
 ---
 
 ## Diagrams
 
-Color legend (used in every diagram):
+Color legend:
 
 | Style | Meaning |
 | --- | --- |
 | 🟩 Green solid | Canonical / current reborn-era owner |
 | 🟧 Orange dashed | Legacy v1 (still in tree, partially active) |
 | 🟨 Yellow dashed | Shim (re-export only, no logic) |
-| ⬜ Gray dashed | Orphan / excluded / zero callers |
+| ⬜ Gray dashed | Orphan / fossil / zero callers |
 | 🟦 Blue solid | Hub crate (every crate depends on it) |
+| 🟥 Red border | Boundary violation surfaced by audit |
 
-### 1. Workspace cluster map (high level)
+### 1. Workspace cluster map
 
 The 47-crate workspace grouped by responsibility. Only the most representative crate per cluster is named; cross-cluster arrows show major composition lines.
 
@@ -125,9 +75,9 @@ flowchart TB
   reborn["ironclaw_reborn<br/>(internals)"]:::canonical
 
   subgraph Engine["Engine v2 (reborn)"]
-    agent_loop["agent_loop / loop_support"]:::canonical
-    turns["threads · turns · conversations"]:::canonical
-    engine_old["ironclaw_engine<br/>(near-empty)"]:::orphan
+    agent_loop["agent_loop · loop_support"]:::canonical
+    transcript["threads · turns · conversations"]:::canonical
+    engine["ironclaw_engine<br/>(decoupled by design)"]:::canonical
   end
 
   subgraph V1["Engine v1 (legacy in src/)"]
@@ -135,40 +85,37 @@ flowchart TB
     v1_tools["src/tools/<br/>(incl. dispatch.rs)"]:::legacy
     v1_workspace["src/workspace/"]:::legacy
     v1_skills["src/skills/"]:::legacy
-    v1_bridge["src/bridge/<br/>(v2 adapter, not in CLAUDE.md)"]:::legacy
+    v1_bridge["src/bridge/<br/>(v1↔v2 adapter)"]:::legacy
   end
 
   subgraph Policy["Policy / Auth"]
-    capabilities["capabilities"]:::canonical
+    capabilities["capabilities (facade)"]:::canonical
     dispatcher["dispatcher"]:::canonical
-    authz_block["authorization · approvals · trust · runtime_policy"]:::canonical
-    safety["safety"]:::canonical
+    authz["authorization · approvals<br/>trust · runtime_policy"]:::canonical
+    safety["safety<br/>(data-in-motion defense)"]:::canonical
   end
 
   subgraph Ext["Extensions / Tools / Adapters"]
     extensions["extensions"]:::canonical
-    pa["product_adapters · product_workflow<br/>· product_adapter_registry"]:::canonical
-    wasm["wasm · wasm_sandbox_core<br/>· wasm_product_adapters"]:::canonical
-    mcp["mcp"]:::canonical
-    scripts["scripts"]:::canonical
+    pa["product_adapters · workflow<br/>registry"]:::canonical
+    wasm["wasm · wasm_sandbox_core<br/>wasm_product_adapters"]:::canonical
+    mcp["mcp · scripts"]:::canonical
     tg["telegram_v2_adapter"]:::canonical
   end
 
   subgraph Storage["Storage / State"]
-    fs["filesystem"]:::canonical
-    memory["memory"]:::canonical
-    resources["resources"]:::canonical
-    secrets["secrets"]:::canonical
-    events["events · event_projections<br/>· reborn_event_store"]:::canonical
+    fs["filesystem<br/>(universal FS dispatch)"]:::canonical
+    memory["memory · resources<br/>secrets · threads"]:::canonical
+    events["events · event_projections<br/>reborn_event_store"]:::canonical
     proc["processes · run_state"]:::canonical
   end
 
   subgraph Channels["Channels / Outbound"]
     gateway["gateway<br/>(no CLAUDE.md)"]:::canonical
     tui["tui"]:::canonical
-    outbound["outbound<br/>(zero callers)"]:::orphan
+    outbound["outbound<br/>(zero callers, pre-prod)"]:::orphan
     network["network"]:::canonical
-    tgh["reborn_telegram_v2_host<br/>(excluded dir on disk)"]:::orphan
+    fossil["reborn_telegram_v2_host<br/>(fossil dir, no Cargo.toml)"]:::orphan
   end
 
   subgraph Host["Host / Substrate"]
@@ -193,65 +140,59 @@ flowchart TB
   v1_workspace -. forbidden inverse import .-> memory
 ```
 
-### 2. Engine v1 ↔ v2 layering (Theme A)
+### 2. Engine v1 ↔ v2 layering
 
-What runs the agent loop today, and who owns which decision. The bridge layer is the v1↔v2 seam — and is **invisible** in the top-level `CLAUDE.md` (finding A5).
+What runs the agent loop today, and where the v1↔v2 seam lives. `ironclaw_engine` and `ironclaw_agent_loop` are both substantial canonical crates; the bridge in `src/bridge/` is where v1 callers cross into v2.
 
 ```mermaid
 flowchart LR
   classDef canonical fill:#cfe9c9,stroke:#2e7d32,color:#000
   classDef legacy fill:#ffe0b2,stroke:#e65100,color:#000,stroke-dasharray:4
-  classDef orphan fill:#eeeeee,stroke:#9e9e9e,color:#444,stroke-dasharray:6 4
-  classDef ambiguous fill:#ffcdd2,stroke:#b71c1c,color:#000
+  classDef bridge fill:#fff3e0,stroke:#bf360c,color:#000
 
-  subgraph V1["v1 (in src/, maintenance)"]
-    direction TB
+  subgraph V1["v1 (in src/, default — ENGINE_V2=false)"]
     s_agent["src/agent/<br/>dispatcher · scheduler · sessions"]:::legacy
-    s_tools["src/tools/dispatch.rs<br/>ToolDispatcher (per CLAUDE.md)"]:::legacy
-    s_skills["src/skills/attenuation<br/>(documented v1-only, no #[deprecated])"]:::legacy
+    s_tools["src/tools/dispatch.rs<br/>(pre-authorization entry)"]:::legacy
+    s_skills["src/skills/attenuation<br/>(v1-only)"]:::legacy
   end
 
   subgraph Bridge["v1 ↔ v2 bridge"]
-    direction TB
-    bridge["src/bridge/<br/>router · effect_adapter"]:::ambiguous
+    bridge["src/bridge/<br/>router · effect_adapter"]:::bridge
   end
 
-  subgraph V2["v2 (reborn, canonical)"]
-    direction TB
+  subgraph V2["v2 (reborn, canonical when ENGINE_V2=true)"]
     reborn["ironclaw_reborn::PlannedDriver"]:::canonical
     agent_loop["ironclaw_agent_loop<br/>strategy · planner · executor"]:::canonical
     loop_support["ironclaw_loop_support<br/>(host adapters)"]:::canonical
-    engine_old["ironclaw_engine<br/>(gutted — 2 deps)"]:::orphan
-    new_dispatcher["ironclaw_dispatcher<br/>RuntimeDispatcher"]:::canonical
+    engine["ironclaw_engine<br/>(38K LOC: types · traits · execution)"]:::canonical
+    dispatcher_v2["ironclaw_dispatcher<br/>(post-authorization routing)"]:::canonical
   end
 
   s_agent --> s_tools
   s_agent --> s_skills
-  s_agent -. via .-> bridge
+  s_agent --> bridge
   bridge --> reborn
   reborn --> agent_loop
   reborn --> loop_support
-  reborn -. ??? .-> engine_old
-  s_tools -. competes with .-> new_dispatcher
+  s_tools -. v1 entry; v2 converges via .-> dispatcher_v2
 ```
 
-### 3. Policy / auth decision pipeline (Theme C)
+### 3. Policy / auth decision pipeline
 
-The order policies fire in, and which crate owns each step. There is **no shared trait** spanning these — finding C2.
+Logical decision order. The actual call order is composed via port injection in `CapabilityHost`; types are not unified by a shared trait but are sequenced by the composition root.
 
 ```mermaid
 flowchart TB
   classDef canonical fill:#cfe9c9,stroke:#2e7d32,color:#000
-  classDef ambiguous fill:#ffcdd2,stroke:#b71c1c,color:#000
 
   request["dispatch request<br/>(agent decided to do X)"]
-  trust["ironclaw_trust<br/>trust class ceiling<br/>(host policy)"]:::canonical
-  runtime["ironclaw_runtime_policy<br/>deployment mode<br/>+ org policy"]:::canonical
+  trust["ironclaw_trust<br/>trust class ceiling"]:::canonical
+  runtime["ironclaw_runtime_policy<br/>deployment mode + org policy"]:::canonical
   authz["ironclaw_authorization<br/>per-invocation grant/lease"]:::canonical
   approvals["ironclaw_approvals<br/>real-time user consent"]:::canonical
-  capabilities["ironclaw_capabilities<br/>composes all four"]:::canonical
+  capabilities["ironclaw_capabilities<br/>composes all four via port injection"]:::canonical
   dispatcher["ironclaw_dispatcher<br/>post-authorization routing"]:::canonical
-  safety["ironclaw_safety<br/>(orthogonal: data-in-motion)"]:::canonical
+  safety["ironclaw_safety<br/>(data-in-motion defense, orthogonal)"]:::canonical
   exec["execution<br/>(wasm · mcp · script · builtin)"]
 
   request --> trust
@@ -261,13 +202,13 @@ flowchart TB
   approvals --> capabilities
   capabilities --> dispatcher
   dispatcher --> exec
-  safety -. sanitize inbound/outbound .-> request
+  safety -. sanitize inbound .-> request
   safety -. sanitize tool output .-> exec
 ```
 
-### 4. Storage / state model (Theme D)
+### 4. Storage / state model
 
-The `filesystem` crate is the universal substrate as of the May 18 "universal FS dispatch" landing (`f95288c16`). `src/workspace/` and `src/db/` are still `pub mod` despite being slated for dissolution.
+`ironclaw_filesystem` is the universal FS-dispatch substrate as of the May 2026 dissolution work. Domain stores layer on top; `reborn_event_store` selects the backing database (libSQL / Postgres).
 
 ```mermaid
 flowchart TB
@@ -277,9 +218,9 @@ flowchart TB
   classDef hub fill:#bbdefb,stroke:#0d47a1,color:#000
 
   host_api["ironclaw_host_api<br/>(IDs · scope · path · audit)"]:::hub
-  fs["ironclaw_filesystem<br/>universal FS dispatch<br/>(put · get · CAS)"]:::canonical
+  fs["ironclaw_filesystem<br/>universal FS dispatch (put · get · CAS)"]:::canonical
 
-  subgraph Domain["Domain stores (all on filesystem)"]
+  subgraph Domain["Domain stores"]
     memory["memory"]:::canonical
     resources["resources"]:::canonical
     secrets["secrets"]:::canonical
@@ -289,17 +230,22 @@ flowchart TB
   end
 
   subgraph Run["Lifecycle"]
-    run_state["run_state<br/>can block (approval/auth)"]:::canonical
-    processes["processes<br/>terminal failures only"]:::canonical
+    run_state["run_state<br/>(can block on approval/auth)"]:::canonical
+    processes["processes<br/>(terminal-failure only)"]:::canonical
   end
 
   subgraph Events["Events"]
     events["events"]:::canonical
     event_proj["event_projections"]:::canonical
-    event_store["reborn_event_store"]:::canonical
+    event_store["reborn_event_store<br/>(backend selection)"]:::canonical
   end
 
-  subgraph Legacy["Legacy (in src/, still pub mod)"]
+  subgraph DB["Backend"]
+    libsql["libSQL"]
+    pg["PostgreSQL"]
+  end
+
+  subgraph Legacy["Legacy in src/ (still pub mod)"]
     v1_ws["src/workspace/"]:::legacy
     v1_db["src/db/"]:::legacy
     v1_secrets["src/secrets/"]:::legacy
@@ -309,17 +255,17 @@ flowchart TB
   fs --> Domain
   fs --> Run
   fs --> Events
+  event_store --> libsql
+  event_store --> pg
+  memory --> event_store
   v1_ws -. forbidden inverse .-> memory
-  event_proj -. domain leak .-> memory
-  v1_db -.- v1_ws
-  v1_secrets -.- secrets
 ```
 
-Red arrows are **boundary violations**: `src/workspace/reborn_identity_context.rs` imports `ironclaw_memory` types despite `ironclaw_memory/CLAUDE.md` forbidding the inverse; `ironclaw_event_projections` imports `MemorySignificantEventSink` / `PromptWriteSafetyEventSink` despite projections being declared backend-independent.
+The red arrow is a real boundary violation: `src/workspace/reborn_identity_context.rs` imports `ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS` despite `ironclaw_memory/CLAUDE.md` forbidding the inverse.
 
-### 5. Extension / tool / adapter / channel concept map (Theme E)
+### 5. Extension / tool / adapter / channel concept map
 
-Four names, several crates, three Telegram impls. Boxes show where each name is *defined*; arrows show "is sometimes used to mean."
+Four names, several crates, three Telegram implementations on disk.
 
 ```mermaid
 flowchart TB
@@ -328,753 +274,442 @@ flowchart TB
   classDef orphan fill:#eeeeee,stroke:#9e9e9e,color:#444,stroke-dasharray:6 4
   classDef ambiguous fill:#ffcdd2,stroke:#b71c1c,color:#000
 
-  subgraph ExtensionWord["Word: extension (3 meanings)"]
-    e1["ironclaw_extensions<br/>ExtensionRuntime<br/>(manifest-level capability)"]:::canonical
-    e2["product_adapter_registry<br/>ExtensionInstallationStore<br/>(installed ProductAdapter)"]:::ambiguous
-    e3["top-level CLAUDE.md<br/>'Extension/Auth Invariants'<br/>extension_name = telegram | gmail"]:::ambiguous
+  subgraph ExtensionWord["Word: extension"]
+    e1["ironclaw_extensions::ExtensionRuntime<br/>(manifest-level capability)"]:::canonical
+    e2["product_adapter_registry<br/>ExtensionInstallationStore<br/>(ProductAdapter installation)"]:::ambiguous
+    e3["top-level CLAUDE.md<br/>extension_name = telegram | gmail<br/>(user-facing routing)"]:::canonical
   end
 
-  subgraph ToolWord["Word: tool (4 abstractions)"]
+  subgraph ToolWord["Word: tool"]
     t1["src/tools::Tool<br/>(v1, async_trait + JobContext)"]:::legacy
-    t2["ironclaw_wasm::WasmHostTools"]:::canonical
+    t2["ironclaw_wasm::WasmHostTools<br/>(WIT host imports)"]:::canonical
     t3["ironclaw_mcp::McpExecutionRequest"]:::canonical
-    t4["ironclaw_scripts<br/>(no exported trait)"]:::canonical
+    t4["ironclaw_scripts"]:::canonical
+    shared["ironclaw_engine::traits::EffectExecutor<br/>(converging boundary — undocumented)"]:::ambiguous
   end
 
   subgraph AdapterWord["Word: adapter / channel"]
-    a1["product_adapters<br/>ProductAdapter trait"]:::canonical
-    a2["wit/channel.wit<br/>sandboxed-channel (orphan)"]:::orphan
-    a3["src/channels/<br/>Channel trait (v1)"]:::legacy
-    a4["channels-src/*<br/>WASM channels (excluded)"]:::orphan
+    a1["product_adapters<br/>ProductAdapter trait (canonical)"]:::canonical
+    a2["wit/channel.wit<br/>(spec only, no host impl)"]:::orphan
+    a3["src/channels/<br/>Channel trait (legacy)"]:::legacy
   end
 
-  subgraph Telegram["Three Telegrams"]
-    tg1["telegram_v2_adapter<br/>(in workspace · current)"]:::canonical
-    tg2["reborn_telegram_v2_host<br/>(excluded dir on disk)"]:::orphan
-    tg3["channels-src/telegram<br/>(WASM · excluded)"]:::orphan
+  subgraph Telegram["Three Telegrams on disk"]
+    tg1["telegram_v2_adapter<br/>(in workspace, current)"]:::canonical
+    tg2["reborn_telegram_v2_host<br/>(fossil; no Cargo.toml)"]:::orphan
+    tg3["channels-src/telegram<br/>(WASM, excluded)"]:::orphan
   end
 
-  e2 -. "should be<br/>ProductAdapterInstallation*" .-> a1
-  e3 -. "should be<br/>ExtensionName newtype" .-> e1
-  t1 -. "v1 only; v2 calls" .-> t2
-  t1 -. "v1 only; v2 calls" .-> t3
-  a3 -. "legacy" .-> a1
-  a2 -. "host impl missing" .-> a1
-  tg2 -. "consolidated, delete" .-> tg1
+  e2 -. rename to<br/>ProductAdapterInstallation* .-> a1
+  t1 --> shared
+  t2 --> shared
+  t3 --> shared
+  t4 --> shared
+  a3 -. legacy, migrate to .-> a1
+  a2 -. host impl missing .-> a1
+  tg2 -. consolidated; delete .-> tg1
 ```
 
-### 6. `ironclaw_host_api` fan-in (Theme F)
+### 6. `ironclaw_host_api` fan-in
 
-Visualizing why this crate is the highest-leverage cleanup target: **every** workspace crate depends on it, and it has started growing concrete behavior (1,040-line `ingress.rs`, 849-line `runtime_policy.rs`) on top of the shared vocabulary.
+Every workspace crate depends on `host_api`. Total 5,245 LOC across 16 modules. The contents are vocabulary — newtypes, enums, validation, serde — but the size warrants a split discussion.
 
 ```mermaid
 flowchart LR
   classDef hub fill:#bbdefb,stroke:#0d47a1,color:#000
   classDef canonical fill:#cfe9c9,stroke:#2e7d32,color:#000
-  classDef ambiguous fill:#ffcdd2,stroke:#b71c1c,color:#000
 
-  hub["ironclaw_host_api<br/>(5,245 LOC, 16 modules)<br/>47/47 deps"]:::hub
+  hub["ironclaw_host_api<br/>(5,245 LOC across 16 modules)<br/>47/47 workspace deps"]:::hub
 
   hub --> vocab["✅ ids · scope · path · audit · capability<br/>(true vocabulary)"]:::canonical
-  hub --> ingress["⚠️ ingress.rs (1,040 LOC)<br/>HTTP route validation<br/>(belongs in http_dispatch)"]:::ambiguous
-  hub --> rp["⚠️ runtime_policy.rs (849 LOC)<br/>policy enums + resolver hints<br/>(belongs in runtime_policy)"]:::ambiguous
+  hub --> ingress["ingress.rs (1,040 LOC)<br/>route newtypes + validation + serde<br/>(vocabulary, but large — split candidate)"]:::canonical
+  hub --> rp["runtime_policy.rs (849 LOC)<br/>policy enums + FromStr<br/>(vocabulary, but large — fold into ironclaw_runtime_policy?)"]:::canonical
 
   hub <-- "every crate" --- everyone["all 46 other crates"]
 ```
 
 ---
 
-## Theme A — Engine v1 ↔ v2 migration is mid-flight and undocumented
+## Priority 0 — Security ticket
 
-The most pervasive theme. Reborn is the v2 engine. `src/agent/`, `src/tools/dispatch.rs`, `src/skills/`, `src/bridge/` and several other modules are v1 — but nothing tells a new contributor (or an autonomous agent) which surface to extend.
+### I2. Caller's `trust_decision` is destructured and dropped at host_runtime
 
-### A1. Agent loop ownership: `src/agent/` vs `ironclaw_agent_loop` vs `ironclaw_engine` vs `ironclaw_reborn`
+`HostRuntimeLoopCapabilityPort::invoke_capability` (`loop_support/src/capability_port.rs:817`) reads `provider_trust` and passes a `trust_decision` field into `RuntimeCapabilityRequest`. `DefaultHostRuntime::invoke_capability` (`host_runtime/src/production.rs:248`) destructures it as `_caller_trust_decision` (the underscore = intentionally discarded) and re-evaluates trust locally via `self.evaluate_invocation_trust`.
 
-**Ambiguity.** Four crates / modules touch "the agent loop":
-- `src/agent/` (~31 KB) is the fully implemented v1 agent (dispatcher, scheduler, session management).
-- `ironclaw_engine` was the central crate on `main` but now declares only `ironclaw_common` + `ironclaw_skills` as deps — gutted.
-- `ironclaw_agent_loop` owns framework state, strategies, planner, executor (~150 KB).
-- `ironclaw_reborn::PlannedDriver` is the adapter that wires agent_loop into the runtime.
+The host being authoritative on trust is correct design. **But the public field is plumbed through the API and silently dropped at the consumer.** A future contributor wiring a custom `LoopCapabilityPort` could pass a carefully-constructed `trust_decision` and never see it applied — masking a downstream security regression.
 
-A contributor adding "fallback when a tool times out" has four plausible homes.
+**Proposed resolution.** Pick one:
+1. Remove the `trust_decision` field from `RuntimeCapabilityRequest` entirely (preferred — fewer dead fields means fewer assumptions to maintain).
+2. Rename to `_advisory_trust_decision` and add a `#[doc]` warning that the host re-evaluates and the field is for logging only.
+3. Use the caller's decision when present and skip re-evaluation.
 
-**Evidence.**
-- `src/agent/mod.rs:1-16` — v1 "Core agent logic"
-- `crates/ironclaw_engine/Cargo.toml:6` — claims "unified thread-capability-CodeAct execution engine" but dep set is empty
-- `crates/ironclaw_agent_loop/Cargo.toml:6` — "framework state and strategy contracts"
-- `crates/ironclaw_reborn/src/lib.rs:1-35` — assembly of agent_loop + drivers
-
-**Proposed resolution.**
-- Add a "v1 vs v2 engine status" section to project-level `CLAUDE.md` (after the Architecture section) declaring `src/agent/` as v1-maintenance-mode and `ironclaw_reborn` + `ironclaw_agent_loop` as v2-canonical.
-- In each crate's `CLAUDE.md` state the layer: `ironclaw_engine` = execution mechanics (or delete if fully gutted), `ironclaw_agent_loop` = orchestration strategy, `ironclaw_reborn` = adapter. Engine and agent_loop must not import each other; only `ironclaw_reborn` (or its composition) imports both.
-- Suggested owner: agent/loop team.
-
-### A2. Tool dispatcher: `src/tools/dispatch.rs` vs `ironclaw_dispatcher`
-
-**Ambiguity.** Project-level `CLAUDE.md` ("Everything Goes Through Tools", lines 212–230) declares `src/tools/dispatch.rs::ToolDispatcher::dispatch()` as the canonical entry point. A new `ironclaw_dispatcher` crate exists with its own `RuntimeDispatcher` / `CapabilityDispatcher` trait. They are not cross-referenced.
-
-**Evidence.**
-- `src/tools/dispatch.rs:1-50`
-- `crates/ironclaw_dispatcher/src/lib.rs:1-6` and `crates/ironclaw_dispatcher/CLAUDE.md:1-2` ("Own already-authorized runtime routing only")
-- Zero `ironclaw_dispatcher` imports anywhere in `src/`
-
-**Proposed resolution.**
-- Declare in `CLAUDE.md`: `src/tools/dispatch.rs` is v1; `ironclaw_dispatcher` (post-authorization) is v2. New code routes via `ironclaw_capabilities::CapabilityHost` → `ironclaw_dispatcher`.
-- File a tracking issue to remove `src/tools/dispatch.rs` once v1 is retired.
-- Suggested owner: dispatch/capabilities team.
-
-### A3. Tool trait fragmentation — four parallel "Tool" abstractions
-
-**Ambiguity.** No shared trait spans the four runtimes:
-- `src/tools::Tool` (legacy, async_trait, `JobContext`)
-- `WasmHostTools` in `ironclaw_wasm` (host-import seam only)
-- `McpExecutionRequest` in `ironclaw_mcp` (request-shaped, no trait)
-- script backend in `ironclaw_scripts` (not exported as a trait)
-
-**Evidence.**
-- `src/tools/tool.rs:1-100`
-- `crates/ironclaw_wasm/src/host.rs`
-- `crates/ironclaw_mcp/src/lib.rs:50-97`
-- `crates/ironclaw_scripts/Cargo.toml`
-
-**Proposed resolution.**
-- Extract a shared `CapabilityExecutionRequest` in `ironclaw_host_api` (or a new `ironclaw_capability_execution` crate). Have wasm/mcp/scripts implement the same interface.
-- Mark `src/tools::Tool` as v1-only.
-- Suggested owner: tools/runtime team.
-
-### A4. Skills shim contains v1-only deprecated submodules with no `#[deprecated]`
-
-**Ambiguity.** `src/skills/mod.rs:13-26` documents that `attenuation` and `bundled` are v1-only and "can be deleted" once v1 is gone — but no `#[deprecated]` attribute, and `src/agent/dispatcher.rs` still calls `attenuate_tools()` unconditionally.
-
-**Evidence.** `src/skills/mod.rs:13-26`, `src/agent/dispatcher.rs` (callsite of `attenuate_tools`).
-
-**Proposed resolution.**
-- Add module-level `#![deprecated(since = "v1-end-of-life", note = "...")]` and `#[allow(deprecated)]` at the v1 callsites with a link to a v1-sunset tracking issue.
-- Suggested owner: skills team.
-
-### A5. `src/bridge/` is invisible in project-level `CLAUDE.md`
-
-**Ambiguity.** `src/bridge/` is the v2 engine→host adapter (auth, effects, LLM, store) with its own `CLAUDE.md`, but the project-level `CLAUDE.md` Project Structure section never mentions it. New contributors will wire engine output directly into handlers instead of through `src/bridge/router.rs`.
-
-**Evidence.**
-- `src/bridge/CLAUDE.md` exists (20 lines, declares the adapter contract)
-- Top-level `CLAUDE.md:83-217` Project Structure does not list `src/bridge/`
-
-**Proposed resolution.**
-- Add a `src/bridge/` row to the Project Structure table in top-level `CLAUDE.md`.
-- Add to Module Specs table.
-- Suggested owner: whoever owns bridge.
+Owner: host_runtime + security review.
 
 ---
 
-## Theme B — Reborn-vs-non-reborn naming is inconsistent
+## Architecture-test coverage matrix
 
-### B1. Two composition crates: `ironclaw_reborn` vs `ironclaw_reborn_composition`
-
-**Ambiguity.** Both crates own reborn assembly:
-- `ironclaw_reborn` (`src/lib.rs` ≈ 35 lines, mostly `pub mod`) — low-level drivers and adapters
-- `ironclaw_reborn_composition` (`src/lib.rs` ≈ 726 lines, full runtime build) — facade
-
-A caller unsure whether to depend on `reborn` (drivers) or `reborn_composition` (full runtime) will find both plausible.
-
-**Evidence.**
-- `crates/ironclaw_reborn/Cargo.toml:6` — "Standalone Reborn composition and adapters"
-- `crates/ironclaw_reborn_composition/Cargo.toml:6` — "Facade-shaped production composition root"
-- `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` enforces some part of this already
-
-**Proposed resolution.**
-- Rename `ironclaw_reborn` → `ironclaw_reborn_internals` OR add a top-of-file note in `ironclaw_reborn/CLAUDE.md`: "Internal. Only `ironclaw_reborn_composition` is a sanctioned public dependency."
-- Extend the architecture test to log a clear error for boundary violations.
-- Suggested owner: reborn team.
-
-### B2. Three event crates, two without the reborn prefix
-
-**Ambiguity.** `ironclaw_events`, `ironclaw_event_projections`, `ironclaw_reborn_event_store` — the "reborn" prefix appears on only one, but production only wires the reborn store. Either the first two should be renamed or documented as reborn-only.
-
-**Evidence.**
-- `crates/ironclaw_events/src/lib.rs:1-8`
-- `crates/ironclaw_event_projections/src/lib.rs:1-6` (mentions reborn in docstring; name doesn't)
-- `crates/ironclaw_reborn_event_store/src/lib.rs:1-8`
-
-**Proposed resolution.**
-- Rename `ironclaw_events` and `ironclaw_event_projections` to `ironclaw_reborn_events*` to match the reborn-only-in-production reality, OR add explicit CLAUDE.md notes forbidding non-reborn dependencies.
-- Suggested owner: events team.
-
-### B3. `RebornCompositionProfile` lives in the composition crate, but is a config concern
-
-**Ambiguity.** `RebornCompositionProfile` (Disabled/LocalDev/Production/MigrationDryRun) is defined in `ironclaw_reborn_composition::profile`. Outer harnesses or v1 AppBuilder that want to pick a profile must depend on the composition crate just for an enum.
-
-**Evidence.**
-- `crates/ironclaw_reborn_composition/src/profile.rs`
-- `crates/ironclaw_reborn_composition/src/factory.rs:60-66`
-
-**Proposed resolution.**
-- Move `RebornCompositionProfile` to `ironclaw_reborn_config` (which already owns runtime identity + poll settings). Composition imports it; outer harnesses can depend on config alone.
-- Suggested owner: reborn team.
-
----
-
-## Theme C — Policy / auth concept overload (`safety`/`trust`/`authorization`/`capabilities`/`approvals`/`runtime_policy`)
-
-Six crates carry a piece of "what is this thing allowed to do." No shared trait spans them; new policies risk reinventing the wheel.
-
-### C1. ~~`ironclaw_capabilities` has Cargo dependency on `ironclaw_dispatcher` that its own CLAUDE.md forbids~~ — **CORRECTED on deep pass**
-
-**Correction.** Verified `crates/ironclaw_capabilities/Cargo.toml`: `ironclaw_dispatcher` is in `[dev-dependencies]`, **not** `[dependencies]`. The CLAUDE.md guardrail ("use the neutral `CapabilityDispatcher` port; do not add a normal dependency on concrete `ironclaw_dispatcher`") is honored. Original first-pass claim was wrong — apologies.
-
-**What's actually interesting here:** Capabilities composes approvals + dispatcher + filesystem + events + resources via **port traits injected by the outer composition root**; the concrete impls only appear in dev-deps so tests can wire them. That's a healthy DI pattern worth calling out in `ironclaw_capabilities/CLAUDE.md` explicitly as a model for other "kitchen-sink" facade crates.
-
-**Proposed resolution.**
-- Update `ironclaw_capabilities/CLAUDE.md` with a one-paragraph "DI pattern" note so the design intent is documented (the port-based composition is the design pattern, not an accidental dev-deps split).
-- No code change.
-- Suggested owner: capabilities team.
-
-### C2. Three policy concepts with no shared interface — `authorization` vs `trust` vs `runtime_policy`
-
-**Ambiguity.** Each crate has its own policy type (`CapabilityLease`, `EffectiveTrustClass`, `EffectiveRuntimePolicy`). Composition order matters (trust → runtime policy → grant/lease), but is not encoded in a trait. New policy layers can drift.
-
-**Evidence.**
-- `crates/ironclaw_trust/src/lib.rs:44-50`
-- `crates/ironclaw_authorization/src/lib.rs:37-57`
-- `crates/ironclaw_runtime_policy/src/lib.rs:1-47`
-
-**Proposed resolution.**
-- Add `crates/ironclaw_authorization/POLICY-COMPOSITION.md` documenting the ordering invariant and providing example flows.
-- Consider a marker trait `trait PolicyResult: Send + Sync` as a hint that a new policy is "another in the chain".
-- Suggested owner: security/policy team.
-
-### C3. Lease type ownership crosses two crates ambiguously
-
-**Ambiguity.** `CapabilityLease` is defined in `ironclaw_authorization` but issued by `ironclaw_approvals::ApprovalResolver::approve_dispatch()`. If a new approval flavor wants its own lease subtype, it's unclear which crate owns the definition.
-
-**Evidence.**
-- `crates/ironclaw_authorization/src/lib.rs:167-192` defines the lease
-- `crates/ironclaw_approvals/src/lib.rs:6-7, 45-58` imports the store and calls `leases.issue(...)`
-
-**Proposed resolution.**
-- Formalize in `ironclaw_authorization/CLAUDE.md`: all lease types live in authorization; approvals may only extend the *store* trait.
-- Suggested owner: authorization team.
-
-### C4. `ironclaw_safety` scope is vague (4 concerns in one crate)
-
-**Ambiguity.** Per `Cargo.toml:6`, `ironclaw_safety` covers prompt injection + input validation + secret-leak detection + safety policy enforcement. "Data exfiltration policy" or similar future features could plausibly belong here or in authorization/trust.
-
-**Evidence.** `crates/ironclaw_safety/Cargo.toml:6`, `crates/ironclaw_safety/src/lib.rs:10-24`.
-
-**Proposed resolution.**
-- Document in `ironclaw_safety/CLAUDE.md` that scope is **data-in-motion defense** (inbound payloads, tool outputs); capability/grant/trust policy lives elsewhere.
-- Optional: rename to `ironclaw_intake_safety` to signal scope.
-- Suggested owner: safety team.
-
-### C5. `ironclaw_runtime_policy` re-exports asymmetrically
-
-**Ambiguity.** The crate re-exports `EffectiveRuntimePolicy` from `ironclaw_host_api` (because it's in the resolver's return type) but tells callers to import other vocab directly from `host_api`. A caller hits `ironclaw_runtime_policy::RuntimePolicy` (doesn't exist) before learning the rule.
-
-**Evidence.** `crates/ironclaw_runtime_policy/src/lib.rs:40-47`.
-
-**Proposed resolution.**
-- Either re-export the full `ironclaw_host_api::runtime_policy::*` namespace, or add a `Note:` block at the top of `lib.rs` explaining the asymmetry.
-- Suggested owner: runtime_policy team.
-
----
-
-## Theme D — Storage / state crate overlap
-
-### D1. `src/workspace/` vs `ironclaw_memory` boundary breached by a direct import
-
-**Ambiguity.** `ironclaw_memory/CLAUDE.md` forbids depending on `src/workspace`. Yet `src/workspace/reborn_identity_context.rs` imports from `ironclaw_memory`. No CLAUDE.md says which layer owns `memory_write` routing.
-
-**Evidence.**
-- `src/workspace/reborn_identity_context.rs` — `use ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS;`
-- `crates/ironclaw_memory/CLAUDE.md:1-5`
-- `src/workspace/CLAUDE.md` (no mention of v2 coexistence)
-
-**Proposed resolution.**
-- Update `src/workspace/CLAUDE.md`: "v1-only. v2 memory uses `ironclaw_memory`. The `reborn_identity_context.rs` import is a temporary v1→v2 bootstrap; tracked in <issue>."
-- File the tracking issue.
-- Suggested owner: workspace/memory team.
-
-### D2. `src/db/` + `src/workspace/` still `pub mod` despite "dissolution" commits
-
-**Ambiguity.** Recent commits ("universal FS dispatch", "src/db/ dissolution pass") suggest these are being phased out, but they remain `pub mod` at `src/lib.rs`. Status (active, shimmed, frozen) is undeclared.
-
-**Evidence.**
-- `src/lib.rs` still exports `pub mod db` and `pub mod workspace`
-- `crates/ironclaw_memory/CLAUDE.md` calls them "reference material only"
-- `crates/ironclaw_reborn_event_store/src/lib.rs:18-19` mentions dissolution
-
-**Proposed resolution.**
-- Add a "Legacy modules" section to top-level `CLAUDE.md` enumerating modules by status: active / shimmed / frozen.
-- Or move to `legacy_compat/` crate with deprecation attributes.
-- Suggested owner: storage/state team.
-
-### D3. `src/secrets/` and `crates/ironclaw_secrets/` coexist with no documented relationship
-
-**Ambiguity.** Both have full implementations. Project-level `CLAUDE.md` does not declare which is authoritative.
-
-**Evidence.** `src/lib.rs` (`pub mod secrets`), `crates/ironclaw_secrets/CLAUDE.md:1-5`.
-
-**Proposed resolution.**
-- Pick one as authoritative; mark the other as frozen reference (or migrate fully). Document in both CLAUDE.md files.
-- Suggested owner: secrets team.
-
-### D4. `ironclaw_processes` vs `ironclaw_run_state` — parallel "currently running" types
-
-**Ambiguity.** `ProcessStatus` (4 states) and `RunStatus` (5 states) overlap semantically but share no type. A new contributor will not know which one to extend with a new state.
-
-**Evidence.**
-- `crates/ironclaw_processes/src/types.rs` (`ProcessStatus`)
-- `crates/ironclaw_run_state/src/lib.rs:34-40` (`RunStatus`)
-- Neither crate depends on the other
-
-**Proposed resolution.**
-- Document in both crates' `CLAUDE.md`: `run_state` owns invocation-wide lifecycle (can block); `processes` owns isolated capability process (terminal failures only).
-- Composition fuses them via `(invocation_id, process_id)`.
-- Suggested owner: runtime team.
-
-### D5. `threads` vs `turns` vs `conversations` — chat-history three-way overlap
-
-**Ambiguity.** `ironclaw_threads` (messages + redaction), `ironclaw_turns` (turn coordination + run state), `ironclaw_conversations` (binding + inbound dispatch). `SessionThreadService` is exported from both `threads` and `conversations`.
-
-**Evidence.**
-- `crates/ironclaw_threads/src/lib.rs:22`
-- `crates/ironclaw_conversations/src/lib.rs:34`
-- All three CLAUDE.md files describe their own scope but no cross-reference
-
-**Proposed resolution.**
-- Add a "Three-Layer Transcript Model" section to top-level `CLAUDE.md` or to all three crate CLAUDE.md files:
-  - `threads` = message-level CRUD + redaction (no turn knowledge)
-  - `turns` = turn state + run coordination (no message shape knowledge)
-  - `conversations` = binding + inbound routing (no message internals)
-- Remove the `SessionThreadService` re-export from `conversations`.
-- Suggested owner: chat-history team.
-
----
-
-## Theme E — Extension / tool / adapter / channel concept overload
-
-### E1. "Extension" used at three layers with three meanings
-
-**Ambiguity.** The word "extension" means three different things:
-1. `ironclaw_extensions::ExtensionRuntime` — manifest-level capability metadata (WASM/Script/MCP/FirstParty/System)
-2. `ironclaw_product_adapter_registry::ExtensionInstallationStore` / `ExtensionActivationState` — *ProductAdapter* installations
-3. CLAUDE.md "Extension/Auth Invariants" — user-facing identity (`extension_name = telegram | gmail`) routed to setup UI
-
-**Evidence.**
-- `crates/ironclaw_extensions/src/lib.rs:78-99`
-- `crates/ironclaw_product_adapter_registry/src/lib.rs`
-- top-level `CLAUDE.md:35-57`
-
-**Proposed resolution.**
-- Rename `product_adapter_registry`'s `Extension*` types to `ProductAdapterInstallation*`.
-- Reserve "extension" for the manifest-level capability concept (1).
-- Add `ExtensionName` and `CredentialName` newtypes in `ironclaw_common`.
-- Suggested owner: extensions/adapters team.
-
-### E2. `ProductAdapter` vs `Channel` — which abstraction owns Telegram?
-
-**Ambiguity.** `ironclaw_product_adapters` defines `ProductAdapter`. `channels-src/telegram/` compiles to a WASM `sandboxed-channel`. `ironclaw_telegram_v2_adapter` is a native Rust ProductAdapter. The WIT `wit/channel.wit` declares a separate `channel-host` interface. Which is authoritative for new integrations?
-
-**Evidence.**
-- `crates/ironclaw_telegram_v2_adapter/Cargo.toml:6`
-- `channels-src/telegram/Cargo.toml:1-2`
-- `wit/channel.wit:1-34`
-
-**Proposed resolution.**
-- Formalize `ProductAdapter` (`ironclaw.product_adapter/v1`) as the new contract; document `Channel` (`ironclaw.channel/v1`) as legacy. New integrations use ProductAdapter manifests. Document the migration path for `channels-src/*`.
-- Suggested owner: extensions/adapters team.
-
-### E3. Three Telegram implementations on disk
-
-**Ambiguity.**
-1. `crates/ironclaw_telegram_v2_adapter/` (WASM, in workspace) — current product adapter
-2. `crates/ironclaw_reborn_telegram_v2_host/` (on disk, **excluded from workspace**, contains only a `migrations/` folder)
-3. `channels-src/telegram/` (WASM channel, excluded)
-
-Commit `af0ef699e` consolidated the host into the reborn binary but never deleted the directory.
-
-**Evidence.**
-- Top-level `Cargo.toml:2-44` workspace `members` + `exclude` lists
-- `crates/ironclaw_reborn_telegram_v2_host/` — directory contents
-- git log of `af0ef699e`
-
-**Proposed resolution.**
-- Delete `crates/ironclaw_reborn_telegram_v2_host/` (orphaned).
-- Document in `ironclaw_reborn_composition/CLAUDE.md` which Telegram path is production (adapter vs legacy channel).
-- Suggested owner: telegram/channels team.
-
-### E4. Three WASM crates with unclear split rationale
-
-**Ambiguity.** `ironclaw_wasm` (tool runtime), `ironclaw_wasm_sandbox_core` (Wasmtime primitives), `ironclaw_wasm_product_adapters` (adapter host glue). The split is not enforced by tests — a violation would compile.
-
-**Evidence.**
-- `crates/ironclaw_wasm/Cargo.toml:7-13`
-- `crates/ironclaw_wasm_sandbox_core/Cargo.toml` (no `ironclaw_*` deps — clean core)
-- `crates/ironclaw_wasm_product_adapters/Cargo.toml:13-27`
-
-**Proposed resolution.**
-- Add `crates/ironclaw_architecture/tests/wasm_crate_boundaries.rs` to assert:
-  - `wasm_sandbox_core` has zero IronClaw deps
-  - `wasm_product_adapters` does NOT depend on `ironclaw_wasm` directly
-- Document each crate's scope in its `CLAUDE.md`.
-- Suggested owner: wasm team.
-
-### E5. Channel ownership scattered across four locations
-
-**Ambiguity.** "Channel" lives in:
-1. `src/channels/` (Channel trait + TUI/HTTP/REPL/webhook impls)
-2. `crates/ironclaw_gateway/` (frontend assets + widgets — *not* transport)
-3. `crates/ironclaw_tui/` (Ratatui library — not a Channel impl)
-4. `channels-src/` (WASM channels: discord/slack/feishu/wechat/whatsapp, all excluded)
-
-`ironclaw_gateway` lacks a CLAUDE.md. `src/channels/web/CLAUDE.md` claims web ownership.
-
-**Evidence.**
-- `src/channels/mod.rs:1-60`
-- `crates/ironclaw_gateway/src/lib.rs:1-40`
-- `crates/ironclaw_tui/Cargo.toml:1-15`
-- top-level `Cargo.toml:3-9` (channels-src excluded)
-- `src/channels/web/CLAUDE.md:1-34`
-
-**Proposed resolution.**
-- Add `crates/ironclaw_gateway/CLAUDE.md` declaring scope ("Frontend asset bundling + widget catalog; not a Channel impl"). Optionally rename to `ironclaw_frontend`.
-- Document in top-level `CLAUDE.md`: `src/channels/` owns the Channel trait + legacy implementations; gateway/tui crates are *adapters* that delegate to runtime/composition; `channels-src/` is out-of-tree.
-- Suggested owner: channels team.
-
----
-
-## Theme F — `ironclaw_host_api` is becoming a god-crate
-
-### F1. `host_api` is depended on by every workspace crate (47/47) and contains 5,245 lines of code
-
-**Ambiguity.** Healthy "shared vocabulary" crates are small (IDs, enums, error types). `ironclaw_host_api/src/lib.rs:14-31` declares 16 public modules; two of them — `ingress.rs` (1,040 LOC, HTTP route validation) and `runtime_policy.rs` (849 LOC, policy enums + resolver hints) — are concrete behavior, not vocabulary. They could grow into HTTP plumbing and policy logic that no other system-service crate owns.
-
-**Evidence.**
-- `crates/ironclaw_host_api/src/lib.rs:1-32`
-- `crates/ironclaw_host_api/src/ingress.rs:1-80`
-- `crates/ironclaw_host_api/src/runtime_policy.rs:1-80`
-
-**Proposed resolution.**
-- Extract `ingress` to a new `ironclaw_http_dispatch` crate.
-- Confirm `runtime_policy` vocab is consumed by `ironclaw_runtime_policy` only and consider folding it back in there.
-- `host_api` should remain IDs, scope, capability, path, audit, decision, action, mount — the language no other crate owns.
-- Suggested owner: host-api team.
-
-### F2. `host_api` vs `host_runtime` — layering split is implicit
-
-**Ambiguity.** `host_api` is vocabulary; `host_runtime` is composition (~24 deps). The names don't make the split obvious; "host_api" sounds like an API surface, not a constraint dictionary. A new contributor adding "a host service" will not know which to extend.
-
-**Evidence.**
-- `crates/ironclaw_host_api/src/lib.rs:1-32`
-- `crates/ironclaw_host_runtime/src/lib.rs:1-50`
-- `crates/ironclaw_host_runtime/CLAUDE.md` / `crates/ironclaw_host_api/CLAUDE.md`
-
-**Proposed resolution.**
-- Rename `host_api` → `host_contracts`, `host_runtime` → `host_composition`. OR add a "Host Layer" section to top-level `CLAUDE.md` explaining the split with examples.
-- Suggested owner: host-api team.
-
-### F3. `ironclaw_event_projections` imports memory-specific types into production code
-
-**Ambiguity.** Event projections should emit generic read-models. `ironclaw_event_projections/Cargo.toml:10-12` declares `ironclaw_memory` as a production dep and `src/lib.rs:24-29` imports `MemorySignificantEventSink`, `PromptWriteSafetyEventSink` directly. This couples a substrate crate to a domain crate.
-
-**Evidence.**
-- `crates/ironclaw_event_projections/Cargo.toml:10-12`
-- `crates/ironclaw_event_projections/src/lib.rs:24-29`
-- `crates/ironclaw_memory/CLAUDE.md` declares its scope
-
-**Proposed resolution.**
-- Invert: `ironclaw_memory` registers its sinks with the projection loop via composition; `ironclaw_event_projections` exposes only generic types (`ThreadTimeline`, `RunStatusProjection`, `EventKind`).
-- Suggested owner: events team + memory team.
-
----
-
-## Theme G — Orphans and excluded directories
-
-### G1. `ironclaw_outbound` has zero callers anywhere in the workspace
-
-**Ambiguity.** The crate defines `OutboundPolicyService`, `ReplyTargetBindingValidator`, etc., with a detailed CLAUDE.md, but grep for `ironclaw_outbound` (and for `OutboundPolicyService`) finds zero callsites in `src/` or any composition crate.
-
-**Evidence.**
-- `crates/ironclaw_outbound/Cargo.toml:1-12`
-- grep `ironclaw_outbound` workspace-wide → only the crate's own `Cargo.toml`
-- `crates/ironclaw_outbound/CLAUDE.md` (comprehensive guardrails, but no consumer)
-
-**Proposed resolution.**
-- Either integrate `outbound` into reborn composition / turn scheduler, or mark with `#[doc(hidden)]` until then and reference the tracking issue.
-- Suggested owner: outbound team.
-
-### G2. `crates/ironclaw_reborn_telegram_v2_host/` is on disk but excluded from workspace
-
-See E3.
-
-### G3. `src/tunnel/` is the only public-internet exposure layer with no crate
-
-**Ambiguity.** Every other major subsystem (channels, gateway, network) has a crate equivalent. `src/tunnel/` (cloudflare, ngrok, tailscale, custom, none) stays in `src/`. Either there's a reason (no contract worth a crate) or it's an oversight.
-
-**Evidence.** Top-level `CLAUDE.md:121-128` (tunnel section), `src/tunnel/`.
-
-**Proposed resolution.**
-- Decide: keep in `src/` and add a one-line `src/tunnel/CLAUDE.md` declaring "no crate planned, stable scope", OR extract to `ironclaw_tunnel`.
-- Low impact; just don't leave it ambiguous.
-- Suggested owner: tunnel team.
-
----
-
-## Theme H — Misc
-
-### H1. `ironclaw_network` scope is narrow but name is broad
-
-**Ambiguity.** The crate owns HTTP egress + DNS/private-IP policy enforcement. The name suggests "all networking." Only `host_runtime` depends on it.
-
-**Evidence.** `crates/ironclaw_network/Cargo.toml:1-16`, `crates/ironclaw_network/src/lib.rs:1-27`.
-
-**Proposed resolution.**
-- Rename to `ironclaw_http_egress_policy` OR document the narrow scope in `CLAUDE.md`.
-- Suggested owner: network team.
-
----
-
-## Cross-cutting recommendations
-
-1. **Status matrix.** Add a single section to top-level `CLAUDE.md` (or a new `docs/CRATES.md`) listing every workspace crate + every `src/<x>/` module with a status: **canonical**, **legacy (v1)**, **shim**, **frozen**, or **orphan**. Auto-generated from `cargo metadata` + a small audit script if possible. This is the single fastest fix for autonomous-agent confusion.
-
-2. **CLAUDE.md per crate.** Of the 47 crates, several have no `CLAUDE.md` (`ironclaw_gateway`, `ironclaw_network`, more). Make CLAUDE.md a required file for every crate in the workspace.
-
-3. **Architecture tests.** `crates/ironclaw_architecture/tests/` already encodes some boundary rules. Extend it to cover the boundaries surfaced in this audit (WASM crate split, capabilities ↛ dispatcher, event projections ↛ memory, etc.).
-
-4. **Concept glossary.** A short top-level glossary (`docs/GLOSSARY.md`) defining "extension", "product adapter", "channel", "tool", "lease", "policy", "capability", "process", "run", "turn", "thread", "conversation" — one paragraph each, with the canonical owning crate named.
-
----
-
-## How to engage with this audit
-
-- The companion GitHub issue holds one checkbox per finding. Comment on the issue with your team's position; mark resolved findings off as they land.
-- This doc lives on the `audit/crate-boundaries` branch. Counter-proposals welcome as PR comments.
-- The 8 themes are mostly independent; resolving them can happen in parallel.
-- The cross-cutting recommendations (status matrix, glossary, architecture tests) should be tackled first — they make the per-finding fixes mechanical.
-
----
-
-# Deep Pass (appended 2026-05-18)
-
-After the first-pass synthesis above, five focused agents went deeper: architecture-test coverage, CLAUDE.md-vs-code contradiction hunt, end-to-end WASM-tool-call trace, WIT contract drift, and git-history rationale. This appendix adds the deeper findings, **a new Theme I**, and a coverage matrix that classifies every original finding as **ASSERTED** (architecture test enforces it), **DOCUMENTED-ONLY** (CLAUDE.md says so but no test), or **NEITHER**.
-
-## D-1. Architecture-test coverage matrix
-
-`crates/ironclaw_architecture/tests/` contains 22 tests across two files (`reborn_composition_boundaries.rs`, `reborn_dependency_boundaries.rs`). Mapping them against the 25 findings:
+`crates/ironclaw_architecture/tests/` already encodes 22 boundary assertions. The matrix below shows which findings in this audit are already enforced, partially enforced, or not enforced.
 
 | Finding | Status | Note |
 |---|---|---|
-| A1 agent-loop ownership | NEITHER | No test pins which crate owns the loop |
+| A1 agent-loop ownership | NEITHER | No test pins which crate owns which responsibility |
 | A2 dispatcher v1 vs v2 | NEITHER | No test |
-| A3 tool-trait fragmentation | NEITHER | No shared-trait test |
-| A4 skills `#[deprecated]` missing | NEITHER | No deprecation enforcement |
-| A5 `src/bridge/` invisible | NEITHER | Not asserted in Project-Structure check |
-| **B1 reborn vs reborn_composition** | **ASSERTED** | `reborn_composition_boundaries.rs:38-105` (3 tests) |
-| B2 event-crate naming | NEITHER | No naming/scope test |
-| B3 RebornCompositionProfile location | NEITHER | Not checked |
-| C1 capabilities Cargo (CORRECTED) | n/a | No violation — see correction above |
-| C2 policy interface | NEITHER | No shared-trait test |
+| A3 tool-trait fragmentation | NEITHER | `EffectExecutor` exists but the boundary isn't asserted |
+| A4 skills v1-only marker | NEITHER | No deprecation enforcement (correctly deferred — see A4) |
+| A5 `src/bridge/` Project Structure row | NEITHER | Doc gap only |
+| B1 reborn vs reborn_composition | **PARTIAL** | `reborn_composition_boundaries.rs:38-105` enforces upward isolation; does NOT forbid substrate crates from importing `ironclaw_reborn` directly |
+| B2 event-crate naming | NEITHER | Doc question, not enforcement |
+| B3 RebornCompositionProfile location | NEITHER | Convenience re-export question |
+| C1 capabilities DI pattern | n/a | Verified consistent — `ironclaw_dispatcher` is in `[dev-dependencies]` |
+| C2 policy composition order | NEITHER | No order-of-operations test |
 | C3 lease ownership | NEITHER | Not asserted |
-| C4 safety scope | NEITHER | Not asserted |
-| C5 runtime_policy re-exports | NEITHER | Not asserted |
-| D1 workspace→memory inverse import | NEITHER | Architecture test could catch this |
+| C4 safety scope | n/a | Withdrawn — scope is cohesive |
+| C5 runtime_policy re-exports | NEITHER | Doc gap only |
+| D1 workspace→memory inverse | NEITHER | Architecture test would catch this |
 | D2 src/db, src/workspace `pub mod` | NEITHER | No module-status test |
 | D3 src/secrets coexistence | NEITHER | No canonical picker |
 | D4 ProcessStatus vs RunStatus | NEITHER | No unified-type test |
-| D5 threads/turns/conversations | NEITHER | No layer-boundary test |
-| E1 "extension" 3-way overload | NEITHER | No type-consolidation test |
+| D5 SessionThreadService re-export | n/a | Withdrawn — clean re-export pattern |
+| E1 "extension" overload | NEITHER | No naming-consistency test |
 | E2 ProductAdapter vs Channel | NEITHER | No authority test |
-| E3 three Telegrams | NEITHER | No excluded-dir cleanup check |
-| **E4 three WASM crates** | **ASSERTED** | `reborn_dependency_boundaries.rs:621-850` (7 tests) |
+| E3 / G2 fossil dirs | NEITHER | A "directories in `crates/` not in members AND not in exclude" check would catch this |
+| E4 three WASM crates | **ASSERTED** | `reborn_dependency_boundaries.rs:621-850` (7 tests) |
 | E5 channel ownership | NEITHER | No role test |
-| F1 host_api god-crate | NEITHER | No LOC/dep census test |
-| **F2 host_api vs host_runtime** | **PARTIAL** | `reborn_dependency_boundaries.rs:171-328` (substrate-leak only) |
-| F3 event_projections→memory | NEITHER | No inversion test |
+| F1 host_api LOC/dep census | NEITHER | No size-budget test |
+| F2 host_api vs host_runtime | **PARTIAL** | `reborn_dependency_boundaries.rs:171-328` enforces substrate-handle leak only |
+| F3 event_projections→memory | n/a | Withdrawn — imports are read-model trait targets, correct architecture |
 | G1 outbound zero callers | NEITHER | No reachability test |
-| G2 telegram_v2_host orphan dir | NEITHER | No excluded-dir-on-disk check |
-| G3 src/tunnel no crate | NEITHER | No status decider |
-| H1 network naming | NEITHER | Not asserted |
+| G3 src/tunnel no crate | NEITHER | Not asserted |
+| H1 network naming | n/a | Withdrawn — scope is narrow by design |
+| I1 WasmRuntimeAdapter in wrong crate | NEITHER | No "no `impl RuntimeAdapter for *` in host_runtime" test |
+| I2 trust dropped | NEITHER | Security ticket — see P0 above |
+| I3 capability double-lookup | NEITHER | Not asserted |
+| I4 WasmHostTools wiring contract | NEITHER | Default deny works; production wiring undocumented |
+| I5 dual event logs | NEITHER | Not asserted |
+| I6 request-shape drift | NEITHER | No type-chain test |
+| W1 channel.wit orphaned | NEITHER | No host-impl reachability check |
+| W2 tool WIT version pinning | NEITHER | Documentation parity with `wasm_product_adapters` |
+| W3 ProductAdapter http-egress stub | NEITHER | Documented as deferred in CLAUDE.md |
+| W4 tool-invoke gating contract | NEITHER | Default deny works; production wiring undocumented |
 
-**Score:** 2 ASSERTED, 1 PARTIAL, 22 NEITHER (out of 25 original findings; C1 dropped after correction).
-
-**Take.** The architecture-test suite is well-structured but **narrow**: it focuses on reborn-composition isolation (B1) and the WASM/product-adapter split (E4). The next batch of tests to add are the simplest mechanical ones — every "NEITHER" row in Theme D and Theme E is a 20-line cargo-metadata test away. See the "Bonus boundaries already asserted" section below for the existing patterns to mimic.
-
-### Bonus boundaries already asserted (not in the 25 findings)
-
-Three boundaries are enforced by architecture tests but were not in the first-pass audit. Worth surfacing because they're load-bearing:
+**Three bonus boundaries already asserted (not in the 25 findings but worth knowing about):**
 
 - `reborn_cli_binary_crate_stays_separate_from_v1_root` — CLI must enter only via composition + config.
-- `reborn_boot_config_file_layout_is_pinned` — `~/.ironclaw/config.toml` and `providers.json` paths are durable contracts with operator runbooks.
-- `reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids` — prevents ID-abstraction leakage from runtime/process IDs into the turns API.
-
-### Referenced contracts directory
-
-The audit team should reference `docs/reborn/contracts/`:
-- `storage-placement.md`, `filesystem.md`, `host-runtime.md`, `_contract-freeze-index.md`, `kernel-boundary.md`.
-
-These are cited by architecture tests and represent the *living* contracts the team already maintains — any new CLAUDE.md owner-doc work should cross-link to them.
+- `reborn_boot_config_file_layout_is_pinned` — `~/.ironclaw/config.toml` and `providers.json` paths are durable contracts.
+- `reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids` — prevents ID-abstraction leakage.
 
 ---
 
-## D-2. Documentation ↔ code contradictions (severity-ranked)
+## Documentation contradictions
 
-Seven contradictions where doc files claim X and code does Y. Three HIGH-severity (guardrail breached in production), four MEDIUM.
+Doc files that claim X while code does Y. Verified.
 
 | Sev | Claim | Claimed in | Broken by |
 |---|---|---|---|
-| HIGH | `event_projections` is metadata-only / backend-independent | `event_projections/CLAUDE.md:5-6` | `Cargo.toml:12` prod dep on `ironclaw_memory`; `src/lib.rs:24-29` imports `MemorySignificantEventSink`, `PromptWriteSafetyEventSink` |
+| HIGH | `crates/` map lists `ironclaw_storage` as an active crate | `crates/AGENTS.md`, `crates/README.md` | Commit `06090f4e6` dissolved the crate; it is gone from the workspace |
 | HIGH | `ironclaw_memory` forbids depending on `src/workspace` (and inverse) | `ironclaw_memory/CLAUDE.md:6` | `src/workspace/reborn_identity_context.rs:11` imports `ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS` |
-| HIGH | `src/skills/attenuation` is v1-only and can be deleted | `src/skills/mod.rs:13-26` | No `#[deprecated]` attribute; `src/agent/dispatcher.rs:276,488` still calls `attenuate_tools()` unconditionally |
-| MED | Telegram host was consolidated into reborn binary | commit `af0ef699e` body | `crates/ironclaw_reborn_telegram_v2_host/` still on disk, excluded from workspace |
-| MED | `outbound` ports its own comprehensive CLAUDE.md | `ironclaw_outbound/CLAUDE.md:1-13` | Zero production callers in any crate |
-| MED | `src/bridge/` is the v2 adapter authority | `src/bridge/CLAUDE.md:1-6` | Top-level `CLAUDE.md:83-217` Project Structure never mentions it |
-| MED | `src/db` + `src/workspace` are slated for dissolution | commit `06090f4e6` + planned legacy-store cleanup | `src/lib.rs:52,89` still `pub mod` with no deprecation marker |
-| LOW | `runtime_policy` re-exports asymmetrically by design | `runtime_policy/src/lib.rs:44-47` | No banner; caller hits `runtime_policy::RuntimePolicy` (doesn't exist) before finding the rule |
+| MED | Telegram host was consolidated into the reborn binary | Commit `af0ef699e` body | `crates/ironclaw_reborn_telegram_v2_host/` still on disk |
+| MED | `ironclaw_outbound` has a comprehensive CLAUDE.md describing expected callers | `ironclaw_outbound/CLAUDE.md` | Zero workspace consumers |
+| MED | `src/bridge/` is the v2 adapter authority | `src/bridge/CLAUDE.md` | Top-level `CLAUDE.md` Project Structure + Module Specs tables don't list it |
+| MED | `src/db` + `src/workspace` slated for dissolution | Commit `06090f4e6` + planned legacy-store cleanup | `src/lib.rs` still `pub mod` with no deprecation marker |
 
 ---
 
-## D-3. End-to-end trace — WASM tool call (Theme I, NEW)
+## Findings by theme
 
-Tracing a single WASM tool invocation from the agent loop's decision through to component-model execution **surfaces five new findings** the per-cluster passes could not see. These constitute a new theme.
+### Theme A — Engine v1 ↔ v2 migration is mid-flight
 
-### The actual layer cake
+`ENGINE_V2` defaults to `false`. v1 (`src/agent/`, `src/tools/`, `src/skills/`) is shipping, not just maintained. v2 (`ironclaw_reborn`, `ironclaw_agent_loop`, etc.) is the canonical path when the flag flips. Nothing in top-level `CLAUDE.md` tells a new contributor (or an autonomous agent) which surface to extend.
 
-8 layers; the `RuntimeAdapter` seam at layer 7 is the most consequential undocumented boundary.
+#### A1. Agent loop ownership across four crates / modules
 
-| # | Crate | Function | Type crossing **out** |
+**Ambiguity.** `src/agent/` (~31 KB) is the v1 dispatcher/scheduler/session-manager. `ironclaw_agent_loop` owns v2 strategy/planner/executor. `ironclaw_engine` (38K LOC, intentionally decoupled — only two direct deps because it doesn't depend on the host crate) owns the state-machine vocabulary and types. `ironclaw_reborn::PlannedDriver` is the adapter. A contributor adding "fallback when a tool times out" has four plausible homes.
+
+**Evidence.** `src/agent/mod.rs:1-16`, `crates/ironclaw_engine/CLAUDE.md`, `crates/ironclaw_agent_loop/Cargo.toml:6`, `crates/ironclaw_reborn/src/lib.rs:1-35`.
+
+**Proposed resolution.** Add a "v1 vs v2 engine status" section to top-level `CLAUDE.md`. Document each layer in its own CLAUDE.md: `ironclaw_engine` = state-machine types and traits; `ironclaw_agent_loop` = orchestration strategy; `ironclaw_reborn` = composition adapter. Cross-link to the engine v2 architecture plan in `docs/plans/`.
+
+#### A2. Tool dispatcher: v1 entry point vs v2 post-authorization router
+
+**Ambiguity.** `src/tools/dispatch.rs::ToolDispatcher::dispatch()` is the v1 channel-agnostic entry point (creates a job context, validates schema, executes). `ironclaw_dispatcher::RuntimeDispatcher` is the v2 post-authorization routing gate. They're at different pipeline stages but the cross-reference is missing.
+
+**Evidence.** `src/tools/dispatch.rs:1-50`, `crates/ironclaw_dispatcher/src/lib.rs:1-6`, `crates/ironclaw_dispatcher/CLAUDE.md`.
+
+**Proposed resolution.** Declare in top-level `CLAUDE.md`: `src/tools/dispatch.rs` is v1 pre-authorization; `ironclaw_dispatcher` is v2 post-authorization. The v2 path is `CapabilityHost::invoke_json` → `RuntimeDispatcher::dispatch_json`. Plan removal of `src/tools/dispatch.rs` once `ENGINE_V2=true` is the default.
+
+#### A3. Tool runtimes converge at `EffectExecutor` but the boundary isn't asserted
+
+**Ambiguity.** The four tool runtimes — `src/tools::Tool`, `ironclaw_wasm::WasmHostTools`, `ironclaw_mcp::McpExecutionRequest`, `ironclaw_scripts` — all eventually meet at the `EffectExecutor` trait in `ironclaw_engine/traits/effect.rs`. The trait exists; the convergence isn't documented at any of the runtime crates.
+
+**Proposed resolution.** Add to each runtime crate's `CLAUDE.md`: "All runtimes implement `ironclaw_engine::traits::EffectExecutor`. The composition wires them into the host's `ToolRegistry`." Add an architecture test asserting every tool runtime crate has an `impl EffectExecutor`.
+
+#### A4. Skills attenuation is v1-only but currently load-bearing
+
+**Ambiguity.** `src/skills/mod.rs:13-26` documents that `attenuation` and `bundled` are v1-only and "can be deleted once v1 is gone." No `#[deprecated]` attribute. `src/agent/dispatcher.rs:276,488` calls `attenuate_tools()` unconditionally. Adding `#[deprecated]` now would be premature because `ENGINE_V2=false` is the shipping default — the code is actively used.
+
+**Proposed resolution.** File a tracking issue tied to the `ENGINE_V2=true` cutover. When the flag flips, add `#![deprecated(since = "v1-sunset", note = "...")]` to `src/skills/mod.rs` and `#[allow(deprecated)]` at the v1 callsites.
+
+#### A5. `src/bridge/` is missing from top-level CLAUDE.md tables
+
+**Ambiguity.** `src/bridge/` is the v1↔v2 adapter with its own `CLAUDE.md` and clear responsibilities (auth, effects, LLM, store). It's mentioned in top-level `CLAUDE.md` prose ("Auth Invariants" section) but absent from the Project Structure table and the Module Specs table — the two places a new contributor scans first.
+
+**Proposed resolution.** Add a `src/bridge/` row to both tables in top-level `CLAUDE.md`. Cross-link `src/bridge/CLAUDE.md`. Also clarify in `src/bridge/CLAUDE.md` whether bridge is a v1-sunset artifact or a permanent adapter layer.
+
+### Theme B — Reborn-vs-non-reborn naming
+
+#### B1. Inverse-direction architecture test missing for `ironclaw_reborn`
+
+**Ambiguity.** `ironclaw_reborn/src/lib.rs` header declares the crate internal-only; only `ironclaw_reborn_composition` is a sanctioned consumer. Three architecture tests at `reborn_composition_boundaries.rs:38-105` enforce upward isolation (substrate crates don't depend on composition) — but no test forbids substrate crates from importing `ironclaw_reborn` directly without going through the facade.
+
+**Proposed resolution.** Add an architecture test in `reborn_dependency_boundaries.rs`: no workspace crate other than `ironclaw_reborn_composition` may declare `ironclaw_reborn` as a dependency.
+
+#### B2. Event-crate naming clarification
+
+**Ambiguity.** `ironclaw_events` (substrate), `ironclaw_event_projections` (read-model bridge), and `ironclaw_reborn_event_store` (backend selection) — three crates, only one prefixed `reborn_*`. Production wires only the reborn store. The names are accurate for design but unclear at a glance.
+
+**Proposed resolution.** Document in each crate's CLAUDE.md that the substrate (`events`) and projections are deliberately reborn-agnostic to allow a hypothetical future v2-next substrate to plug in. Do **not** rename — that would lock the names to the current consumer.
+
+#### B3. `RebornCompositionProfile` convenience re-export
+
+**Ambiguity.** `RebornCompositionProfile` (Disabled/LocalDev/Production/MigrationDryRun) lives in `ironclaw_reborn_composition::profile`. Outer harnesses that just need the enum must depend on the composition crate.
+
+**Proposed resolution.** Add a convenience re-export of `RebornCompositionProfile` from `ironclaw_reborn_config`. Don't move the type — composition profiles belong in the composition crate.
+
+### Theme C — Policy / auth concept layout
+
+Six crates (`safety`, `trust`, `authorization`, `capabilities`, `approvals`, `runtime_policy`, `dispatcher`) carry pieces of "what can run." The shared vocabulary is `ironclaw_host_api`. Composition order is sequenced in `CapabilityHost` via port injection, not a marker trait.
+
+#### C1. Document the port-injection DI pattern
+
+**Ambiguity.** `ironclaw_capabilities` composes `approvals + authorization + dispatcher + filesystem + events + resources` via port traits injected by the outer composition root. The concrete implementations only appear in `[dev-dependencies]` so tests can wire them. The pattern is healthy but the design intent isn't documented.
+
+**Proposed resolution.** Add a "DI pattern" paragraph to `ironclaw_capabilities/CLAUDE.md` explaining the port-injection model. It's a good template for other facade crates.
+
+#### C2. Document composition order
+
+**Ambiguity.** Three policy types (`EffectiveTrustClass`, `EffectiveRuntimePolicy`, `CapabilityLease`) live in `ironclaw_host_api`'s vocabulary. The composition order (trust → runtime policy → grant/lease) is encoded only in the caller's orchestration (`capabilities/src/host.rs:183`). A new policy layer could be added without authors knowing where it fits.
+
+**Proposed resolution.** Add `crates/ironclaw_authorization/POLICY-COMPOSITION.md` documenting the order with example flows. Optionally add an architecture test asserting the call sequence inside `CapabilityHost::invoke_json`.
+
+#### C3. Formalize lease ownership
+
+**Ambiguity.** `CapabilityLease` is defined in `ironclaw_authorization` (`src/lib.rs:167-192`). `ironclaw_approvals::ApprovalResolver::approve_dispatch()` calls `leases.issue(...)`. If a new approval flavor wants a lease subtype, it's unclear which crate owns the definition.
+
+**Proposed resolution.** Formalize in `ironclaw_authorization/CLAUDE.md`: all lease types are defined here; `ironclaw_approvals` depends on the `CapabilityLeaseStore` trait only, not on concrete lease construction.
+
+#### C4. Note `runtime_policy` re-export asymmetry
+
+**Ambiguity.** `ironclaw_runtime_policy/src/lib.rs:44-47` re-exports only `EffectiveRuntimePolicy` (because it appears in the resolver's return type) while telling callers to import other vocab from `host_api`. A caller hitting `ironclaw_runtime_policy::RuntimePolicy` (doesn't exist) will be confused.
+
+**Proposed resolution.** Add a banner comment at the top of `lib.rs`: "Types live in `ironclaw_host_api::runtime_policy::*` except `EffectiveRuntimePolicy`, which is re-exported here for return-type ergonomics."
+
+#### C5. Document `CapabilityHost` optional-traits pattern
+
+**Ambiguity.** `CapabilityHost` is composed via optional `with_*` builders (`capabilities/src/host.rs:73-130`). Traits are expected to fail gracefully if missing (e.g., `run_state.start()` is best-effort). The optional/required distinction isn't documented.
+
+**Proposed resolution.** Add to `ironclaw_capabilities/CLAUDE.md`: "Traits passed via `with_*` builders are optional and must fail-soft when absent. Do not promote an optional trait to a required field without updating outer harnesses."
+
+### Theme D — Storage / state crate layout
+
+#### D1. `src/workspace/` imports `ironclaw_memory` despite memory forbidding the inverse
+
+**Ambiguity.** `src/workspace/reborn_identity_context.rs:11` imports `ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS`. `ironclaw_memory/CLAUDE.md:6` forbids depending on `src/workspace` in either direction. The filename signals "v1→v2 bootstrap" but no comment confirms it.
+
+**Proposed resolution.** Either (a) move `DEFAULT_PROMPT_PROTECTED_PATHS` to `ironclaw_common` or `ironclaw_host_api` so both layers can depend on it without violating the inverse rule, or (b) add a comment in `reborn_identity_context.rs` declaring this as a temporary v1→v2 bridge with a tracking issue. Add an architecture test enforcing whichever resolution is chosen.
+
+#### D2. Legacy `src/db/` and `src/workspace/` lack a documented status
+
+**Ambiguity.** `src/lib.rs:52,89` still `pub mod db` and `pub mod workspace`. Recent commits (`06090f4e6` dissolved `ironclaw_storage`; `f95288c16` introduced universal FS dispatch) suggest they're being phased out. Status (active / shimmed / frozen) isn't declared.
+
+**Proposed resolution.** Add a "Legacy Modules" section to top-level `CLAUDE.md` enumerating each `src/` module by status. Once the cross-cutting status matrix lands, this drops into it.
+
+#### D3. `src/secrets/` and `crates/ironclaw_secrets/` have no documented relationship
+
+**Ambiguity.** Both contain full implementations (`src/secrets/`: 489 LOC; `crates/ironclaw_secrets/`: 2,053 LOC). Neither documents which is authoritative for new code. This is blocked on the `ironclaw_secrets` follow-up from `24c7051d2`.
+
+**Proposed resolution.** Add `src/secrets/CLAUDE.md` declaring `src/secrets/` as the v1 implementation, `crates/ironclaw_secrets/` as v2-canonical. Document the migration deadline tied to the `EncryptedBackend` follow-up.
+
+#### D4. `ProcessStatus` vs `RunStatus` semantic boundary
+
+**Ambiguity.** `ironclaw_processes::ProcessStatus` has 4 states (`Running/Completed/Failed/Killed`); `ironclaw_run_state::RunStatus` has 5 (`Running/BlockedApproval/BlockedAuth/Completed/Failed`). Both CLAUDE.md files document their scope but cross-references are missing.
+
+**Proposed resolution.** Add a cross-reference paragraph to each CLAUDE.md: `run_state` owns invocation-wide lifecycle (can block on approval/auth); `processes` owns isolated capability process state (terminal-failure only). Composition fuses them via `(invocation_id, process_id)` tuples.
+
+### Theme E — Extension / tool / adapter / channel concept overload
+
+#### E1. Rename `Extension*` types in product_adapter_registry
+
+**Ambiguity.** `ironclaw_product_adapter_registry` uses `Extension` in type names (`ExtensionInstallationStore`, `ExtensionActivationState`, `ExtensionCredentialBinding`) but the records describe *ProductAdapter installations*. The naming reads as a third meaning of "extension" — a strict reading shows they're the broader manifest concept, but the naming creates avoidable noise.
+
+**Proposed resolution.** Rename to `ProductAdapterInstallationStore` / `ProductAdapterInstallationState` / `ProductAdapterCredentialBinding`. Reserve "extension" for the manifest-level capability concept (`ironclaw_extensions::ExtensionRuntime`) and the user-facing routing identity in top-level `CLAUDE.md`.
+
+#### E2. Declare ProductAdapter canonical; Channel legacy
+
+**Ambiguity.** `ironclaw_product_adapters` defines `ProductAdapter` (native or WASM). `wit/channel.wit` declares a parallel `channel-host` interface with no host implementation. `src/channels/` carries the v1 `Channel` trait. New integrations should use ProductAdapter; the migration path isn't documented.
+
+**Proposed resolution.** Add to `crates/ironclaw_product_adapters/CLAUDE.md`: "ProductAdapter (`ironclaw.product_adapter/v1`) is the canonical extension surface. The v1 `src/channels/Channel` trait and the unimplemented `wit/channel.wit` are legacy paths; do not add new integrations to either."
+
+#### E3. Delete the `reborn_telegram_v2_host` fossil directory
+
+**Ambiguity.** `crates/ironclaw_reborn_telegram_v2_host/` is on disk with only a `migrations/` subfolder and no `Cargo.toml`. The directory is not in the workspace `members` and not in `exclude` — cargo simply ignores it. Commit `af0ef699e` consolidated the host into the reborn binary but never deleted the directory.
+
+**Proposed resolution.** Delete the directory. Add an architecture test that checks for entries in `crates/` that are neither in `members` nor in `exclude` and asserts they have a `Cargo.toml` (for `silk_decoder`-style legitimate exclusions) — otherwise the test fails closed.
+
+#### E4. WASM crate split is asserted; document per-crate
+
+**Ambiguity.** Three WASM crates — `ironclaw_wasm` (tool runtime), `ironclaw_wasm_sandbox_core` (Wasmtime primitives), `ironclaw_wasm_product_adapters` (adapter host glue). The split is **already enforced** by `reborn_dependency_boundaries.rs:621-850` (7 tests). Per-crate `CLAUDE.md` files don't always make the split scope explicit.
+
+**Proposed resolution.** Add one-paragraph "Scope" section to each of the three CLAUDE.md files restating the test-enforced boundary. No code change.
+
+#### E5. Add `crates/ironclaw_gateway/CLAUDE.md`
+
+**Ambiguity.** `ironclaw_gateway` owns frontend asset bundling + widget catalog — *not* a Channel implementation. There is no CLAUDE.md; `src/channels/web/CLAUDE.md` (33 KB) describes the web gateway runtime, leaving the relationship between the two unclear.
+
+**Proposed resolution.** Add `crates/ironclaw_gateway/CLAUDE.md` declaring scope. Update `src/channels/web/CLAUDE.md` to cross-reference. Optionally rename the crate to `ironclaw_frontend` to signal that it's UI assembly, not a channel host.
+
+### Theme F — `ironclaw_host_api` size
+
+#### F1. `host_api` is 5,245 LOC depended on by every workspace crate
+
+**Ambiguity.** All 47 crates depend on `ironclaw_host_api`. The contents are vocabulary — newtypes, enums, validation helpers, serde — but two modules dominate the total: `ingress.rs` (1,040 LOC, route ID + pattern + query validation) and `runtime_policy.rs` (849 LOC, policy enums with `as_str` and `FromStr`). The size is not "concrete behavior creeping in"; it's vocabulary that *could* live elsewhere.
+
+**Proposed resolution.** Decide whether the size is acceptable. If splitting:
+- `ingress.rs` could move to a new `ironclaw_http_dispatch` crate (HTTP-shaped vocabulary).
+- `runtime_policy.rs` could fold into `ironclaw_runtime_policy`.
+
+Add an architecture test asserting `ironclaw_host_api` stays under a chosen LOC budget so the question doesn't recur silently.
+
+#### F2. Document the `host_api` vs `host_runtime` split
+
+**Ambiguity.** `host_api` is vocabulary (no behavior); `host_runtime` is composition (~24 deps). The names don't make the split obvious to a new contributor. Existing CLAUDE.mds are clear but live inside each crate.
+
+**Proposed resolution.** Add a "Host Layer" section to top-level `CLAUDE.md` (10-line edit) explaining the split: `host_api` = shared constraint vocabulary; `host_runtime` = service composition. Do not rename the crates.
+
+### Theme G — Orphans and excluded directories
+
+#### G1. `ironclaw_outbound` has a comprehensive CLAUDE.md but zero workspace consumers
+
+**Ambiguity.** The crate defines `OutboundPolicyService`, `ReplyTargetBindingValidator`, and migration plumbing. Workspace-wide grep finds zero callsites. The CLAUDE.md is detailed; the integration isn't done.
+
+**Proposed resolution.** File a tracking issue for integration into the reborn composition / turn scheduler. Until integration lands, mark the crate's `lib.rs` with `#![doc(hidden)]` and add a banner referencing the issue. Add a reachability architecture test.
+
+#### G2. Fossil directories check
+
+**Ambiguity.** `crates/ironclaw_reborn_telegram_v2_host/` (see E3) is the symptom; the missing check is the cause. Cargo ignores directories without a `Cargo.toml`, so fossil directories can sit in `crates/` indefinitely. `ironclaw_silk_decoder` is the legitimate counter-example (excluded for `libclang` reason, has its own `AGENTS.md`).
+
+**Proposed resolution.** Add an architecture test: every directory in `crates/` either (a) is in `members`, (b) is in `exclude` AND has a documented reason in `crates/AGENTS.md` or `crates/README.md`, or (c) fails the test. Catches future fossils.
+
+#### G3. `src/tunnel/` is the only public-internet exposure without a crate
+
+**Ambiguity.** `src/tunnel/` (cloudflare, ngrok, tailscale, custom, none) stays in `src/` while other major subsystems (channels, gateway, network) have crate equivalents. Either intentional or oversight; not declared.
+
+**Proposed resolution.** Add a one-line `src/tunnel/CLAUDE.md` declaring scope and "no crate planned, stable scope" — or extract to `ironclaw_tunnel`. Low impact, but should not stay ambiguous.
+
+### Theme H — Hidden boundaries inside the dispatch pipeline
+
+Tracing a single WASM tool call from agent_loop's decision through to component-model execution surfaces six boundaries that per-cluster passes can't see. **I2 is in the P0 section above.**
+
+#### H1. `WasmRuntimeAdapter` lives in `ironclaw_host_runtime`, not `ironclaw_wasm`
+
+**Ambiguity.** `dispatcher/src/lib.rs:84` defines the `RuntimeAdapter<F, G>` trait. The WASM implementation, by name and concern, belongs in `ironclaw_wasm`. Actually located in `ironclaw_host_runtime/src/services.rs:2040` (~140 LOC of runtime-lane glue). The same pattern likely exists for MCP and scripts.
+
+**Proposed resolution.** Move `WasmRuntimeAdapter` into existing `ironclaw_wasm` (not a new crate — that would create a 4th WASM-prefixed crate and worsen E4). Add an architecture test forbidding `impl RuntimeAdapter for *` in `host_runtime`.
+
+#### H2. Capability lookup happens twice
+
+**Ambiguity.** `CapabilityHost::invoke_json` (`capabilities/src/host.rs:171`) calls `self.registry.get_capability`. `RuntimeDispatcher::dispatch_json` (`dispatcher/src/lib.rs:185`) then calls the same `ExtensionRegistry` again. Two reads of the same registry — if it's not snapshot-consistent, descriptors could differ between the reads.
+
+**Proposed resolution.** Pass the descriptor down from `CapabilityHost` to the dispatcher (avoid the second read), or document that the registry must be snapshot-consistent and assert it.
+
+#### H3. WIT `tool-invoke` re-enters the host outside CapabilityHost
+
+**Ambiguity.** `crates/ironclaw_wasm/src/host.rs:483` defines `WasmHostTools::invoke`, a WIT host import that lets a guest WASM tool call another tool by alias. The default `DenyWasmHostTools` returns deny (`host.rs:491`). The production wiring contract — if anyone implements `WasmHostTools` to actually permit invocation — is undocumented. The "Everything Goes Through Tools" rule in top-level `CLAUDE.md` would silently break if a production implementation routes outside `CapabilityHost`.
+
+**Proposed resolution.** Document in `crates/ironclaw_wasm/CLAUDE.md`: any production `WasmHostTools` implementation must route through `CapabilityHost::invoke_json` so the gating pipeline applies. Add an architecture test asserting the default-deny stays the only impl in production wiring until the contract is documented.
+
+#### H4. Two parallel event logs
+
+**Ambiguity.** `crates/ironclaw_reborn/src/milestone_events.rs:207-215` suppresses `CapabilityInvoked`, `CapabilityBatchStarted`, `CapabilityBatchCompleted` (returns `Ok(None)`). The dispatcher emits `RuntimeEvent::dispatch_requested/selected/succeeded` to a separate `EventSink` composed at `host_runtime/src/services.rs:1599-1601`. Same logical event, two recording mechanisms.
+
+**Proposed resolution.** Decide: either route dispatcher events through the milestone sink (single durable log), or document that dispatcher events are runtime-internal and milestone events are user-facing. Cross-link `event_projections/CLAUDE.md`.
+
+#### H5. Request-shape drift through six struct types
+
+**Ambiguity.** A single "invoke this WASM tool" intent mutates through six distinct struct types: `RuntimeCapabilityRequest` → `CapabilityInvocationRequest` → `CapabilityDispatchRequest` → `RuntimeAdapterRequest<'a, F, G>` → `WitToolRequest { params_json, context_json }` → WIT-generated `bindings::Request`. Fields silently drop at boundaries: `invocation_id` is gone by layer 6; `idempotency_key` is advisory-only and not propagated; `context.trust` is overwritten (see I2 in P0).
+
+**Proposed resolution.** Document the pipeline in a new `docs/reborn/contracts/dispatch-pipeline.md`. For each field, declare whether it's mandatory, derived, or droppable. Add an architecture test asserting the type-chain matches the contract.
+
+### Theme W — WIT contracts
+
+#### W1. `wit/channel.wit` has no production host implementation
+
+`channel.wit:1-430` declares the `near:agent@0.3.0` `sandboxed-channel` world (6 lifecycle callbacks + host imports `emit-message`, `workspace-write`, `pairing-upsert-request`). Multiple `channels-src/*` projects (Telegram, Discord, Slack, Feishu, WhatsApp, WeChat) implement it correctly. **Grep finds zero production wiring on the host side** — only test fixtures in `ironclaw_wasm`.
+
+**Proposed resolution.** Either build `ironclaw_wasm_channels` (parallel to `ironclaw_wasm_product_adapters`), or deprecate `channels-src/*` and migrate to ProductAdapter-only (consistent with E2). Decision is required before any WASM channel work proceeds.
+
+#### W2. Tool WIT version parity
+
+`wit/tool.wit:1` declares `package near:agent@0.3.0`. `ironclaw_wasm/src/bindings.rs:3-5` uses `wasmtime::component::bindgen!()` with no explicit version constant. `ironclaw_wasm_product_adapters/src/config.rs:5` has `PRODUCT_ADAPTER_WIT_VERSION = "0.1.0"`. The single-repo build catches version drift at compile time; the constant is documentation parity, not a safety fix.
+
+**Proposed resolution.** Add `const TOOL_WIT_VERSION: &str = "0.3.0"` in `ironclaw_wasm/src/lib.rs`. Add a one-line architecture test asserting it matches the WIT package declaration.
+
+#### W3. ProductAdapter `http-egress` is a documented stub
+
+`product_adapter.wit:64-115` declares `http-egress` as an import; `ironclaw_wasm_product_adapters/CLAUDE.md` documents it as "parse/render-only" — fails closed until the host-runtime egress service is wired. Adapters calling vendor APIs will fail at runtime with a clear `PolicyDenied` error.
+
+**Proposed resolution.** Track host-runtime egress wiring as a blocking dependency for any ProductAdapter production rollout. Add an architecture test asserting `http_egress` cannot be invoked without an explicit wiring hook in place.
+
+#### H6. (renumbered from W4) `tool-invoke` gating contract is undocumented
+
+(See H3 above — same finding from the WIT angle.)
+
+---
+
+## End-to-end trace — WASM tool invocation
+
+For context on the dispatch-pipeline findings (H1–H5 and I2), this is the 8-layer trace through the reborn engine.
+
+| # | Crate | Function | Type crossing out |
 |---|---|---|---|
 | 1 | `ironclaw_agent_loop` | `executor::DefaultExecutor::execute_capability_batch` (`executor.rs:665`) | `CapabilityBatchInvocation` |
 | 2 | `ironclaw_turns::run_profile::host` | `LoopCapabilityPort::invoke_capability_batch` (`host.rs:1479`) | + `VisibleCapabilitySurface` precondition |
-| 3 | `ironclaw_loop_support` | `HostRuntimeLoopCapabilityPort::invoke_capability` (`capability_port.rs:804`) | `RuntimeCapabilityRequest` (host_runtime vocab) |
-| 4 | `ironclaw_host_runtime` | `DefaultHostRuntime::invoke_capability` (`production.rs:238`) | `CapabilityInvocationRequest` (host_api vocab) |
-| 5 | `ironclaw_capabilities` | `CapabilityHost::invoke_json` (`host.rs:135`) | `CapabilityDispatchRequest` (drops context, trust_decision, invocation_id) |
-| 6 | `ironclaw_dispatcher` | `RuntimeDispatcher::dispatch_json` (`lib.rs:173`) | `RuntimeAdapterRequest<'a, F, G>` (dispatcher-local) |
-| 7 | `ironclaw_host_runtime::WasmRuntimeAdapter` | `RuntimeAdapter::dispatch_json` for WASM (`services.rs:2121`) | `WitToolRequest { params_json, context_json }` |
-| 8 | `ironclaw_wasm` | `WitToolRuntime::execute` (`runtime.rs:58`) | `bindings::exports::near::agent::tool::Request` (WIT) |
-
-### Theme I — Hidden boundaries inside the dispatch pipeline
-
-#### I1. `WasmRuntimeAdapter` lives in `ironclaw_host_runtime`, not `ironclaw_wasm`
-
-**Ambiguity.** `dispatcher` declares a `RuntimeAdapter<F, G>` trait (`dispatcher/src/lib.rs:84`). The WASM impl, by name and concern, belongs in `ironclaw_wasm`. Actually located in `ironclaw_host_runtime/src/services.rs:2040` (~140 LOC of runtime-lane glue: extension-package resolution, governor budget reservation, scoped-host construction). Theme E4 covers the WASM crate split but doesn't catch this — `host_runtime` is silently owning runtime-adapter glue for WASM (and presumably mcp / scripts).
-
-**Proposed resolution.** Move `WasmRuntimeAdapter` into a new `ironclaw_wasm_runtime_adapter` crate (or extend `ironclaw_wasm`). Add an architecture test that forbids `host_runtime` from defining `impl RuntimeAdapter for *`. Suggested owner: wasm + host_runtime teams.
-
-#### I2. Trust is evaluated twice and the caller's decision is silently dropped
-
-**Ambiguity / probable bug class.** `HostRuntimeLoopCapabilityPort::invoke_capability` (`loop_support/src/capability_port.rs:817`) reads `provider_trust` and passes a `trust_decision` into `RuntimeCapabilityRequest`. `DefaultHostRuntime::invoke_capability` (`host_runtime/src/production.rs:248`) destructures it as `_caller_trust_decision` (note the underscore) and **re-evaluates** via `self.evaluate_invocation_trust`. The plumbed-through field is dead on arrival.
-
-**Proposed resolution.** Either (a) remove the `trust_decision` field from `RuntimeCapabilityRequest` and assert at architecture-test level that no production type carries dead-on-arrival fields, or (b) use the caller's decision and remove the re-evaluation. Probably (a) — the host should be authoritative. Suggested owner: host_runtime + loop_support teams.
-
-#### I3. Capability lookup happens twice
-
-**Ambiguity.** `CapabilityHost::invoke_json` (`capabilities/src/host.rs:171`) calls `self.registry.get_capability`. `RuntimeDispatcher::dispatch_json` (`dispatcher/src/lib.rs:185`) then calls the same `ExtensionRegistry` again to resolve a descriptor. Two reads of the same registry — if it's racy between reads, descriptors could differ.
-
-**Proposed resolution.** Either pass the descriptor down from `CapabilityHost` to the dispatcher (avoids double-read), or document that the registry must be snapshot-consistent. Suggested owner: capabilities + dispatcher teams.
-
-#### I4. WIT host-import re-entry — silent escape hatch from "Everything Goes Through Tools"
-
-**Ambiguity / security-adjacent.** `crates/ironclaw_wasm/src/host.rs:483` defines `WasmHostTools::invoke` — a host import letting a guest WASM tool **call another tool by alias**. The default impl returns deny (`host.rs:491`), but if anything wires a real `WasmHostTools` impl, this re-enters the host **outside** `CapabilityHost`. The "Everything Goes Through Tools" rule (top-level `CLAUDE.md:212-230`) silently breaks at this WIT boundary.
-
-**Proposed resolution.** Either (a) wire `WasmHostTools` to call `CapabilityHost::invoke_json` internally (so re-entry goes through the full pipeline), or (b) explicitly forbid any production impl of `WasmHostTools` until that wiring is in place. Add an architecture test. Suggested owner: wasm + capabilities teams.
-
-#### I5. Two parallel event logs — `CapabilityInvoked` milestone is suppressed
-
-**Ambiguity / observability gap.** `crates/ironclaw_reborn/src/milestone_events.rs:207-215` lists `CapabilityInvoked`, `CapabilityBatchStarted`, `CapabilityBatchCompleted` under a `return Ok(None)` arm — they're never written to the durable event log. Meanwhile `RuntimeDispatcher` emits its own `RuntimeEvent::dispatch_requested/selected/succeeded` to a **separate** `EventSink` (composed in `host_runtime/src/services.rs:1599-1601`). Two parallel event pathways for the same logical event.
-
-**Proposed resolution.** Pick one: either route dispatcher events through the milestone sink (single durable log), or document that dispatcher events are runtime-internal and milestone events are user-facing (with explicit naming). Cross-link `event_projections/CLAUDE.md`. Suggested owner: events + reborn teams.
-
-#### I6. Request-shape drift — six structs for one invocation
-
-**Ambiguity.** The "invoke this WASM tool" intent mutates through **six distinct struct types** (CapabilityInvocation → RuntimeCapabilityRequest → CapabilityInvocationRequest → CapabilityDispatchRequest → RuntimeAdapterRequest → WitToolRequest → bindings::Request). Each transformation silently drops fields: `invocation_id` is gone by layer 6, `idempotency_key` is advisory-only at layer 4 and not propagated, `context.trust` is overwritten at layer 4.
-
-**Proposed resolution.** Document the drift in `docs/reborn/contracts/dispatch-pipeline.md` (new). For each field, declare whether it's mandatory, derived, or droppable. Then add an architecture test that asserts the type-chain matches the contract. Suggested owner: capabilities + dispatcher teams.
+| 3 | `ironclaw_loop_support` | `HostRuntimeLoopCapabilityPort::invoke_capability` (`capability_port.rs:804`) | `RuntimeCapabilityRequest` |
+| 4 | `ironclaw_host_runtime` | `DefaultHostRuntime::invoke_capability` (`production.rs:238`) | `CapabilityInvocationRequest` |
+| 5 | `ironclaw_capabilities` | `CapabilityHost::invoke_json` (`host.rs:135`) | `CapabilityDispatchRequest` (drops `context`, `trust_decision`, `invocation_id`) |
+| 6 | `ironclaw_dispatcher` | `RuntimeDispatcher::dispatch_json` (`lib.rs:173`) | `RuntimeAdapterRequest<'a, F, G>` |
+| 7 | `ironclaw_host_runtime::WasmRuntimeAdapter` | `RuntimeAdapter::dispatch_json` (`services.rs:2121`) | `WitToolRequest { params_json, context_json }` |
+| 8 | `ironclaw_wasm` | `WitToolRuntime::execute` (`runtime.rs:58`) | `bindings::exports::near::agent::tool::Request` |
 
 ---
 
-## D-4. WIT contract drift (Theme E extension)
+## Git-history rationale
 
-Four findings from auditing `wit/*.wit` against Rust implementations.
+Commits on `reborn-integration` that name the structural intent.
 
-#### W1. `wit/channel.wit` is orphaned — sandboxed-channel has no production host impl
-
-`wit/channel.wit:1-430` declares the `near:agent@0.3.0` `sandboxed-channel` world (6 lifecycle callbacks + host imports `emit-message`, `workspace-write`, `pairing-upsert-request`). Multiple `channels-src/*` projects (Telegram, Discord, Slack, etc.) implement it correctly. **Grep finds zero production wiring on the host side** — only test fixtures in `ironclaw_wasm`.
-
-**Proposed resolution.** Either build `ironclaw_wasm_channels` (parallel to `ironclaw_wasm_product_adapters`), or deprecate `channels-src/*` and migrate to ProductAdapter-only. Same outcome as E2 + E5 in the original audit, but now with WIT evidence.
-
-#### W2. Tool WIT version is not centrally pinned
-
-`wit/tool.wit:1` declares `package near:agent@0.3.0`. `ironclaw_wasm/src/bindings.rs` uses `wasmtime::component::bindgen!()` with no explicit version constant. ProductAdapter has `PRODUCT_ADAPTER_WIT_VERSION = "0.1.0"` (`wasm_product_adapters/src/config.rs:5`). Asymmetry: a future bump to 0.4.0 would silently break already-deployed 0.3.0 tools.
-
-**Proposed resolution.** Add `const TOOL_WIT_VERSION: &str = "0.3.0"` in `ironclaw_wasm`. Add an architecture test pinning it.
-
-#### W3. ProductAdapter `http-egress` is documented as parse/render-only
-
-`product_adapter.wit:64-115` declares `http-egress` as an import. `wasm_product_adapters/CLAUDE.md` and the WIT comment confirm it "fails closed until a follow-up injects the production host-runtime egress service." Adapters expecting to call vendor APIs (Telegram, Slack) will fail at runtime — except this is documented as expected. The risk is the documentation aging without anyone noticing the integration never happened.
-
-**Proposed resolution.** Track egress wiring as a blocking dependency for any ProductAdapter production rollout. Add an architecture test that fails closed if `http-egress` is invoked without an explicit wiring hook.
-
-#### W4. `tool-invoke` lacks visible pre-execution capability gating
-
-`wit/tool.wit:83-93` exports a `tool-invoke` host function. `ironclaw_wasm/src/store.rs::WasmStore::tool_invoke()` implements it but has no documented pre-execution alias allowlist. The capability check is the host composition's responsibility — and that's undocumented. Same shape as I4 above but at the WIT layer rather than the binding seam.
-
-**Proposed resolution.** Document the gating contract in `wasm/CLAUDE.md`; add a test in `wasm/tests/` that rejects an unpermitted alias before execution. Same owner as I4.
-
----
-
-## D-5. Git-history rationale (what the commits already promised)
-
-Surfacing the "why" so the audit can cite intent, not just observed state.
-
-### Top structural commits (last 6 months on reborn-integration)
-
-| SHA | Commit | Rationale |
+| SHA | Subject | Rationale |
 |---|---|---|
-| `f95288c16` | `feat(reborn): apply universal FS dispatch across consumer crates (#3679)` | Consolidates on-disk layout via `RootFilesystem` put/get with `CasExpectation::Any`. Migrated `ironclaw_processes`, `ironclaw_outbound`. Existing LibSql/Postgres impls kept for production transition. |
-| `f44c68b9e` | `arch(reborn): narrow ironclaw_reborn public surface to a directory of modules` | Removed 25+ `pub use` re-exports — discovered zero workspace callers used them. Aligns with finding B1. |
-| `06090f4e6` | `refactor(workspace): dissolve ironclaw_storage` | Removed a crate parallel to RootFilesystem; only 5 outbound helpers were used; 660 LOC of duplicate dispatch dropped. |
-| `96e9e0ddf` | `arch(boundaries): pin boot-config file layout` | Encodes operator contracts as architecture tests; matches finding D2 (status declaration). |
-| `1e2f9850b` | `refactor: extract embeddings into ironclaw_embeddings crate` | Removed 1,115 LOC from `src/workspace`. Shows ongoing dissolution of `src/workspace`. |
-| `8209db1c5` | `refactor(registry): address product adapter review followups (#3688)` | Tightens ProductAdapter projection from `ExtensionManifestV2`. Relates to finding E1. |
-| `c9995bf3e` | `arch(ws-17): prove product live planned-runtime cutover (#3653)` | Validated reborn `PlannedDriver` runtime accepting production traffic. |
+| `f95288c16` | feat(reborn): apply universal FS dispatch across consumer crates (#3679) | Consolidates on-disk layout via `RootFilesystem` put/get; migrated `ironclaw_processes`, `ironclaw_outbound`. Existing LibSql/Postgres impls kept for production transition. |
+| `f44c68b9e` | arch(reborn): narrow ironclaw_reborn public surface to a directory of modules | Removed 25+ speculative `pub use` re-exports after discovering zero workspace callers used them. |
+| `06090f4e6` | refactor(workspace): dissolve ironclaw_storage | Dropped a duplicate-dispatch crate; 660 LOC removed. `crates/AGENTS.md` and `crates/README.md` still reference it. |
+| `96e9e0ddf` | arch(boundaries): pin boot-config file layout | Encoded operator-facing path contracts as architecture tests. |
+| `1e2f9850b` | refactor: extract embeddings into ironclaw_embeddings crate | Removed 1,115 LOC from `src/workspace/`. (`src/workspace/embedding_cache.rs` ~23 KB still on disk — verify if vestigial.) |
+| `8209db1c5` | refactor(registry): address product adapter review followups (#3688) | Tightened `ProductAdapter` projection from `ExtensionManifestV2`. Relates to E1. |
+| `c9995bf3e` | arch(ws-17): prove product live planned-runtime cutover (#3653) | Validated reborn `PlannedDriver` runtime under production traffic. |
+| `af0ef699e` | (telegram host consolidation) | Consolidated v2 host into reborn binary; left the directory on disk (E3). |
+| `24c7051d2` | docs(plans): document remaining legacy-store cleanup + trait collapse follow-ups | Documents three deferred follow-ups (secrets, authorization, run_state) — see "Recommended order of work" #4. |
 
-### Promised-but-not-delivered follow-ups
-
-`24c7051d2` ("docs(plans): document remaining legacy-store cleanup + trait collapse follow-ups", May 16) explicitly lists three deferred items:
-
-1. **`ironclaw_secrets`**: requires master-key decryptability check on `FilesystemSecretStore` before LibSql/Postgres impls can be deleted.
-2. **`ironclaw_authorization`**: `FilesystemCapabilityLeaseStore` must move from `&'a ScopedFilesystem` to `Arc<ScopedFilesystem>` for `Arc<dyn CapabilityLeaseStore>` composition.
-3. **`ironclaw_run_state`**: not yet migrated to the unified filesystem dispatch — blocks LibSql/Postgres deletion.
-
-These map cleanly onto findings D2 (still pub mod), D3 (secrets coexistence), C3 (lease store ownership). **Recommend filing these as the first three concrete follow-up issues from this audit.**
-
-### TODOs found referencing architectural intent
+### TODOs referencing architectural intent
 
 - `crates/ironclaw_reborn_composition/src/lib.rs` — `TODO(#3571): remove this adapter when the host-runtime services builder ...`
 - `crates/ironclaw_host_runtime/src/memory_context.rs` — `TODO(reborn/#3333): replace this compatibility alias list ...`
-- `crates/ironclaw_secrets/src/filesystem_store.rs` — `TODO(reborn/fs-secrets): once EncryptedBackend ships, replace the inline ...` (blocks D3)
+- `crates/ironclaw_secrets/src/filesystem_store.rs` — `TODO(reborn/fs-secrets): once EncryptedBackend ships ...` (blocks D3 / follow-up 1)
 
 ---
 
-## D-6. Updated cross-cutting recommendations
+## How to engage
 
-Original recommendations stand; the deep pass adds three:
-
-5. **Add the missing architecture tests.** 22 of 25 original findings are NEITHER asserted nor enforced. Easiest wins: D1 (workspace→memory inverse), D4 (Process vs Run status duplication), E3 (telegram_v2_host excluded-dir-on-disk), F1 (host_api LOC/dep census), G1 (outbound reachability). All ~20-line cargo-metadata tests in `ironclaw_architecture/tests/`.
-
-6. **Document the dispatch pipeline.** New `docs/reborn/contracts/dispatch-pipeline.md` capturing the 8-layer trace from D-3, the request-shape evolution, and the explicit drop rules for each field (`invocation_id`, `idempotency_key`, `trust_decision`, `context`). Reference WIT for layers 7-8.
-
-7. **Treat the three `24c7051d2` follow-ups as the first concrete tracking issues** out of this audit. They're already scoped and already documented as deferred — converting them into tracked issues + assigning owners is the fastest way to convert audit findings into delivered work.
-
----
-
-## What this Deep Pass adds over the first pass
-
-- **2 of 25 original findings ASSERTED** by architecture tests (B1, E4); **22 NEITHER** — gives a clear backlog of cheap tests to write.
-- **One original finding (C1) corrected**: capabilities Cargo.toml is consistent with its CLAUDE.md after all.
-- **7 documentation contradictions** (3 HIGH) — concrete promised-vs-delivered gaps.
-- **New Theme I** with 6 findings from end-to-end tracing: hidden RuntimeAdapter seam, trust evaluated twice, capability lookup duplicated, WIT host-import re-entry, dual event logs, request-shape drift through six structs.
-- **4 WIT contract drift findings** (channel.wit orphaned, tool WIT version unpinned, http-egress stubbed, tool-invoke gating undocumented).
-- **Top 7 structural commits + 3 deferred follow-ups** with SHAs — gives the team's *stated intent* alongside the *observed state*, so resolution discussions can reference rationale.
-- **5 Mermaid diagrams** at the top of the doc for at-a-glance comprehension.
+- Comment on PR #3772 inline next to a finding you want to dispute or add context to.
+- Tick the checkbox on issue #3773 when a finding has been landed or formally deferred.
+- The themes are mostly independent; resolve in parallel.
+- All "Proposed resolution" lines are starting positions for team discussion, not decisions.
