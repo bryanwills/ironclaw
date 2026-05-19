@@ -34,7 +34,7 @@ pub struct CapabilityDispatchRequest {
 /// Rust cannot restrict a constructor to one sibling crate, so production code
 /// must keep minting at the capability-host boundary and architecture tests
 /// guard that invariant. The source is intentionally diagnostic only; it does
-/// not expose reusable authority handles.
+/// not leave the sealed request as a reusable authority handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchAuthorityProof {
     source: DispatchAuthoritySource,
@@ -61,6 +61,7 @@ impl DispatchAuthorityProof {
     }
 
     /// Mint proof for contract tests that exercise dispatcher behavior directly.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub const fn test() -> Self {
         Self {
@@ -78,6 +79,7 @@ impl DispatchAuthorityProof {
 pub enum DispatchAuthoritySource {
     CapabilityHost,
     HostProcessExecutor,
+    #[cfg(any(test, feature = "test-support"))]
     Test,
 }
 
@@ -98,8 +100,8 @@ impl AuthorizedDispatchRequest {
         &self.request
     }
 
-    pub const fn authority(&self) -> DispatchAuthorityProof {
-        self.authority
+    pub const fn authority_source(&self) -> DispatchAuthoritySource {
+        self.authority.source()
     }
 
     pub fn into_request(self) -> CapabilityDispatchRequest {

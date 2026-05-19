@@ -1127,6 +1127,7 @@ fn collect_dispatch_authority_violations(
             ".dispatch_json(CapabilityDispatchRequest",
             "DispatchAuthorityProof::capability_host()",
             "DispatchAuthorityProof::host_process_executor()",
+            "DispatchAuthorityProof::test()",
         ] {
             if contents.contains(pattern) {
                 violations.push(format!(

@@ -39,7 +39,7 @@ RuntimeDispatchErrorKind
 
 ## 2. Inputs
 
-The dispatcher receives an `AuthorizedDispatchRequest`, not raw request data. `CapabilityDispatchRequest` carries payload fields; `AuthorizedDispatchRequest` seals that payload with authority proof minted by the capability host or host-owned process executor after authorization:
+The dispatcher receives an `AuthorizedDispatchRequest`, not raw request data. `CapabilityDispatchRequest` carries payload fields; `AuthorizedDispatchRequest` seals that payload with authority proof minted by the capability host or host-owned process executor after authorization. Production callers must not receive reusable proof handles from sealed requests; diagnostics may observe only the proof source:
 
 ```rust
 pub struct CapabilityDispatchRequest {
