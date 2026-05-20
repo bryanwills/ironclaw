@@ -27,7 +27,7 @@ Everything below exists to make that hold up in practice.
   </Card>
 
   <Card title="Leak Detection" icon="shield">
-    Outbound traffic is scanned in real time. Secret-like data is blocked before exfiltration.
+    Tool output is scanned for secret shapes before it reaches the model. Matches are blocked or redacted.
   </Card>
 </CardGroup>
 
@@ -35,7 +35,7 @@ Everything below exists to make that hold up in practice.
 
 ## Data Flow
 
-The security architecture illustrates IronClaw's **defense in depth** approach with four independent protection layers that data flows through before reaching the LLM and external services.
+IronClaw takes a **defense in depth** approach — independent protection layers that data passes through before it reaches the LLM or an external service.
 
 
 ![Data Flow Diagram](/images/security/data-flow.png)
@@ -48,12 +48,12 @@ At every point, secrets are separated from regular data and handled with extra c
 
 A prompt injection is any external string that tries to redirect the model against the user — a webhook payload telling the agent to forward your inbox, a fetched page asking it to reveal stored credentials, a tool response that pretends to be a system message. IronClaw treats every byte that didn't originate in your prompt or the system's own configuration as untrusted, and runs four layers between it and the LLM:
 
-1. **Input validation** — Inbound user messages are checked for length, valid UTF-8 encoding, null bytes, and known forbidden patterns before they reach the agent.
+1. **Input validation** — Inbound user messages are checked for length, null bytes, and any configured forbidden patterns before they reach the agent.
 2. **Injection-pattern detection** — Tool outputs are scanned for known injection phrases, role-impersonation markers, and special control tokens. Critical matches are neutralized in place; lower-severity matches surface as warnings.
 3. **Policy engine** — A built-in rule set decides whether a flagged tool output is blocked outright, sanitized in place, or logged as a warning, based on the severity of the matched pattern (system-file paths, crypto private keys, shell injection, SQL-shaped content, and similar).
-4. **Structural wrapping** — Tool outputs and externally fetched content (emails, webhook payloads, web pages) are framed with explicit "this is data, not instructions" delimiters before reaching the model, and any attempt to forge a closing delimiter inside that content is broken on the way in.
+4. **Structural wrapping** — Tool outputs and externally fetched content (emails, webhook payloads, web pages) are wrapped in explicit delimiters that mark them as data rather than instructions before reaching the model, and any attempt to forge a closing delimiter inside that content is broken on the way in.
 
-The [Leak Detector](#leak-detector) below runs alongside these layers but solves a different problem: stopping a secret from leaving via tool output, not stopping the model from being hijacked.
+The [Leak Detector](#leak-detector) below runs alongside these layers but solves a different problem: stopping a secret from reaching the model via tool output, not stopping the model from being hijacked.
 
 None of these layers replaces the model itself. Modern frontier models are trained to resist common injection patterns, and IronClaw's identity files reinforce that posture. The layers exist because no single defense should be load-bearing. Even when an injection slips through every check, the WASM sandbox is the final boundary: a compromised tool still can't read secrets it wasn't granted, reach hosts outside its allowlist, or persist anything past its declared workspace prefixes. See [Secrets & Sandboxing](/security/secrets-and-sandboxing) for that structural mitigation.
 
@@ -61,7 +61,7 @@ None of these layers replaces the model itself. Modern frontier models are train
 
 ## Leak Detector
 
-Before any tool output reaches the model, IronClaw scans it for known secret shapes. If a credential ends up in a tool response — an API echoing back its own token in an error message, for example — the leak detector catches it at the boundary. A separate redaction pass runs on agent reasoning that streams to your UI, so verbose-only observability events don't leak credentials to subscribers.
+Before any tool output reaches the model, IronClaw scans it for known secret shapes. If a credential ends up in a tool response — an API echoing back its own token in an error message, for example — the leak detector catches it at the boundary. A separate redaction pass runs on verbose observability events — `CodeExecuted` events and streamed log lines — so they can't leak credentials to a connected UI.
 
 The detector ships with around twenty regex patterns, grouped by category:
 
@@ -80,7 +80,7 @@ When a pattern matches, IronClaw blocks the response, redacts the matched span, 
 
 ## Command Injection Detection
 
-The shell tool is the highest-risk tool surface: a prompt-injected model can try to use it for data exfiltration or destructive actions. IronClaw checks every shell command against two layers before it runs.
+The shell tool is the highest-risk tool surface: a prompt-injected model can try to use it for data exfiltration or destructive actions. IronClaw checks every shell command before it runs.
 
 ### Blocklist
 
@@ -100,7 +100,7 @@ curl … | sh         # pipe-to-shell installer
 id_rsa              # SSH private key
 ```
 
-### Obfuscation detector
+### Obfuscation Detector
 
 This is a separate check that catches techniques a model would use to hide a dangerous command from the substring blocklist:
 
@@ -114,7 +114,7 @@ This is a separate check that catches techniques a model would use to hide a dan
 | String reversal piped to shell | `echo "hs \| er-" \| rev \| sh` |
 | Null byte in command | `ls /tmp\x00/etc/passwd` |
 
-Both layers run *before* the command reaches the sandbox. A command can be blocked either by matching the substring blocklist or by triggering the obfuscation detector.
+These checks run *before* the command reaches the sandbox. A command can be blocked by matching the substring blocklist or by triggering the obfuscation detector.
 
 ---
 
@@ -145,10 +145,11 @@ When you install a tool, you're approving a `capabilities.json` file that declar
 }
 ```
 
-Three things this file controls:
+What this file controls:
 
 - **`http.allowlist`** — every outbound HTTP destination. Anything not listed is rejected before the connection opens.
-- **`http.credentials` + `secrets.allowed_names`** — which secrets the host injects into requests, and which the tool is permitted to use at all. The tool itself never sees the plaintext value.
+- **`http.credentials`** — the secret-to-host mappings the host uses to inject credentials into outbound requests. The tool itself never sees the plaintext value.
+- **`secrets.allowed_names`** — which secret names the tool may check for *existence* (via `secret_exists`); it can never read a value.
 - **`workspace.allowed_prefixes`** — which workspace path prefixes the tool can read via `workspace_read`.
 
 For the full schema and per-field reference, see [Sandboxed Tools](/capabilities/sandboxed-tools).
