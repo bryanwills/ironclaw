@@ -21,10 +21,13 @@ publish = false
 ironclaw_conversations = { path = "../ironclaw_conversations", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
+ironclaw_network = { path = "../ironclaw_network", version = "0.1.0" }
 ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }
 ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage", version = "0.1.0" }
+ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
 ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
@@ -57,7 +60,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 deadpool-postgres = { version = "0.14", optional = true }
 tokio-postgres = { version = "0.7", optional = true, features = ["with-uuid-1", "with-chrono-0_4"] }
-refinery = { version = "0.8", optional = true, features = ["tokio-postgres"] }
 rustls = { version = "0.23", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 tokio-postgres-rustls = { version = "0.13", optional = true }
@@ -75,17 +77,14 @@ libsql = [
     "dep:libsql",
     "ironclaw_filesystem/libsql",
     "ironclaw_outbound/libsql",
-    "ironclaw_product_workflow_storage/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
-    "dep:refinery",
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:tokio-postgres-rustls",
     "dep:webpki-roots",
     "ironclaw_filesystem/postgres",
     "ironclaw_outbound/postgres",
-    "ironclaw_product_workflow_storage/postgres",
 ]

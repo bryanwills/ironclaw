@@ -4,10 +4,12 @@
 //! `(tenant, user, thread)` row on first inbound) and return
 //! `InboundTurnOutcome::Submitted` with a synthetic correlation id. **No
 //! reply is produced.** The webhook handler will then ack 200 to Telegram
-//! and the message is persisted in the ledger; nothing else happens until
-//! the Reborn agent loop ships (PRs #3544 / #3550 / #3586).
+//! and the message is persisted in the ledger.
 //!
-//! When the Reborn loop lands:
+//! The Reborn agent loop (PRs #3544 / #3550 / #3586) has now merged, but
+//! this PR is the inbound tracer — scoped to locking down the inbound
+//! contract before wiring the outbound reply path. The migration is a
+//! deliberate follow-up:
 //!   * Drop this file.
 //!   * Wire `DefaultInboundTurnService` (from `ironclaw_product_workflow`)
 //!     + a real `TurnCoordinator` instead.
@@ -57,8 +59,8 @@ impl InboundTurnService for StubInboundTurnService {
             external_event_id: envelope.external_event_id().clone(),
             // Stub path: classify Telegram inbound as Direct. The real
             // `DefaultInboundTurnService` derives `route_kind` from
-            // `payload.trigger` via `route_kind_for_user_message` once the
-            // Reborn agent loop replaces this stub.
+            // `payload.trigger` via `route_kind_for_user_message`; the
+            // outbound migration follow-up will replace this stub.
             route_kind: ironclaw_product_workflow::ProductConversationRouteKind::Direct,
             auth_claim: envelope.auth_claim().clone(),
         };
@@ -74,7 +76,7 @@ impl InboundTurnService for StubInboundTurnService {
             user_id = %binding.user_id.as_str(),
             thread_id = %binding.thread_id.as_str(),
             run_id = %synthetic_run_id.as_uuid(),
-            "Reborn host: inbound resolved + bound; reply path stubbed (no Reborn agent loop yet)"
+            "Reborn host: inbound resolved + bound; reply path stubbed pending outbound migration"
         );
 
         Ok(InboundTurnOutcome::Submitted {

@@ -31,12 +31,13 @@ pub struct HostConfig {
     pub installation_id: String,
     /// Telegram bot token. Wrapped in `SecretString` so it zeroizes on drop
     /// and accidental `Debug` / `Display` prints reveal `[REDACTED]` rather
-    /// than the literal token. The token still ends up cloned into
-    /// `StaticCredentialResolver` (which holds a plain `String`) for the
-    /// lifetime of the runner — fully eliminating that residual exposure
-    /// requires re-reading through `EgressCredentialResolver` on each
-    /// resolve, which zmanian's review on PR #3590 (item #3) flags as a
-    /// major-tier follow-up before non-default-off rollout.
+    /// than the literal token. Composition `put`s the value into an
+    /// `InMemorySecretStore` once at boot, then drops the raw bytes; every
+    /// outbound request leases the material one-shot inside
+    /// `HostHttpEgressService` (via the host-api
+    /// `RuntimeCredentialTarget::UrlPath` injection), so the token never
+    /// lives in a long-lived `String`. This closes serrrfirat's PR #3590
+    /// findings A3 + C.
     pub telegram_bot_token: SecretString,
     /// Telegram webhook shared secret (sent in `X-Telegram-Bot-Api-Secret-Token`).
     pub telegram_webhook_secret: SecretString,
@@ -99,7 +100,7 @@ impl HostConfig {
         let installation_id_var = env_lookup("REBORN_TELEGRAM_V2_INSTALLATION_ID");
         let tenant_id_var = env_lookup("REBORN_TENANT_ID");
         let agent_id_var = env_lookup("REBORN_AGENT_ID");
-        let allow_default_namespace = env_flag_set(env_lookup, ALLOW_DEFAULT_NAMESPACE_ENV);
+        let allow_default_namespace = env_flag_set(env_lookup, ALLOW_DEFAULT_NAMESPACE_ENV)?;
         let missing_namespace_vars: Vec<&str> = [
             ("REBORN_TELEGRAM_V2_INSTALLATION_ID", &installation_id_var),
             ("REBORN_TENANT_ID", &tenant_id_var),
@@ -171,7 +172,10 @@ fn parse_pairings(raw: Option<&str>) -> Result<Vec<TelegramPairing>, HostError> 
         if entry.is_empty() {
             continue;
         }
-        let mut parts = entry.splitn(2, ':');
+        // Require exactly one `:` separator. `splitn(2, ':')` would silently
+        // accept `<id>:<user>:<extra>` and stash the trailing colon-segment
+        // into `user_id`, corrupting the pairing table.
+        let mut parts = entry.split(':');
         let external_user_id = parts
             .next()
             .map(str::trim)
@@ -190,6 +194,12 @@ fn parse_pairings(raw: Option<&str>) -> Result<Vec<TelegramPairing>, HostError> 
                     "REBORN_TELEGRAM_PAIRINGS entry {idx} is missing `<telegram_user_id>:<reborn_user_id>` form: {entry:?}"
                 ))
             })?;
+        if parts.next().is_some() {
+            return Err(HostError::Config(format!(
+                "REBORN_TELEGRAM_PAIRINGS entry {idx} has extra colon-separated segments; \
+                 expected exactly `<telegram_user_id>:<reborn_user_id>`: {entry:?}"
+            )));
+        }
         out.push(TelegramPairing {
             external_user_id: external_user_id.to_string(),
             user_id: user_id.to_string(),
@@ -202,8 +212,26 @@ fn parse_pairings(raw: Option<&str>) -> Result<Vec<TelegramPairing>, HostError> 
 /// Intended for dev/test only; documented and warned on at startup.
 const ALLOW_DEFAULT_NAMESPACE_ENV: &str = "IRONCLAW_REBORN_ALLOW_DEFAULT_NAMESPACE";
 
-fn env_flag_set(env_lookup: EnvLookup, name: &str) -> bool {
-    env_lookup(name).is_some_and(|v| !v.is_empty() && v != "0")
+/// Strict opt-in flag parser.
+///
+/// These flags gate fail-closed safety defaults (default namespace bypass,
+/// ephemeral storage). A permissive parser that accepted any non-empty value
+/// would silently flip the safety off — `IRONCLAW_REBORN_ALLOW_EPHEMERAL=false`
+/// would *enable* in-memory storage. Accept only an explicit `1` / `true`
+/// (case-insensitive); treat empty / `0` / `false` as off; reject anything
+/// else loudly so a typo can't silently disable a safety check.
+fn env_flag_set(env_lookup: EnvLookup, name: &str) -> Result<bool, HostError> {
+    let Some(raw) = env_lookup(name) else {
+        return Ok(false);
+    };
+    let trimmed = raw.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "" | "0" | "false" => Ok(false),
+        "1" | "true" => Ok(true),
+        _ => Err(HostError::Config(format!(
+            "{name} must be one of 1/true/0/false (got {raw:?})"
+        ))),
+    }
 }
 
 /// Env-var name an operator can set to *explicitly* opt into ephemeral
@@ -230,7 +258,7 @@ fn resolve_storage(env_lookup: EnvLookup) -> Result<StorageBackend, HostError> {
     // noticing. Operators who want ephemeral storage on purpose (tests,
     // dev loops) opt in explicitly via `IRONCLAW_REBORN_ALLOW_EPHEMERAL=1`.
     #[cfg(feature = "libsql")]
-    if env_flag_set(env_lookup, ALLOW_EPHEMERAL_ENV) {
+    if env_flag_set(env_lookup, ALLOW_EPHEMERAL_ENV)? {
         tracing::warn!(
             "Reborn host: using ephemeral in-memory libSQL storage because \
              {ALLOW_EPHEMERAL_ENV} is set. Ledger and bindings will be lost \
@@ -416,6 +444,73 @@ mod tests {
         assert_eq!(config.pairings.len(), 2);
         assert_eq!(config.pairings[0].external_user_id, "111");
         assert_eq!(config.pairings[0].user_id, "user_a");
+    }
+
+    /// Regression for serrrfirat's PR #3590 review: a permissive parser
+    /// silently flipped the fail-closed default off when an operator wrote
+    /// `false` (or any string that wasn't literally `0`). Strict parser
+    /// must treat the textual `false` as off.
+    #[test]
+    fn env_flag_set_treats_false_string_as_off() {
+        let env = fake_env(&[("FLAG", "false")]);
+        let lookup = lookup(&env);
+        let result = env_flag_set(&lookup, "FLAG").expect("recognized");
+        assert!(
+            !result,
+            "`false` must NOT enable a fail-closed escape hatch"
+        );
+    }
+
+    /// Regression for serrrfirat's PR #3590 review: case-insensitive truthy
+    /// values must work to match how operators commonly write them in
+    /// `.env` / shell scripts (`TRUE`, `True`, `1`).
+    #[test]
+    fn env_flag_set_accepts_case_insensitive_truthy() {
+        for v in &["1", "true", "TRUE", "True"] {
+            let env = fake_env(&[("FLAG", v)]);
+            let lookup = lookup(&env);
+            let result = env_flag_set(&lookup, "FLAG").expect("recognized");
+            assert!(result, "`{v}` must enable");
+        }
+        for v in &["0", "false", "FALSE", "False", ""] {
+            let env = fake_env(&[("FLAG", v)]);
+            let lookup = lookup(&env);
+            let result = env_flag_set(&lookup, "FLAG").expect("recognized");
+            assert!(!result, "`{v}` must NOT enable");
+        }
+    }
+
+    /// Regression: an unrecognized value must be a typed config error, not
+    /// a silent fall-through. A typo (`enabled`, `yes`, `on`) on a fail-closed
+    /// escape hatch is a deployment bug we want to surface at boot.
+    #[test]
+    fn env_flag_set_rejects_unrecognized_values() {
+        for v in &["yes", "on", "enabled", "no", "off", "2"] {
+            let env = fake_env(&[("FLAG", v)]);
+            let lookup = lookup(&env);
+            let err = env_flag_set(&lookup, "FLAG")
+                .expect_err(&format!("unrecognized value {v:?} must reject"));
+            assert!(matches!(err, HostError::Config(_)));
+        }
+    }
+
+    /// Regression for serrrfirat's PR #3590 review: `splitn(2, ':')`
+    /// silently accepted `<telegram_user_id>:<part>:<extra>` and stashed
+    /// the trailing colon-segment into `user_id`. Strict parser must
+    /// reject any pairing with more than one colon.
+    #[test]
+    fn parse_pairings_rejects_entry_with_extra_colons() {
+        let err = parse_pairings(Some("123:user:extra")).expect_err("must reject");
+        match err {
+            HostError::Config(msg) => {
+                assert!(msg.contains("extra colon"), "msg: {msg}");
+                assert!(
+                    msg.contains("123:user:extra"),
+                    "msg should quote the bad entry: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
     }
 
     #[test]

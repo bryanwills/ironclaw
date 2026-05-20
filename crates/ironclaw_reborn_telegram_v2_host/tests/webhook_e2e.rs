@@ -38,7 +38,6 @@ use ironclaw_reborn_telegram_v2_host::composition::{
 };
 use ironclaw_reborn_telegram_v2_host::config::TelegramPairing;
 use ironclaw_reborn_telegram_v2_host::inbound_turn::StubInboundTurnService;
-use ironclaw_reborn_telegram_v2_host::migrations::run_libsql_migrations;
 use ironclaw_reborn_telegram_v2_host::router::{TelegramV2RouterState, telegram_v2_routes};
 use ironclaw_telegram_v2_adapter::{
     GroupTriggerPolicy, TelegramV2Adapter, TelegramV2AdapterConfig, telegram_declared_egress_hosts,
@@ -62,7 +61,6 @@ const TEST_AGENT: &str = "agent_e2e";
 struct Harness {
     router: Router,
     runtime: RebornProductRuntime,
-    db: Arc<libsql::Database>,
     _tempdir: tempfile::TempDir,
 }
 
@@ -84,14 +82,16 @@ async fn build_harness(pairings: Vec<TelegramPairing>) -> Harness {
             .await
             .expect("build db"),
     );
-    run_libsql_migrations(&db).await.expect("ledger migration");
+    // The product-workflow ledger now lives on the universal-FS dispatch
+    // fabric; `build_router` → `build_libsql_layer` runs the FS-backend
+    // migrations internally. There is no separate per-table SQL schema to
+    // apply here.
 
-    let (router, runtime) = build_router(Arc::clone(&db), pairings).await;
+    let (router, runtime) = build_router(db, pairings).await;
 
     Harness {
         router,
         runtime,
-        db,
         _tempdir: tempdir,
     }
 }
@@ -211,34 +211,48 @@ async fn post_webhook(router: Router, body: Vec<u8>, secret: &str) -> (StatusCod
     (status, body)
 }
 
-/// SELECT the phase column for a given external_event_id. Returns None if no
-/// ledger row exists, otherwise the rendered phase string.
-async fn ledger_phase(db: &libsql::Database, external_event_id: &str) -> Option<String> {
-    let conn = db.connect().expect("connect");
-    let mut rows = conn
-        .query(
-            "SELECT phase FROM product_inbound_actions WHERE external_event_id = ?1",
-            ::libsql::params![external_event_id],
-        )
-        .await
-        .expect("query");
-    rows.next()
-        .await
-        .expect("rows")
-        .map(|row| row.get::<String>(0).expect("phase"))
-}
+/// Probe the ledger for a previously-recorded fingerprint by calling
+/// `begin_or_replay` with the same identity tuple. Returns the prior decision
+/// when the ledger has a row — `Replay` for terminal rows, `Transient` for
+/// in-flight, `New` for absent — without depending on a backend-specific
+/// schema (the SQL `product_inbound_actions` table that used to back this
+/// query was removed when the ledger moved onto the universal-FS dispatch
+/// fabric; see `crates/ironclaw_product_workflow_storage/src/ledger_filesystem.rs`).
+///
+/// The fingerprint must exactly mirror what `DefaultProductWorkflow` derives
+/// from the inbound envelope, including `ExternalConversationRef`'s
+/// `conversation_fingerprint()` output. The fixture is a private chat where
+/// `chat.id == from.id == FIXTURE_TG_USER_ID`.
+async fn probe_ledger(
+    runtime: &RebornProductRuntime,
+    update_id: u64,
+) -> Result<
+    ironclaw_product_workflow::IdempotencyDecision,
+    ironclaw_product_workflow::ProductWorkflowError,
+> {
+    use ironclaw_product_adapters::{
+        AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+        ProductAdapterId,
+    };
+    use ironclaw_product_workflow::{ActionFingerprintKey, SourceBindingKey};
 
-async fn ledger_count(db: &libsql::Database, external_event_id: &str) -> i64 {
-    let conn = db.connect().expect("connect");
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM product_inbound_actions WHERE external_event_id = ?1",
-            ::libsql::params![external_event_id],
-        )
+    // Mirror the conversation-fingerprint derivation exactly. Private chat
+    // ⇒ no space, no topic; conversation_id is the Telegram chat id.
+    let conversation_ref = ExternalConversationRef::new(None, FIXTURE_TG_USER_ID, None, None)
+        .expect("conversation ref");
+    let source_binding_key =
+        SourceBindingKey::new(conversation_ref.conversation_fingerprint()).expect("binding");
+    let fingerprint = ActionFingerprintKey::new(
+        ProductAdapterId::new("telegram_v2").expect("adapter"),
+        AdapterInstallationId::new(INSTALLATION).expect("install"),
+        ExternalActorRef::new("telegram_user", FIXTURE_TG_USER_ID, None::<String>).expect("actor"),
+        source_binding_key,
+        ExternalEventId::new(format!("tg-{INSTALLATION}-{update_id}")).expect("event"),
+    );
+    runtime
+        .ledger
+        .begin_or_replay(fingerprint, chrono::Utc::now())
         .await
-        .expect("query");
-    let row = rows.next().await.expect("rows").expect("count row");
-    row.get(0).expect("count")
 }
 
 /// Resolve the binding through the shared service, returning the canonical
@@ -306,14 +320,22 @@ async fn webhook_post_drives_workflow_to_settled() {
         String::from_utf8_lossy(&body)
     );
 
-    // Ledger row reaches `settled` for this external_event_id. The adapter
-    // stores it as `tg-{installation}-{update_id}`.
-    let phase = ledger_phase(&h.db, &format!("tg-{INSTALLATION}-1")).await;
-    assert_eq!(
-        phase.as_deref(),
-        Some("settled"),
-        "ledger phase must reach `settled`",
-    );
+    // Ledger row reaches a terminal phase for this external_event_id.
+    // Probing through `begin_or_replay` returns `Replay` when the prior
+    // action is settled — the adapter stores the event id as
+    // `tg-{installation}-{update_id}`.
+    let decision = probe_ledger(&h.runtime, 1).await.expect("probe ledger");
+    use ironclaw_product_workflow::{ActionPhase, IdempotencyDecision};
+    match decision {
+        IdempotencyDecision::Replay(action) => {
+            assert_eq!(
+                action.phase,
+                ActionPhase::Settled,
+                "ledger row must be settled after a successful inbound",
+            );
+        }
+        other => panic!("expected Replay(settled), got {other:?}"),
+    }
 
     // The shared binding service reports a durable thread_id for the
     // paired Telegram user — confirms first-contact resolution wired the
@@ -334,8 +356,57 @@ async fn duplicate_update_replays_through_ledger() {
     assert_eq!(s1, StatusCode::OK);
     assert_eq!(s2, StatusCode::OK, "duplicate should ack 200, not error");
 
-    let count = ledger_count(&h.db, &format!("tg-{INSTALLATION}-2")).await;
-    assert_eq!(count, 1, "idempotency must not double-insert");
+    use ironclaw_product_workflow::IdempotencyDecision;
+
+    // First post-duplicate probe: the prior action is settled, so
+    // `begin_or_replay` must return `Replay(action)` — the trait-level
+    // guarantee that the duplicate did not insert a fresh row.
+    let first = probe_ledger(&h.runtime, 2).await.expect("probe ledger");
+    let first_action = match first {
+        IdempotencyDecision::Replay(action) => action,
+        other => panic!("idempotency must replay, not insert a fresh row; got {other:?}"),
+    };
+
+    // Second probe at the same fingerprint must return the *same*
+    // action_id. This catches a regression where the ledger's path
+    // derivation becomes non-deterministic across calls: two webhook
+    // posts that wrote to different paths for one fingerprint would
+    // make a third probe land on either path, yielding a different
+    // action_id from the first probe. The current test would not have
+    // caught that — the `assert_eq` below does.
+    let second = probe_ledger(&h.runtime, 2).await.expect("probe ledger");
+    let second_action = match second {
+        IdempotencyDecision::Replay(action) => action,
+        other => panic!("settled row must keep replaying; got {other:?}"),
+    };
+    assert_eq!(
+        first_action.action_id, second_action.action_id,
+        "ledger must yield a stable action_id across probes for the same fingerprint — \
+         divergence here implies non-deterministic path derivation, which is the \
+         exact regression that lets a duplicate webhook quietly fork into two rows",
+    );
+
+    // Negative cross-check: a *different* update_id must derive a
+    // distinct fingerprint and produce a fresh `New` decision. This
+    // catches the inverse regression — fingerprint collision across
+    // distinct inputs, which would silently dedupe two genuinely
+    // different webhooks into one row.
+    let other = probe_ledger(&h.runtime, 99_999)
+        .await
+        .expect("probe ledger");
+    assert!(
+        matches!(other, IdempotencyDecision::New(_)),
+        "an unseen fingerprint must yield a new ledger row; got {other:?} — \
+         a Replay here would mean two distinct update_ids share a fingerprint",
+    );
+
+    // Row-count proof (exactly one /ledger/inbound entry after a
+    // duplicate post) is the responsibility of the ledger crate's own
+    // contract test (`ledger_filesystem_contract.rs`), which can list
+    // the underlying filesystem directly. Keeping that assertion there
+    // matches the layering: this webhook test owns the
+    // webhook→workflow→ledger integration, not ledger persistence
+    // internals.
 }
 
 #[tokio::test]
@@ -466,7 +537,8 @@ async fn binding_survives_host_restart() {
                 .await
                 .expect("build db"),
         );
-        run_libsql_migrations(&db).await.expect("ledger migration");
+        // FS-backend migrations run inside `build_router` (composition);
+        // no separate per-table SQL schema to apply here.
         let (router, runtime) = build_router(Arc::clone(&db), vec![default_pairing()]).await;
         let (status, _) = post_webhook(router, telegram_update_payload(7), WEBHOOK_SECRET).await;
         assert_eq!(status, StatusCode::OK);
@@ -507,7 +579,7 @@ async fn duplicate_pairing_install_is_idempotent() {
             .await
             .expect("build db"),
     );
-    run_libsql_migrations(&db).await.expect("ledger migration");
+    // FS-backend migrations run inside `build_router` (composition).
 
     // First build installs the pairing.
     let _ = build_router(Arc::clone(&db), vec![default_pairing()]).await;

@@ -187,7 +187,7 @@ slots into `ironclaw-reborn run` behind its own Cargo feature on
 | Egress policy enforcement | `[implemented slice]` |
 | `NativeProductAdapterRunner` | `[implemented slice]` |
 | Telegram v2 native adapter | `[implemented slice]` (`ironclaw_telegram_v2_adapter`) |
-| Telegram v2 production host | `[implemented slice, stub reply]` (`ironclaw_reborn_telegram_v2_host`, wired into the `ironclaw-reborn` binary behind the `telegram-v2` feature) — full inbound contract end-to-end; reply path stubbed until Reborn agent loop ships (PRs #3544 / #3550 / #3586) |
+| Telegram v2 production host | `[implemented slice, stub reply]` (`ironclaw_reborn_telegram_v2_host`, wired into the `ironclaw-reborn` binary behind the `telegram-v2` feature) — full inbound contract end-to-end; reply path stubbed pending outbound migration to `DefaultInboundTurnService` + `TurnCoordinator` (Reborn agent loop PRs #3544 / #3550 / #3586 have merged; the reply migration is a focused follow-up) |
 | wasmtime component-model glue | `[implemented slice]` (`ProductAdapterComponentRuntime` loads `crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit`; parse/render-only, component `http-egress` import fails closed until production egress wiring lands) |
 | Web / Slack / Discord / WhatsApp / Feishu / Signal v2 adapters | `[not implemented]` |
 | Production wiring of v2 webhook route | `[not implemented]` (default-off flag exists; route registration is a follow-up) |

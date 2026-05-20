@@ -10,26 +10,36 @@
 
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, CapabilityId, TenantId, UserId};
+use ironclaw_host_runtime::HostHttpEgressService;
+use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_outbound::OutboundStateStore;
-use ironclaw_product_adapters::{AdapterInstallationId, EgressCredentialHandle, ProductAdapterId};
+use ironclaw_product_adapters::{
+    AdapterInstallationId, EgressCredentialHandle, ProductAdapterId, ProtocolHttpEgress,
+};
 use ironclaw_product_workflow::{
     ConversationBindingService, IdempotencyLedger, ProductConversationBindingService,
     ProductInstallationKey, ProductInstallationScope, StaticProductInstallationResolver,
 };
-use ironclaw_product_workflow_storage::{
-    EgressCredentialResolver, StaticCredentialResolver, TelegramHttpEgress,
-};
 
 use crate::config::TelegramPairing;
 use crate::error::HostError;
+use crate::host_egress::HostMediatedTelegramEgress;
 
 #[derive(Clone)]
 pub struct RebornProductRuntime {
     pub ledger: Arc<dyn IdempotencyLedger>,
     pub binding: Arc<dyn ConversationBindingService>,
     pub outbound_store: Arc<dyn OutboundStateStore>,
-    pub egress: Arc<TelegramHttpEgress>,
+    /// Adapter-facing egress shim. Concrete type is
+    /// [`HostMediatedTelegramEgress`] over the host-mediated
+    /// [`RuntimeHttpEgress`][rhe] pipeline. Stored as a `dyn` so callers can
+    /// pass `Arc::clone(&runtime.egress)` to adapter constructors without
+    /// re-naming the concrete type — and so we can swap the underlying
+    /// transport in tests without changing the field signature.
+    ///
+    /// [rhe]: ironclaw_host_api::RuntimeHttpEgress
+    pub egress: Arc<dyn ProtocolHttpEgress>,
     pub default_tenant_id: TenantId,
     pub default_agent_id: AgentId,
 }
@@ -119,10 +129,33 @@ pub async fn build_reborn_product_runtime(
         }
     };
 
-    let credentials: Arc<dyn EgressCredentialResolver> = Arc::new(StaticCredentialResolver::new(
-        telegram_credential_handle.clone(),
-        telegram_bot_token,
-    ));
+    // A3 + C from the architecture review: every outbound call to Telegram
+    // flows through `ironclaw_host_api::RuntimeHttpEgress` — the host-api
+    // egress contract — so network policy, byte accounting, response-body
+    // limits, and credential redaction are managed by one host-owned
+    // service rather than a per-adapter shim. The bot token lives in an
+    // `InMemorySecretStore` keyed by a `SecretHandle`; the host leases the
+    // material one-shot per request and substitutes it into the URL via
+    // the `RuntimeCredentialTarget::UrlPath` injection variant that this
+    // crate's audit pass added to `host_api` (Telegram's Bot API embeds
+    // the token in the URL path — Header/QueryParam injection can't
+    // express that).
+    let secret_store = ironclaw_secrets::InMemorySecretStore::new();
+    let scope = ironclaw_host_api::ResourceScope::system();
+    let secret_handle = ironclaw_host_api::SecretHandle::new(telegram_credential_handle.as_str())
+        .map_err(|e| HostError::Startup(format!("invalid secret handle: {e}")))?;
+    {
+        use ironclaw_secrets::SecretStore;
+        secret_store
+            .put(
+                scope.clone(),
+                secret_handle,
+                ironclaw_secrets::SecretMaterial::from(telegram_bot_token),
+            )
+            .await
+            .map_err(|e| HostError::Startup(format!("seed telegram secret: {e}")))?;
+    }
+
     let declared_targets: Vec<ironclaw_product_adapters::DeclaredEgressTarget> =
         telegram_declared_hosts
             .into_iter()
@@ -133,8 +166,28 @@ pub async fn build_reborn_product_runtime(
                 )
             })
             .collect();
-    let egress = TelegramHttpEgress::new(declared_targets, credentials)
-        .map_err(|e| HostError::Startup(format!("egress client build: {e}")))?;
+
+    // Build the host-mediated egress stack:
+    //   PolicyNetworkHttpEgress<ReqwestNetworkTransport>  (network layer)
+    //     └── HostHttpEgressService                       (credential + policy + redaction)
+    //           └── HostMediatedTelegramEgress            (adapter-facing ProtocolHttpEgress)
+    //
+    // `new_with_request_policy_for_tests` is misleadingly named — for the
+    // standalone tracer (which has no obligations infrastructure to stage
+    // network policy through), the request-carried policy is what we want.
+    // Once the tracer gains an obligations/approvals fabric, swap to
+    // `HostHttpEgressService::new(...)` + `with_network_policy_store(...)`.
+    let network_egress = PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default());
+    let host_egress_service =
+        HostHttpEgressService::new_with_request_policy_for_tests(network_egress, secret_store);
+    let capability_id = CapabilityId::new("telegram_v2.outbound")
+        .map_err(|e| HostError::Startup(format!("telegram capability id: {e}")))?;
+    let egress = HostMediatedTelegramEgress::new(
+        Arc::new(host_egress_service),
+        declared_targets,
+        scope,
+        capability_id,
+    )?;
 
     Ok(RebornProductRuntime {
         ledger,
@@ -156,7 +209,7 @@ pub async fn build_reborn_product_runtime(
 fn fixed_host_mount_view() -> Result<ironclaw_host_api::MountView, HostError> {
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-    let aliases = ["/threads", "/outbound", "/conversations"];
+    let aliases = ["/threads", "/outbound", "/conversations", "/ledger"];
     let mut grants = Vec::with_capacity(aliases.len());
     for alias in aliases {
         grants.push(MountGrant::new(
@@ -248,7 +301,7 @@ async fn build_libsql_layer(
     use ironclaw_conversations::RebornFilesystemConversationServices;
     use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
     use ironclaw_outbound::FilesystemOutboundStateStore;
-    use ironclaw_product_workflow_storage::LibSqlProductIdempotencyLedger;
+    use ironclaw_product_workflow_storage::FilesystemIdempotencyLedger;
 
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem
@@ -276,7 +329,7 @@ async fn build_libsql_layer(
 
     let outbound: Arc<dyn OutboundStateStore> =
         Arc::new(FilesystemOutboundStateStore::new(Arc::clone(&scoped)));
-    let ledger = Arc::new(LibSqlProductIdempotencyLedger::new(Arc::clone(&db)));
+    let ledger = Arc::new(FilesystemIdempotencyLedger::new(Arc::clone(&scoped)));
     let binding: Arc<dyn ConversationBindingService> = Arc::new(
         ProductConversationBindingService::new(conversations, installations),
     );
@@ -295,7 +348,7 @@ async fn build_postgres_layer(
     use ironclaw_conversations::RebornFilesystemConversationServices;
     use ironclaw_filesystem::{PostgresRootFilesystem, ScopedFilesystem};
     use ironclaw_outbound::FilesystemOutboundStateStore;
-    use ironclaw_product_workflow_storage::PostgresProductIdempotencyLedger;
+    use ironclaw_product_workflow_storage::FilesystemIdempotencyLedger;
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem
@@ -323,7 +376,7 @@ async fn build_postgres_layer(
 
     let outbound: Arc<dyn OutboundStateStore> =
         Arc::new(FilesystemOutboundStateStore::new(Arc::clone(&scoped)));
-    let ledger = Arc::new(PostgresProductIdempotencyLedger::new(pool.clone()));
+    let ledger = Arc::new(FilesystemIdempotencyLedger::new(Arc::clone(&scoped)));
     let binding: Arc<dyn ConversationBindingService> = Arc::new(
         ProductConversationBindingService::new(conversations, installations),
     );

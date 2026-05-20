@@ -1,11 +1,13 @@
 //! Reborn Telegram v2 webhook host.
 //!
 //! Today this layer terminates inbound at the durable ledger / binding write
-//! and acks 200 to Telegram. The reply path is intentionally stubbed: there
-//! is no Reborn agent loop in `src/` yet (PRs #3544 / #3550 / #3586 open).
-//! The tracer's purpose is to lock down the inbound contract — webhook auth,
-//! parse, idempotency, binding persistence, ledger settlement — so swapping
-//! in the real loop once it ships is a one-line change in `boot.rs`.
+//! and acks 200 to Telegram. The reply path is intentionally stubbed even
+//! though the Reborn agent loop (PRs #3544 / #3550 / #3586) has now merged —
+//! this PR is the inbound tracer, scoped to locking down the inbound
+//! contract (webhook auth, parse, idempotency, binding persistence, ledger
+//! settlement). Reply-path migration to `DefaultInboundTurnService` is a
+//! follow-up so the inbound contract can soak in production before the
+//! outbound path is wired up. The swap stays a one-line change in `boot.rs`.
 //!
 //! ## Wiring
 //!
@@ -23,8 +25,8 @@ pub mod boot;
 pub mod composition;
 pub mod config;
 pub mod error;
+pub mod host_egress;
 pub mod inbound_turn;
-pub mod migrations;
 pub mod router;
 
 #[cfg(feature = "libsql")]
@@ -91,6 +93,11 @@ pub async fn serve(config: HostConfig) -> Result<(), HostError> {
 }
 
 async fn connect_backend(storage: &StorageBackend) -> Result<BackendHandles, HostError> {
+    // Backend handles are opened here but their schema is owned by the
+    // universal-FS dispatch fabric. `composition::build_*_layer` calls
+    // `filesystem.run_migrations()` after wrapping the handle in the
+    // matching `RootFilesystem` implementation — there is no separate
+    // per-table SQL schema for product workflow persistence any more.
     match storage {
         #[cfg(feature = "libsql")]
         StorageBackend::LibSql { path } => {
@@ -100,19 +107,74 @@ async fn connect_backend(storage: &StorageBackend) -> Result<BackendHandles, Hos
                 libsql::Builder::new_local(path).build().await
             }
             .map_err(|e| HostError::Storage(format!("libsql open: {e}")))?;
-            migrations::run_libsql_migrations(&db).await?;
             Ok(BackendHandles::LibSql(Arc::new(db)))
         }
         #[cfg(feature = "postgres")]
         StorageBackend::Postgres { url } => {
-            use deadpool_postgres::{Config as PoolConfig, Runtime};
-            let mut cfg = PoolConfig::new();
-            cfg.url = Some(url.clone());
-            let pool = cfg
-                .create_pool(Some(Runtime::Tokio1), tokio_postgres::NoTls)
-                .map_err(|e| HostError::Storage(format!("postgres pool build: {e}")))?;
-            migrations::run_postgres_migrations(&pool).await?;
+            let pool = build_postgres_pool(url)?;
             Ok(BackendHandles::Postgres(pool))
         }
     }
+}
+
+#[cfg(feature = "postgres")]
+fn build_postgres_pool(url: &str) -> Result<deadpool_postgres::Pool, HostError> {
+    use deadpool_postgres::{Config as PoolConfig, Runtime};
+    use tokio_postgres::config::SslMode;
+
+    // Parse the URL once so we can branch on the requested `sslmode`. Managed
+    // Postgres providers commonly require TLS via `sslmode=require`; passing
+    // `NoTls` to those deployments fails the migration / pool connect even
+    // though the rest of the crate is otherwise fully configured. Plain
+    // `postgres://` URLs with no `sslmode` default to `Prefer`, which we
+    // treat as TLS so the typical managed-Postgres URL works out of the box.
+    let parsed: tokio_postgres::Config = url
+        .parse()
+        .map_err(|e| HostError::Storage(format!("postgres url parse: {e}")))?;
+    let mut cfg = PoolConfig::new();
+    cfg.url = Some(url.to_string());
+
+    match parsed.get_ssl_mode() {
+        SslMode::Disable => cfg
+            .create_pool(Some(Runtime::Tokio1), tokio_postgres::NoTls)
+            .map_err(|e| HostError::Storage(format!("postgres pool build: {e}"))),
+        _ => {
+            let tls = make_rustls_connector()?;
+            cfg.create_pool(Some(Runtime::Tokio1), tls)
+                .map_err(|e| HostError::Storage(format!("postgres pool build: {e}")))
+        }
+    }
+}
+
+/// Build a rustls-based TLS connector for Postgres.
+///
+/// Tries the system root store first (matching what `psql` /
+/// `tokio-postgres` users normally expect). If empty — common in slim
+/// container images — falls back to the Mozilla roots bundled via
+/// `webpki-roots`. Mirrors the existing pattern in `src/db/tls.rs` and
+/// `crates/ironclaw_reborn_event_store/src/lib.rs`.
+#[cfg(feature = "postgres")]
+fn make_rustls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect, HostError> {
+    let mut root_store = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    for e in &native.errors {
+        tracing::warn!("error loading system root certs: {e}");
+    }
+    for cert in native.certs {
+        if let Err(e) = root_store.add(cert) {
+            tracing::warn!("skipping invalid system root cert: {e}");
+        }
+    }
+    if root_store.is_empty() {
+        tracing::info!("no system root certs found, using bundled Mozilla roots");
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+    let config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .map_err(|e| HostError::Storage(format!("rustls protocol versions: {e}")))?
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+    Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
 }

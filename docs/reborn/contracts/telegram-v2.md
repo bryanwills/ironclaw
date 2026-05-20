@@ -23,12 +23,14 @@ The first slice is intentionally narrow:
   component-model build of the same logic lives in a follow-up landing
   (PR #3583) alongside the host runtime's full WIT bindings.
 - Reply path is **stubbed** in this binary: inbound terminates at the
-  durable ledger / binding write, then acks 200. No outbound `sendMessage`
-  is dispatched because there is no Reborn agent loop in `src/` yet
-  (PRs #3544 / #3550 / #3586 still open). When the loop ships, the host's
-  `StubInboundTurnService` is replaced with `DefaultInboundTurnService` +
-  `TurnCoordinator` and the existing render path activates — no other
-  piece of the contract changes.
+  durable ledger / binding write, then acks 200. The Reborn agent loop
+  (PRs #3544 / #3550 / #3586) has now merged, but this slice is the
+  inbound tracer — the outbound reply path is a deliberate follow-up so
+  the inbound contract can soak in production before `sendMessage` is
+  wired. When the migration lands, the host's `StubInboundTurnService`
+  is replaced with `DefaultInboundTurnService` + `TurnCoordinator` and
+  the existing render path activates — no other piece of the contract
+  changes.
 - Production traffic enters a separate process — `cargo build --bin
   ironclaw-reborn` then `ironclaw-reborn run` — not the v1 agent binary.
 
@@ -43,11 +45,14 @@ constructs a `ProtocolAuthEvidence::Verified` via
 whose evidence is not `Verified`.
 
 The bot token used for outbound egress lives in `HostConfig` as a
-`secrecy::SecretString`; the host exposes the underlying value only at
-the boundary into `StaticCredentialResolver` and at the `getMe` startup
-call. The startup `getMe` path scrubs URLs from reqwest errors with
-`.without_url()` before tracing them so a DNS/TLS failure can't leak the
-token into logs.
+`secrecy::SecretString`. At boot the host `put`s the value into an
+`InMemorySecretStore` keyed by a `SecretHandle` (matching the
+`EgressCredentialHandle` an adapter declares); each outbound request
+leases the material one-shot via `SecretStoreCredentialResolver`
+(`SecretStore::lease_once` + `consume`), so the raw bytes never live in
+a long-lived `String`. The startup `getMe` path scrubs URLs from
+reqwest errors with `.without_url()` before tracing them so a DNS/TLS
+failure can't leak the token into logs.
 
 ## Reference normalization
 
@@ -108,15 +113,38 @@ Reply targets encode as `tg:<chat_id>:<topic_or_underscore>:<msg_or_underscore>`
 
 Egress targets only the declared `api.telegram.org` host. The bot token
 travels as an opaque `EgressCredentialHandle` (`telegram_bot_token`); the
-host resolves it at request time and never exposes the underlying secret
-to the adapter.
+host resolves it at request time via
+`SecretStoreCredentialResolver` (one-shot lease through
+`ironclaw_secrets::SecretStore`), never exposing the underlying secret to
+the adapter and never holding the raw bytes in a long-lived `String`.
+
+**Egress goes through `RuntimeHttpEgress`.** Every outbound Telegram
+call flows through the host-api egress contract
+(`ironclaw_host_api::RuntimeHttpEgress`) — network policy, byte
+accounting, response-body limits, and credential redaction are managed
+by one host-owned service (`HostHttpEgressService` over
+`PolicyNetworkHttpEgress<ReqwestNetworkTransport>`) rather than a
+per-adapter shim. Telegram's path-embedded bot token
+(`https://api.telegram.org/bot<TOKEN>/sendMessage`) is expressed as a
+`RuntimeCredentialTarget::UrlPath { placeholder }` injection — a
+variant added during PR #3590's audit pass specifically because
+`Header` and `QueryParam` cannot model a path-embedded credential. The
+adapter-facing shim
+(`HostMediatedTelegramEgress` in
+`crates/ironclaw_reborn_telegram_v2_host/src/host_egress.rs`)
+constructs the URL with a constant placeholder; the host substitutes
+the value one-shot from a `SecretStore` lease inside
+`apply_credential_injection` and adds the substituted token to its
+redaction-token set so it cannot leak via error reasons or response
+bodies.
 
 ## Idempotency
 
 Dedupe key = `(adapter_id, installation_id, source_binding_key,
-external_event_id)`. Both durable backends
-(`LibSqlProductIdempotencyLedger`, `PostgresProductIdempotencyLedger`)
-implement the trait contract:
+external_event_id)`. The durable implementation
+(`FilesystemIdempotencyLedger`) is backend-agnostic — it writes through
+the universal-FS dispatch fabric, so the same code path serves libSQL,
+Postgres, in-memory, or HSM-decorated mounts:
 
 - Second delivery of the same `update_id` after settle → `Replay(prior)`.
 - Second delivery while still in-flight (within the recovery lease) →
@@ -127,9 +155,9 @@ implement the trait contract:
   `begin_or_replay` and surfaces as `New`. A stuck row therefore cannot
   permanently wedge Telegram retries for the affected `update_id`.
 
-`begin_or_replay` uses an INSERT-first pattern on both backends
-(libSQL catches `SqliteFailure(2067)`; Postgres uses `ON CONFLICT DO
-NOTHING RETURNING`) to close the SELECT-then-INSERT TOCTOU window under
+`begin_or_replay` uses `CasExpectation::Absent` on the fresh claim and
+`CasExpectation::Version` on every transition (reclaim, settle, release)
+to close the SELECT-then-INSERT TOCTOU window under
 concurrent webhook delivery.
 
 ## Capabilities

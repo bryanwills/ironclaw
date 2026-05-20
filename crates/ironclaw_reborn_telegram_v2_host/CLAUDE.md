@@ -15,13 +15,15 @@ no runtime entry point that touches it, and no shared in-process state.
 
 Today the serve loop terminates inbound at the durable ledger / binding
 write and acks 200 OK to Telegram. There is no Telegram reply. This is
-intentional: there is no Reborn agent loop in `src/` yet (the loop ships
-across PRs #3544 / #3550 / #3586). The tracer's purpose is to lock down
-the inbound contract — webhook auth, parse, idempotency, binding
-persistence, ledger settlement — so that swapping in the real loop is a
-one-line change in [`boot.rs`].
+intentional even though the Reborn agent loop has now shipped (PRs
+#3544 / #3550 / #3586 merged): this PR is the **inbound tracer**, scoped
+to locking down the inbound contract — webhook auth, parse, idempotency,
+binding persistence, ledger settlement. The reply-path migration is a
+deliberate follow-up so the inbound contract can land + soak in
+production before wiring the outbound path.
 
-When the Reborn loop lands:
+Loop migration follow-up (the loop crates are now available; this is
+intentionally not done here):
 
 - Drop [`inbound_turn::StubInboundTurnService`].
 - Wire `DefaultInboundTurnService` (from `ironclaw_product_workflow`) +
@@ -39,8 +41,15 @@ When the Reborn loop lands:
 | `src/config.rs` | `HostConfig::from_env()` — reads `IRONCLAW_REBORN_LISTEN_ADDR`, `LIBSQL_PATH` / `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `REBORN_TELEGRAM_V2_INSTALLATION_ID` |
 | `src/error.rs` | Local `HostError` enum (not derived from any v1 error type) |
 | `src/inbound_turn.rs` | `StubInboundTurnService` — persists the binding, returns `Submitted`, **no reply produced** |
-| `src/migrations.rs` | Own migration runner for `product_inbound_actions` + `product_bindings` |
+| `src/host_egress.rs` | `HostMediatedTelegramEgress` — `ProtocolHttpEgress` impl delegating to `ironclaw_host_api::RuntimeHttpEgress` (URL-path credential injection via `RuntimeCredentialTarget::UrlPath`) |
 | `src/router.rs` | axum handler for `POST /webhook/telegram-v2/{installation_id}` |
+
+The product-workflow ledger lives on the universal-FS dispatch fabric
+(`FilesystemIdempotencyLedger` over `ScopedFilesystem`); there is no
+separate per-table SQL schema — the FS backend's own
+`run_migrations()` creates everything we need. Conversation binding
+and outbound delivery state were already on the FS fabric before this
+slice.
 
 ## Call path
 
@@ -97,7 +106,7 @@ curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
 Send a message in Telegram. The host logs:
 
 ```text
-Reborn host: inbound resolved + bound; reply path stubbed (no Reborn agent loop yet)
+Reborn host: inbound resolved + bound; reply path stubbed pending outbound migration
 ```
 
 …and Telegram receives a 200 ack. No outbound `sendMessage` is dispatched.
@@ -118,7 +127,8 @@ same opt-out pattern via their own feature flags.
 - WASM runtime dependency: **#3583** (when this lands, swap
   `NativeProductAdapterRunner` for `ProductAdapterComponentRuntime` in
   `boot.rs`)
-- Reborn agent loop: **#3544 / #3550 / #3586** (when this lands, drop
-  `StubInboundTurnService` and wire `DefaultInboundTurnService` +
-  `TurnCoordinator`)
+- Reborn agent loop: **#3544 / #3550 / #3586** (now merged; this crate
+  still uses `StubInboundTurnService` by design — see "Why 'stubbed
+  reply path'" above. Outbound migration to `DefaultInboundTurnService`
+  + `TurnCoordinator` is a follow-up PR.)
 - Ingress boundary design: **#3578**

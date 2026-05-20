@@ -9,8 +9,6 @@ publish = false
 
 [features]
 default = []
-libsql = ["dep:libsql"]
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 # Exposes test-only helpers (`TelegramHttpEgress::with_base_url_for_test`)
 # to downstream test crates. Off by default so production builds cannot
 # accidentally redirect egress to a non-Telegram host. Internal `#[cfg(test)]`
@@ -21,20 +19,19 @@ test-support = []
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-deadpool-postgres = { version = "0.14", optional = true }
+hex = "0.4"
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
-tokio-postgres = { version = "0.7", optional = true, features = ["with-chrono-0_4", "with-uuid-1"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 

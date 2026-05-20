@@ -470,8 +470,6 @@ pub struct ExtensionManager {
     /// instead of opening a browser on the server via `open::that()`.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
     gateway_mode: std::sync::atomic::AtomicBool,
-    /// Reborn Telegram v2 ProductAdapter (issue #3285) feature flag.
-    ///
     /// The gateway's own base URL for building OAuth redirect URIs.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
     gateway_base_url: RwLock<Option<String>>,
