@@ -138,11 +138,16 @@ fn skill_bundle_source_error_to_context_error(
         | SkillBundleSourceError::PermissionDenied => HostSkillContextBuildError::SourceUnavailable,
         SkillBundleSourceError::InvalidBundleId
         | SkillBundleSourceError::InvalidFilePath
-        | SkillBundleSourceError::InvalidSkillBundle => HostSkillContextBuildError::ParseFailed,
-        SkillBundleSourceError::ContentTooLarge => {
+        | SkillBundleSourceError::InvalidSkillBundle
+        | SkillBundleSourceError::BundleUtf8DecodeFailed
+        | SkillBundleSourceError::ManifestParseFailed => HostSkillContextBuildError::ParseFailed,
+        SkillBundleSourceError::ContentTooLarge
+        | SkillBundleSourceError::BundleScanLimitExceeded => {
             HostSkillContextBuildError::ContextBudgetExceeded
         }
-        SkillBundleSourceError::Internal => HostSkillContextBuildError::Internal,
+        SkillBundleSourceError::DuplicateSourceKind | SkillBundleSourceError::Internal => {
+            HostSkillContextBuildError::Internal
+        }
     }
 }
 
@@ -602,6 +607,38 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, HostSkillContextBuildError::SourceUnavailable);
+    }
+
+    #[tokio::test]
+    async fn adapter_maps_bundle_scan_limit_to_budget_error() {
+        let source = Arc::new(
+            StaticSkillBundleSource::new(Vec::new())
+                .with_list_error(SkillBundleSourceError::BundleScanLimitExceeded),
+        );
+        let adapter = SkillBundleContextSource::new(source);
+
+        let error = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, HostSkillContextBuildError::ContextBudgetExceeded);
+    }
+
+    #[tokio::test]
+    async fn adapter_maps_duplicate_source_kind_to_internal_error() {
+        let source = Arc::new(
+            StaticSkillBundleSource::new(Vec::new())
+                .with_list_error(SkillBundleSourceError::DuplicateSourceKind),
+        );
+        let adapter = SkillBundleContextSource::new(source);
+
+        let error = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, HostSkillContextBuildError::Internal);
     }
 
     #[tokio::test]
