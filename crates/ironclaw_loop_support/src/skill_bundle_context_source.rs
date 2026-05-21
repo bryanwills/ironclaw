@@ -68,10 +68,10 @@ where
         validate_descriptor_policy_metadata(&descriptors)?;
 
         let mut candidates = Vec::with_capacity(descriptors.len());
-        for descriptor in &descriptors {
+        for (index, descriptor) in descriptors.iter().enumerate() {
             let trust = descriptor.trust().cloned();
             let visibility = descriptor.visibility().copied();
-            let ordering_key = descriptor_context_ordering_key(descriptor);
+            let ordering_key = descriptor_context_ordering_key(index);
 
             if visibility != Some(SkillVisibility::Visible) {
                 // Preserve host policy metadata on unavailable candidates so downstream
@@ -140,20 +140,8 @@ fn validate_descriptor_policy_metadata(
     Ok(())
 }
 
-fn descriptor_context_ordering_key(descriptor: &SkillBundleDescriptor) -> String {
-    let (source_kind, name, path) = descriptor.ordering_key();
-    length_prefixed_key_components([source_kind.as_str(), name, path])
-}
-
-fn length_prefixed_key_components<const N: usize>(components: [&str; N]) -> String {
-    let mut key = String::new();
-    for component in components {
-        key.push_str(&component.len().to_string());
-        key.push(':');
-        key.push_str(component);
-        key.push('|');
-    }
-    key
+fn descriptor_context_ordering_key(index: usize) -> String {
+    format!("{index:016}")
 }
 
 #[cfg(test)]
@@ -509,15 +497,12 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.ordering_key.as_deref().unwrap())
                 .collect::<Vec<_>>(),
-            vec![
-                length_prefixed_key_components(["system", "alpha", "SKILL.md"]),
-                length_prefixed_key_components(["user", "bravo", "SKILL.md"])
-            ]
+            vec!["0000000000000000", "0000000000000001"]
         );
     }
 
     #[tokio::test]
-    async fn adapter_preserves_descriptor_path_in_ordering_key() {
+    async fn adapter_preserves_descriptor_path_in_candidate_order() {
         let nested_descriptor = descriptor(
             crate::SkillSourceKind::User,
             "alpha",
@@ -557,15 +542,58 @@ mod tests {
             .iter()
             .map(|candidate| candidate.ordering_key.as_deref().unwrap())
             .collect::<Vec<_>>();
+        let skill_md = candidates
+            .iter()
+            .map(|candidate| candidate.skill_md.as_deref().unwrap())
+            .collect::<Vec<_>>();
 
-        assert_eq!(
-            ordering_keys,
-            vec![
-                length_prefixed_key_components(["user", "alpha", "SKILL.md"]),
-                length_prefixed_key_components(["user", "alpha", "nested/SKILL.md"])
-            ]
+        assert_eq!(ordering_keys, vec!["0000000000000000", "0000000000000001"]);
+        assert!(skill_md[0].contains("root description"));
+        assert!(skill_md[1].contains("nested description"));
+    }
+
+    #[tokio::test]
+    async fn adapter_preserves_hidden_and_denied_candidates_as_unavailable() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            descriptor(
+                crate::SkillSourceKind::System,
+                "hidden",
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Hidden),
+            ),
+            descriptor(
+                crate::SkillSourceKind::User,
+                "denied",
+                Some(SkillTrust::Installed),
+                Some(SkillVisibility::Denied),
+            ),
+        ]));
+        let adapter = SkillBundleContextSource::new(Arc::clone(&source));
+
+        let candidates = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.skill_md.is_none())
         );
-        assert_ne!(ordering_keys[0], ordering_keys[1]);
+        assert_eq!(candidates[0].trust, Some(SkillTrust::Trusted));
+        assert_eq!(candidates[0].visibility, Some(SkillVisibility::Hidden));
+        assert_eq!(
+            candidates[0].ordering_key.as_deref(),
+            Some("0000000000000000")
+        );
+        assert_eq!(candidates[1].trust, Some(SkillTrust::Installed));
+        assert_eq!(candidates[1].visibility, Some(SkillVisibility::Denied));
+        assert_eq!(
+            candidates[1].ordering_key.as_deref(),
+            Some("0000000000000001")
+        );
+        assert!(source.reads().is_empty());
     }
 
     #[tokio::test]
@@ -614,6 +642,28 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, HostSkillContextBuildError::Internal);
+    }
+
+    #[tokio::test]
+    async fn adapter_maps_parse_source_errors() {
+        for source_error in [
+            SkillBundleSourceError::InvalidBundleId,
+            SkillBundleSourceError::InvalidFilePath,
+            SkillBundleSourceError::InvalidSkillBundle,
+            SkillBundleSourceError::BundleUtf8DecodeFailed,
+            SkillBundleSourceError::ManifestParseFailed,
+        ] {
+            let source =
+                Arc::new(StaticSkillBundleSource::new(Vec::new()).with_list_error(source_error));
+            let adapter = SkillBundleContextSource::new(source);
+
+            let error = adapter
+                .load_skill_context_candidates(&run_context().await)
+                .await
+                .unwrap_err();
+
+            assert_eq!(error, HostSkillContextBuildError::ParseFailed);
+        }
     }
 
     #[tokio::test]
