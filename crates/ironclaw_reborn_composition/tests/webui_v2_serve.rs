@@ -685,6 +685,107 @@ async fn timeline_route_rejects_nonempty_body_with_413() {
 }
 
 #[tokio::test]
+async fn ws_upgrade_without_origin_is_rejected_with_403() {
+    // WebChat v2 declares stream_events_ws as SameOriginRequired.
+    // A WS upgrade without the `Origin` header must be rejected at
+    // composition time before the v2 router sees the request.
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/ws")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                // Deliberately no Origin header.
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn ws_upgrade_with_disallowed_origin_is_rejected_with_403() {
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/ws")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::HOST, "127.0.0.1:3000")
+                .header(header::ORIGIN, "http://evil.example.com")
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn list_threads_returns_facade_response_with_empty_default() {
+    // GET /api/webchat/v2/threads goes through the new list_threads
+    // route — descriptor is NoBody + read rate limit. The stub
+    // facade returns an empty list which the handler serializes as
+    // `{ "threads": [], "next_cursor": null }`.
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(
+        body.contains("\"threads\":[]"),
+        "list_threads body should carry the empty thread list, got: {body}",
+    );
+}
+
+#[tokio::test]
+async fn setup_extension_returns_not_implemented_status_via_facade() {
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/telegram/setup")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"action": "begin"}).to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(
+        body.contains("\"status\":\"not_implemented\""),
+        "setup_extension must surface the skeleton status, got: {body}",
+    );
+    assert!(
+        body.contains("\"extension_name\":\"telegram\""),
+        "setup_extension must echo the path-bound extension name, got: {body}",
+    );
+}
+
+#[tokio::test]
 async fn rate_limit_is_independent_per_caller() {
     // Two distinct authenticators / users — alice exhausts her budget
     // but bob's requests still get through.

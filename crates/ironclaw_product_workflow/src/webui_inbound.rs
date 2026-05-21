@@ -112,6 +112,12 @@ pub struct WebUiListThreadsRequest {
 /// extension lifecycle lands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiSetupExtensionRequest {
+    /// `extension_name` is also bound from the route path. The handler
+    /// overwrites whatever the body carried with the path-bound value
+    /// so a stray body field cannot redirect the request to another
+    /// extension; the field is `#[serde(default)]` so callers may
+    /// omit it from the body entirely.
+    #[serde(default)]
     pub extension_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,

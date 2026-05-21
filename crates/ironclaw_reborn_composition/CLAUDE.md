@@ -49,22 +49,33 @@ Inbound order (outer → inner → handler):
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
    enforcement.
-6. **Bearer auth + `?token=` shim** (`webui_serve::authenticate_request`)
+6. **WS same-origin enforcement** (`webui_ws_origin::enforce_websocket_origin`)
+   — runs only on descriptors that declare a non-`NotApplicable`
+   `WebSocketOriginPolicy`. The browser does not pre-flight WebSocket
+   upgrades, so origin enforcement happens inline; absence or mismatch
+   yields a `403` before the v2 handler executes the WS upgrade.
+   `SameOriginRequired` (today's `stream_events_ws` descriptor)
+   matches `Origin` against `Host`; `HostConfiguredAllowlist` /
+   `LocalhostAllowed` are additional shapes future descriptors can
+   opt into.
+7. **Bearer auth + `?token=` shim** (`webui_serve::authenticate_request`)
    — `Authorization: Bearer <token>` for every route; `?token=` is
    honored ONLY on `GET /api/webchat/v2/threads/{id}/events` because
    the browser's `EventSource` cannot set headers. Mutations and
    timeline reads stay bearer-only. On success the middleware inserts
    a `WebUiAuthenticatedCaller` extension built from
    `config.tenant_id` plus the authenticator's `UserId`.
-7. **Descriptor-driven per-route rate limit**
+8. **Descriptor-driven per-route rate limit**
    (`webui_rate_limit::enforce_rate_limit`) — reads
    `ironclaw_webui_v2::webui_v2_routes()` at composition time and
    enforces the declared `RateLimitPolicy` per `(route, caller)` with a
    sliding window. Today every v2 descriptor declares
    `RateLimitScope::PerCaller`; composition fails closed if a future
    descriptor declares an unsupported scope.
-8. `webui_v2_router(WebUiV2State::new(bundle.api))` — the six v2
-   handlers from `ironclaw_webui_v2`.
+9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the nine v2
+   handlers from `ironclaw_webui_v2` (create-thread, list-threads,
+   send-message, get-timeline, stream-events SSE, stream-events WS,
+   cancel-run, resolve-gate, setup-extension).
 
 `webui_route_match` is the shared matcher both the body-limit and
 rate-limit middlewares consume so the two enforcers cannot drift on
@@ -81,15 +92,15 @@ rows are inventoried here, not implemented in the current PR.
 |---|---|---|---|
 | Send message | `POST /api/chat/send` | `POST /api/webchat/v2/threads/{thread_id}/messages` | Mapped |
 | Create thread | `POST /api/chat/thread/new` | `POST /api/webchat/v2/threads` | Mapped |
-| List threads | `GET /api/chat/threads` | (No v2 collection route; future ticket) | v1-only |
+| List threads | `GET /api/chat/threads` | `GET /api/webchat/v2/threads` | Mapped |
 | Read history / timeline | `GET /api/chat/history` | `GET /api/webchat/v2/threads/{thread_id}/timeline` | Mapped |
 | SSE stream | `GET /api/chat/events` | `GET /api/webchat/v2/threads/{thread_id}/events` | Mapped (incl. `?token=` shim) |
-| WebSocket stream | `GET /api/chat/ws` | (`RebornServicesApi` exposes SSE only; no v2 WS) | v1-only |
+| WebSocket stream | `GET /api/chat/ws` | `GET /api/webchat/v2/threads/{tid}/ws` | Mapped |
 | Cancel run | (engine v1 surface) | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/cancel` | Mapped |
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | (No v2 onboarding route in `RebornServicesApi`) | v1-only |
+| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped (skeleton — facade returns `NotImplemented` until v2-aware extension lifecycle lands) |
 
 ### Security invariants on every "Mapped" row
 

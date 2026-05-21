@@ -52,6 +52,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::webui::RebornWebuiBundle;
 use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
+use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -250,6 +251,7 @@ pub fn webui_v2_app(
     let descriptors = ironclaw_webui_v2::webui_v2_routes();
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
     let body_limit_state = build_body_limit_state(&descriptors);
+    let ws_origin_state = build_websocket_origin_state(&descriptors, &config.allowed_origins);
 
     // Inner: the v2 route surface, retagged to `Router<()>` so it can
     // merge into the outer stateless router. `webui_v2_router` has
@@ -279,6 +281,15 @@ pub fn webui_v2_app(
         .route_layer(middleware::from_fn_with_state(
             body_limit_state,
             enforce_body_limit,
+        ))
+        // WS upgrades skip CORS pre-flight, so origin enforcement runs
+        // inline for descriptors declaring a non-NotApplicable
+        // WebSocketOriginPolicy. Runs near the outside of the
+        // route_layer stack so origin rejection short-circuits before
+        // anything more expensive.
+        .route_layer(middleware::from_fn_with_state(
+            ws_origin_state,
+            enforce_websocket_origin,
         ))
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route

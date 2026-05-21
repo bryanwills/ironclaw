@@ -37,6 +37,8 @@ mod webui_rate_limit;
 mod webui_route_match;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_serve;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_ws_origin;
 
 use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
 
