@@ -1468,7 +1468,7 @@ mod tests {
             skill_md(
                 "system-helper",
                 "system helper description",
-                "SYSTEM_HELPER_PROMPT_SENTINEL",
+                "SYSTEM_HELPER_PROMPT_SENTINEL\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz123456",
             ),
         )
         .expect("write system skill");
@@ -1547,6 +1547,8 @@ mod tests {
         assert_eq!(skill_messages.len(), 2);
         assert!(combined_skill_context.contains("system helper description"));
         assert!(combined_skill_context.contains("SYSTEM_HELPER_PROMPT_SENTINEL"));
+        assert!(combined_skill_context.contains("[REDACTED]"));
+        assert!(!combined_skill_context.contains("abcdefghijklmnopqrstuvwxyz123456"));
         assert!(combined_skill_context.contains("local helper description"));
         assert!(combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
         assert!(!combined_skill_context.contains("shared helper description"));

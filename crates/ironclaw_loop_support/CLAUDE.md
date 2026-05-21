@@ -23,6 +23,9 @@ Owns reusable host-side adapters for neutral loop ports.
   driver registration.
 - Prompt context builders may produce safe summaries and refs; full prompt
   materialization is still owned by the prompt port contract.
+- Model-visible skill content must pass through `ironclaw_safety` before
+  snapshot construction; blocking leaks or high/critical injection patterns
+  fail closed as `UnsafeModelVisibleContent`.
 
 ## Adding code
 

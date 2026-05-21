@@ -4435,6 +4435,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_memory",
+ "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_threads",
  "ironclaw_turns",
