@@ -9,7 +9,7 @@ use uuid::Uuid;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, Principal, RuntimeKind, TrustClass, UserId, VirtualPath,
+    NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
@@ -479,7 +479,7 @@ fn local_dev_visible_capability_request(
         TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
-                allowed_effects: local_dev_allowed_effects(),
+                allowed_effects: local_dev_provider_allowed_effects(),
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::AdminConfig,
@@ -506,25 +506,61 @@ fn local_dev_builtin_grants(
             capability: CapabilityId::new(capability_id).map_err(host_api_agent_loop_error)?,
             grantee: Principal::Extension(grantee.clone()),
             issued_by: Principal::HostRuntime,
-            constraints: GrantConstraints {
-                allowed_effects: local_dev_allowed_effects(),
-                mounts: mounts.clone(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: None,
-            },
+            constraints: local_dev_grant_constraints(capability_id, &mounts),
         });
     }
     Ok(CapabilitySet { grants })
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 9] {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalDevCapabilityKind {
+    Workspace,
+    AmbientShell,
+}
+
+fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
+    if capability_id == "builtin.shell" {
+        LocalDevCapabilityKind::AmbientShell
+    } else {
+        LocalDevCapabilityKind::Workspace
+    }
+}
+
+fn local_dev_grant_constraints(capability_id: &str, mounts: &MountView) -> GrantConstraints {
+    match local_dev_capability_kind(capability_id) {
+        LocalDevCapabilityKind::AmbientShell => GrantConstraints {
+            allowed_effects: local_dev_shell_allowed_effects(),
+            // The first-party shell handler still uses direct host process
+            // execution. It fails closed when scoped mounts are attached
+            // because it cannot safely translate virtual cwd values like
+            // `/workspace` to host paths yet. Local-dev exposes shell as an
+            // explicitly ambient developer escape hatch until mount-aware
+            // process execution lands.
+            mounts: MountView::default(),
+            network: local_dev_shell_network_policy(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+        LocalDevCapabilityKind::Workspace => GrantConstraints {
+            allowed_effects: local_dev_allowed_effects(),
+            mounts: mounts.clone(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+    }
+}
+
+fn local_dev_builtin_capability_ids() -> [&'static str; 10] {
     [
         "builtin.echo",
         "builtin.time",
         "builtin.json",
+        "builtin.shell",
         "builtin.read_file",
         "builtin.write_file",
         "builtin.list_dir",
@@ -540,6 +576,36 @@ fn local_dev_allowed_effects() -> Vec<EffectKind> {
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
     ]
+}
+
+fn local_dev_shell_allowed_effects() -> Vec<EffectKind> {
+    let mut effects = local_dev_allowed_effects();
+    effects.extend([
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+        EffectKind::Network,
+    ]);
+    effects
+}
+
+fn local_dev_provider_allowed_effects() -> Vec<EffectKind> {
+    local_dev_shell_allowed_effects()
+}
+
+fn local_dev_shell_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }],
+        // Local-dev shell is intentionally broad for developer CLI workflows,
+        // but it still uses the coarse host-local guard so cloud metadata,
+        // link-local, multicast, loopback, and private IP targets remain
+        // blocked by the shared network policy enforcer.
+        deny_private_ip_ranges: true,
+        max_egress_bytes: None,
+    }
 }
 
 fn local_dev_workspace_mounts() -> Result<MountView, AgentLoopHostError> {
@@ -696,11 +762,12 @@ mod tests {
     }
 
     #[test]
-    fn local_dev_builtin_surface_preserves_write_capabilities() {
+    fn local_dev_builtin_surface_grants_shell_as_ambient_escape_hatch() {
         let capability_ids = local_dev_builtin_capability_ids();
 
         assert!(capability_ids.contains(&"builtin.write_file"));
         assert!(capability_ids.contains(&"builtin.apply_patch"));
+        assert!(capability_ids.contains(&"builtin.shell"));
         assert_eq!(
             local_dev_allowed_effects(),
             vec![
@@ -708,6 +775,60 @@ mod tests {
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem
             ]
+        );
+        assert_eq!(
+            local_dev_provider_allowed_effects(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::Network
+            ]
+        );
+
+        let workspace_mounts = local_dev_workspace_mounts().expect("workspace mounts build");
+        let grants = local_dev_builtin_grants(
+            &ExtensionId::new("loop-driver").expect("valid extension id"),
+            workspace_mounts.clone(),
+        )
+        .expect("local-dev grants build");
+        let grant_for = |capability_id: &str| {
+            grants
+                .grants
+                .iter()
+                .find(|grant| grant.capability.as_str() == capability_id)
+                .expect("capability grant exists")
+        };
+
+        let shell_grant = grant_for("builtin.shell");
+        assert_eq!(
+            shell_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::Network
+            ]
+        );
+        assert!(shell_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            shell_grant.constraints.network,
+            local_dev_shell_network_policy()
+        );
+
+        let read_file_grant = grant_for("builtin.read_file");
+        assert_eq!(
+            read_file_grant.constraints.allowed_effects,
+            local_dev_allowed_effects()
+        );
+        assert_eq!(read_file_grant.constraints.mounts, workspace_mounts);
+        assert_eq!(
+            read_file_grant.constraints.network,
+            NetworkPolicy::default()
         );
     }
 

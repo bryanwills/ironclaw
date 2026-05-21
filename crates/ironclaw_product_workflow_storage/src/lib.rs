@@ -26,8 +26,8 @@
 //! - Outbound delivery state (lives in `ironclaw_outbound`).
 //!
 //! Its single responsibility is mapping the workflow ledger port onto the
-//! universal filesystem fabric plus the Telegram HTTP egress shim used by
-//! the runner.
+//! universal filesystem fabric plus the outbound state-store delivery
+//! sink used by the runner.
 
 #![forbid(unsafe_code)]
 

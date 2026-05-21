@@ -21,8 +21,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_product_adapters::{ProductInboundEnvelope, ProductInboundPayload};
 use ironclaw_product_workflow::{
-    ConversationBindingService, InboundTurnOutcome, InboundTurnService, ProductWorkflowError,
-    ResolveBindingRequest,
+    BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
+    ConversationBindingService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
+    ProductWorkflowError, ResolveBindingRequest,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -38,6 +39,68 @@ impl StubInboundTurnService {
 
 #[async_trait]
 impl InboundTurnService for StubInboundTurnService {
+    /// Stub-only replay probe: this host never persists an accepted-message
+    /// projection (no `SessionThreadService` wired), so there is nothing to
+    /// replay. Returning `Ok(None)` keeps the workflow on the fresh-accept
+    /// path on every inbound. The real `DefaultInboundTurnService` consults
+    /// the session-thread store; the outbound migration follow-up swaps this
+    /// stub for the real service.
+    async fn replay_accepted_user_message(
+        &self,
+        _envelope: &ProductInboundEnvelope,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+        Ok(None)
+    }
+
+    /// Apply the before-inbound policy then defer to `accept_user_message`.
+    /// The stub has no async pre-state to consult, so the policy gate is the
+    /// only thing the dispatch path adds on top of `accept_user_message`.
+    async fn accept_user_message_with_before_policy(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+            return Err(ProductWorkflowError::UnsupportedActionKind {
+                kind: format!("{:?}", envelope.payload()),
+            });
+        };
+
+        let policy_outcome = before_inbound_policy
+            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload)?)
+            .await?;
+        let dispatch_envelope;
+        let envelope_for_turn = match policy_outcome {
+            BeforeInboundPolicyOutcome::Allow => envelope,
+            BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
+                dispatch_envelope =
+                    envelope.with_rewritten_user_message(payload).map_err(|_| {
+                        ProductWorkflowError::TurnSubmissionRejected {
+                            reason: "invalid policy-rewritten user message".into(),
+                        }
+                    })?;
+                &dispatch_envelope
+            }
+            BeforeInboundPolicyOutcome::Reject(rejection) => {
+                return Ok(InboundUserMessageDispatch::Rejected(rejection));
+            }
+            // `BeforeInboundPolicyOutcome` is `#[non_exhaustive]`; any new
+            // variant in `ironclaw_product_workflow` should be picked up
+            // explicitly during the outbound migration follow-up rather than
+            // silently routed to allow/reject in this stub.
+            _ => {
+                return Err(ProductWorkflowError::TurnSubmissionRejected {
+                    reason: "unsupported before-inbound policy outcome variant in tracer stub"
+                        .into(),
+                });
+            }
+        };
+
+        self.accept_user_message(envelope_for_turn)
+            .await
+            .map(InboundUserMessageDispatch::Accepted)
+    }
+
     async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
