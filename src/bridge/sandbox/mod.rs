@@ -27,6 +27,7 @@
 //! [`EffectBridgeAdapter`]: super::EffectBridgeAdapter
 //! [`WorkspaceMounts`]: ironclaw_engine::WorkspaceMounts
 
+mod command_transport;
 mod containerized_backend;
 mod containerized_factory;
 mod docker_transport;

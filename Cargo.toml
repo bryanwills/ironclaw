@@ -118,6 +118,7 @@ jsonschema = { version = "0.45", default-features = false }
 # Shared types
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.1" }
 ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
+ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_loop_support = { path = "crates/ironclaw_loop_support", version = "0.1.0" }
 ironclaw_memory = { path = "crates/ironclaw_memory", version = "0.1.0" }
 ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
@@ -247,7 +248,6 @@ ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["t
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
-ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
 ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0" }
 ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }

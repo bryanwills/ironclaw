@@ -180,8 +180,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     if let Some(runtime_policy) = input.runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
-    // TODO(process-port): local-dev intentionally uses the default
-    // LocalHostProcessPort until a non-local process backend is composed.
+    if let Some(process_port) = input.tenant_sandbox_process_port {
+        services = services.with_tenant_sandbox_process_port_dyn(process_port);
+    }
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
@@ -308,6 +309,7 @@ async fn build_production_shaped(
         production_trust_policy,
         runtime_policy,
         turn_run_wake_notifier,
+        tenant_sandbox_process_port,
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
@@ -323,6 +325,7 @@ async fn build_production_shaped(
         production_trust_policy,
         runtime_policy,
         turn_run_wake_notifier,
+        tenant_sandbox_process_port,
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
@@ -348,10 +351,8 @@ async fn build_production_shaped(
                 production_trust_policy,
                 runtime_policy,
                 turn_run_wake_notifier,
+                tenant_sandbox_process_port,
             )?;
-            // TODO(process-port): if production enables FirstParty runtime,
-            // HostRuntimeServices must be given a production process port;
-            // otherwise the LocalHostProcessPort default is rejected.
             build_libsql_production(
                 profile,
                 wiring_config,
@@ -373,10 +374,8 @@ async fn build_production_shaped(
                 production_trust_policy,
                 runtime_policy,
                 turn_run_wake_notifier,
+                tenant_sandbox_process_port,
             )?;
-            // TODO(process-port): if production enables FirstParty runtime,
-            // HostRuntimeServices must be given a production process port;
-            // otherwise the LocalHostProcessPort default is rejected.
             build_postgres_production(
                 profile,
                 wiring_config,
@@ -395,6 +394,7 @@ struct RebornProductionWiring {
     trust_policy: Arc<HostTrustPolicy>,
     runtime_policy: EffectiveRuntimePolicy,
     turn_run_wake_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
+    tenant_sandbox_process_port: Option<Arc<dyn ironclaw_host_runtime::RuntimeProcessPort>>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -402,6 +402,7 @@ fn production_wiring(
     trust_policy: Option<Arc<HostTrustPolicy>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
     turn_run_wake_notifier: Option<Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>>,
+    tenant_sandbox_process_port: Option<Arc<dyn ironclaw_host_runtime::RuntimeProcessPort>>,
 ) -> Result<RebornProductionWiring, RebornBuildError> {
     let trust_policy = trust_policy.ok_or(RebornBuildError::MissingProductionTrustPolicy)?;
     if !trust_policy.has_sources() {
@@ -414,6 +415,7 @@ fn production_wiring(
         trust_policy,
         runtime_policy,
         turn_run_wake_notifier,
+        tenant_sandbox_process_port,
     })
 }
 
@@ -463,7 +465,7 @@ async fn build_libsql_production(
         auth_token,
     };
 
-    let services = HostRuntimeServices::new(
+    let mut services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
@@ -486,6 +488,9 @@ async fn build_libsql_production(
     .with_filesystem_turn_state_store(scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    if let Some(process_port) = production_wiring.tenant_sandbox_process_port {
+        services = services.with_tenant_sandbox_process_port_dyn(process_port);
+    }
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
@@ -531,7 +536,7 @@ async fn build_postgres_production(
 
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url };
 
-    let services = HostRuntimeServices::new(
+    let mut services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
@@ -554,6 +559,9 @@ async fn build_postgres_production(
     .with_filesystem_turn_state_store(scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    if let Some(process_port) = production_wiring.tenant_sandbox_process_port {
+        services = services.with_tenant_sandbox_process_port_dyn(process_port);
+    }
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
@@ -592,6 +600,21 @@ fn readiness_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use ironclaw_host_api::{
+        ApprovalPolicy, AuditMode, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
+        DeploymentMode, ExecutionContext, ExtensionId, FilesystemBackendKind, GrantConstraints,
+        NetworkMode, NetworkPolicy, NetworkTargetPattern, Principal, ProcessBackendKind,
+        ResourceEstimate, RuntimeKind, RuntimeProfile, SecretMode, TrustClass, UserId,
+    };
+    use ironclaw_host_runtime::{
+        CommandExecutionOutput, CommandExecutionRequest, RuntimeCapabilityOutcome,
+        RuntimeCapabilityRequest, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    };
+    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    use serde_json::json;
+    use std::sync::Mutex;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn local_dev_services_include_repl_runtime_substrate() {
@@ -617,5 +640,140 @@ mod tests {
         assert!(services.turn_coordinator.is_none());
         assert!(services.local_runtime.is_none());
         assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
+    }
+
+    #[tokio::test]
+    async fn local_dev_composes_injected_tenant_sandbox_process_port() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let process_port = Arc::new(RecordingProcessPort::default());
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev("sandbox-port-owner", dir.path().join("local-dev"))
+                .with_runtime_policy(tenant_sandbox_process_policy())
+                .with_tenant_sandbox_process_port(process_port.clone()),
+        )
+        .await
+        .expect("local-dev services build");
+        let host_runtime = services.host_runtime.expect("host runtime");
+
+        let outcome = host_runtime
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                shell_execution_context(),
+                CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
+                ResourceEstimate::default(),
+                json!({"command": "echo composed sandbox", "timeout": 9}),
+                trust_decision(),
+            ))
+            .await
+            .expect("capability invoke");
+
+        let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
+            panic!("expected completed shell invocation, got {outcome:?}");
+        };
+        assert_eq!(completed.output["sandboxed"], json!(true));
+        assert_eq!(
+            completed.output["output"],
+            json!("sandbox port: echo composed sandbox")
+        );
+        let requests = process_port.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].command, "echo composed sandbox");
+        assert_eq!(requests[0].timeout_secs, Some(9));
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingProcessPort {
+        requests: Mutex<Vec<CommandExecutionRequest>>,
+    }
+
+    #[async_trait]
+    impl RuntimeProcessPort for RecordingProcessPort {
+        async fn run_command(
+            &self,
+            request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            let command = request.command.clone();
+            self.requests.lock().unwrap().push(request);
+            Ok(CommandExecutionOutput {
+                output: format!("sandbox port: {command}"),
+                exit_code: 0,
+                sandboxed: true,
+                duration: Duration::from_millis(5),
+            })
+        }
+    }
+
+    fn tenant_sandbox_process_policy() -> ironclaw_host_api::EffectiveRuntimePolicy {
+        ironclaw_host_api::EffectiveRuntimePolicy {
+            deployment: DeploymentMode::LocalSingleUser,
+            requested_profile: RuntimeProfile::LocalDev,
+            resolved_profile: RuntimeProfile::LocalDev,
+            filesystem_backend: FilesystemBackendKind::HostWorkspace,
+            process_backend: ProcessBackendKind::TenantSandbox,
+            network_mode: NetworkMode::DirectLogged,
+            secret_mode: SecretMode::ScrubbedEnv,
+            approval_policy: ApprovalPolicy::AskDestructive,
+            audit_mode: AuditMode::LocalMinimal,
+        }
+    }
+
+    fn shell_execution_context() -> ExecutionContext {
+        let network = NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: None,
+                host_pattern: "*".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: false,
+            max_egress_bytes: None,
+        };
+        let grant = CapabilityGrant {
+            id: CapabilityGrantId::new(),
+            capability: CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
+            grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
+            issued_by: Principal::HostRuntime,
+            constraints: GrantConstraints {
+                allowed_effects: builtin_effects(),
+                mounts: MountView::default(),
+                network,
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+        };
+        ExecutionContext::local_default(
+            UserId::new("user").unwrap(),
+            ExtensionId::new("caller").unwrap(),
+            RuntimeKind::FirstParty,
+            TrustClass::FirstParty,
+            CapabilitySet {
+                grants: vec![grant],
+            },
+            MountView::default(),
+        )
+        .unwrap()
+    }
+
+    fn builtin_effects() -> Vec<EffectKind> {
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+            EffectKind::SpawnProcess,
+            EffectKind::ExecuteCode,
+        ]
+    }
+
+    fn trust_decision() -> TrustDecision {
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: builtin_effects(),
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::Default,
+            evaluated_at: chrono::Utc::now(),
+        }
     }
 }

@@ -15,9 +15,13 @@ use std::sync::Arc;
 
 use bollard::Docker;
 use ironclaw_engine::{MountError, ProjectId};
+use ironclaw_host_runtime::{
+    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
+};
 use tokio::sync::Mutex;
 use tracing::debug;
 
+use super::command_transport::DockerSandboxCommandTransport;
 use super::docker_transport::DockerTransport;
 use super::lifecycle;
 use super::transport::SandboxTransport;
@@ -76,6 +80,40 @@ impl ProjectSandboxManager {
         let transport = Arc::new(DockerTransport::new(self.docker.clone(), container_id));
         guard.insert(project_id, transport.clone());
         Ok(transport as Arc<dyn SandboxTransport>)
+    }
+
+    /// Get-or-create a Reborn sandbox process-command transport for `project_id`.
+    ///
+    /// This shares the same underlying Docker daemon channel as the
+    /// containerized filesystem backend, but exposes the host-runtime
+    /// `SandboxCommandTransport` seam instead of the engine mount backend.
+    #[allow(dead_code)]
+    pub async fn command_transport_for(
+        &self,
+        project_id: ProjectId,
+        host_workspace_path: PathBuf,
+    ) -> Result<Arc<dyn SandboxCommandTransport>, MountError> {
+        let transport = self.transport_for(project_id, host_workspace_path).await?;
+        Ok(Arc::new(DockerSandboxCommandTransport::new(transport))
+            as Arc<dyn SandboxCommandTransport>)
+    }
+
+    /// Get-or-create the Reborn tenant-sandbox process port for `project_id`.
+    ///
+    /// Composition roots can pass the returned port to
+    /// `HostRuntimeServices::with_tenant_sandbox_process_port` so planned
+    /// `ProcessBackendKind::TenantSandbox` execution lands in the Docker
+    /// sandbox daemon instead of local host processes.
+    #[allow(dead_code)]
+    pub async fn process_port_for(
+        &self,
+        project_id: ProjectId,
+        host_workspace_path: PathBuf,
+    ) -> Result<Arc<dyn RuntimeProcessPort>, MountError> {
+        let transport = self
+            .command_transport_for(project_id, host_workspace_path)
+            .await?;
+        Ok(Arc::new(TenantSandboxProcessPort::new(transport)) as Arc<dyn RuntimeProcessPort>)
     }
 
     /// Stop and forget the cached transport for `project_id`. The container

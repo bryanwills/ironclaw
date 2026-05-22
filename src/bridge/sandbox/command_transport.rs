@@ -1,0 +1,307 @@
+//! Command transport adapter for Reborn tenant-sandbox process execution.
+//!
+//! This is the V1 sandbox-daemon bridge behind Reborn's placement-neutral
+//! `SandboxCommandTransport` trait. First-party tools still talk only to
+//! `InvocationServices.process`; this adapter maps that abstract process effect
+//! to the existing Docker/NDJSON `execute_tool("shell", ...)` protocol.
+
+use std::path::{Component, Path};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use ironclaw_host_runtime::{
+    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+};
+use serde_json::Value;
+use uuid::Uuid;
+
+use super::protocol::{Request, Response, RpcError};
+use super::transport::SandboxTransport;
+
+const CONTAINER_PROJECT_ROOT: &str = "/project";
+
+/// Reborn process-command transport backed by the V1 sandbox daemon.
+#[derive(Debug, Clone)]
+pub(crate) struct DockerSandboxCommandTransport {
+    transport: Arc<dyn SandboxTransport>,
+}
+
+impl DockerSandboxCommandTransport {
+    pub(crate) fn new(transport: Arc<dyn SandboxTransport>) -> Self {
+        Self { transport }
+    }
+
+    async fn run_tool(&self, input: Value) -> Result<Value, RuntimeProcessError> {
+        let request = Request::execute_tool(Uuid::new_v4().to_string(), "shell", input);
+        let response = self.transport.dispatch(request).await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!("sandbox transport failed: {error}"))
+        })?;
+        unwrap_shell_response(response)
+    }
+}
+
+#[async_trait]
+impl SandboxCommandTransport for DockerSandboxCommandTransport {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        if !request.extra_env.is_empty() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox shell environment overrides are not supported yet".to_string(),
+            ));
+        }
+        if request
+            .mounts
+            .as_ref()
+            .is_some_and(|mounts| !mounts.mounts.is_empty())
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox shell scoped mounts are not supported yet".to_string(),
+            ));
+        }
+
+        let workdir = container_workdir(request.workdir.as_deref())?;
+        let timeout_secs = request.timeout_secs;
+        let start = Instant::now();
+        let output = self
+            .run_tool(serde_json::json!({
+                "command": request.command,
+                "workdir": workdir,
+                "timeout": timeout_secs,
+            }))
+            .await
+            .map_err(|error| map_shell_timeout(error, timeout_secs))?;
+        let (merged_output, exit_code) = parse_shell_output(output)?;
+        Ok(CommandExecutionOutput {
+            output: merged_output,
+            exit_code,
+            sandboxed: true,
+            duration: start.elapsed(),
+        })
+    }
+}
+
+fn unwrap_shell_response(response: Response) -> Result<Value, RuntimeProcessError> {
+    if let Some(error) = response.error {
+        return Err(map_rpc_error(error));
+    }
+    let result = response.result.ok_or_else(|| {
+        RuntimeProcessError::ExecutionFailed(
+            "sandbox daemon returned neither result nor error for shell".to_string(),
+        )
+    })?;
+    result.get("output").cloned().ok_or_else(|| {
+        RuntimeProcessError::ExecutionFailed(
+            "sandbox daemon shell result missing output".to_string(),
+        )
+    })
+}
+
+fn map_rpc_error(error: RpcError) -> RuntimeProcessError {
+    RuntimeProcessError::ExecutionFailed(format!(
+        "sandbox shell failed: {} ({})",
+        error.message, error.code
+    ))
+}
+
+fn map_shell_timeout(error: RuntimeProcessError, timeout_secs: Option<u64>) -> RuntimeProcessError {
+    match &error {
+        RuntimeProcessError::ExecutionFailed(message)
+            if message.to_ascii_lowercase().contains("timed out") =>
+        {
+            RuntimeProcessError::Timeout(Duration::from_secs(timeout_secs.unwrap_or(120)))
+        }
+        _ => error,
+    }
+}
+
+fn parse_shell_output(output: Value) -> Result<(String, i64), RuntimeProcessError> {
+    let stdout = output
+        .get("stdout")
+        .and_then(Value::as_str)
+        .or_else(|| output.get("output").and_then(Value::as_str))
+        .unwrap_or("");
+    let stderr = output.get("stderr").and_then(Value::as_str).unwrap_or("");
+    let exit_code = output
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox daemon shell output missing exit_code".to_string(),
+            )
+        })?;
+
+    let merged = if stdout.is_empty() {
+        stderr.to_string()
+    } else if stderr.is_empty() {
+        stdout.to_string()
+    } else {
+        format!("{stdout}\n{stderr}")
+    };
+    Ok((merged, exit_code))
+}
+
+fn container_workdir(workdir: Option<&str>) -> Result<String, RuntimeProcessError> {
+    let Some(workdir) = workdir.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(CONTAINER_PROJECT_ROOT.to_string());
+    };
+    if workdir == CONTAINER_PROJECT_ROOT {
+        return Ok(CONTAINER_PROJECT_ROOT.to_string());
+    }
+    let relative = if let Some(relative) = workdir.strip_prefix("/project/") {
+        relative
+    } else if workdir.starts_with('/') {
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox shell workdir must be under {CONTAINER_PROJECT_ROOT}: {workdir}"
+        )));
+    } else {
+        workdir
+    };
+    validate_relative_workdir(relative)?;
+    Ok(format!(
+        "{CONTAINER_PROJECT_ROOT}/{}",
+        relative.trim_start_matches('/')
+    ))
+}
+
+fn validate_relative_workdir(path: &str) -> Result<(), RuntimeProcessError> {
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox shell workdir contains unsupported path component: {path}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_engine::MountError;
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct ScriptedTransport {
+        captured: Mutex<Vec<Request>>,
+        responses: Mutex<Vec<Result<Response, MountError>>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(responses: Vec<Result<Response, MountError>>) -> Arc<Self> {
+            Arc::new(Self {
+                captured: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl SandboxTransport for ScriptedTransport {
+        async fn dispatch(&self, request: Request) -> Result<Response, MountError> {
+            self.captured.lock().unwrap().push(request);
+            self.responses.lock().unwrap().remove(0)
+        }
+    }
+
+    fn ok_response(output: Value) -> Response {
+        Response {
+            id: Some("x".to_string()),
+            result: Some(serde_json::json!({"output": output})),
+            error: None,
+        }
+    }
+
+    fn request(command: &str) -> CommandExecutionRequest {
+        CommandExecutionRequest {
+            scope: ironclaw_host_api::ResourceScope::system(),
+            mounts: None,
+            command: command.to_string(),
+            workdir: None,
+            timeout_secs: Some(7),
+            extra_env: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatches_shell_execute_tool_request() {
+        let transport = ScriptedTransport::new(vec![Ok(ok_response(serde_json::json!({
+            "stdout": "hi\n",
+            "stderr": "",
+            "exit_code": 0,
+        })))]);
+        let adapter = DockerSandboxCommandTransport::new(transport.clone());
+
+        let output = adapter.run_command(request("printf hi")).await.unwrap();
+        assert_eq!(output.output, "hi\n");
+        assert_eq!(output.exit_code, 0);
+        assert!(output.sandboxed);
+
+        let captured = transport.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].method, "execute_tool");
+        assert_eq!(captured[0].params["name"], "shell");
+        assert_eq!(captured[0].params["input"]["command"], "printf hi");
+        assert_eq!(captured[0].params["input"]["workdir"], "/project");
+        assert_eq!(captured[0].params["input"]["timeout"], 7);
+    }
+
+    #[tokio::test]
+    async fn accepts_merged_daemon_output_field() {
+        let transport = ScriptedTransport::new(vec![Ok(ok_response(serde_json::json!({
+            "output": "compiler says no",
+            "success": false,
+            "exit_code": 2,
+        })))]);
+        let adapter = DockerSandboxCommandTransport::new(transport);
+
+        let output = adapter.run_command(request("cargo test")).await.unwrap();
+        assert_eq!(output.output, "compiler says no");
+        assert_eq!(output.exit_code, 2);
+    }
+
+    #[test]
+    fn workdir_must_stay_inside_project_root() {
+        assert_eq!(container_workdir(None).unwrap(), "/project");
+        assert_eq!(
+            container_workdir(Some("sub/dir")).unwrap(),
+            "/project/sub/dir"
+        );
+        assert_eq!(
+            container_workdir(Some("/project/sub")).unwrap(),
+            "/project/sub"
+        );
+        assert!(container_workdir(Some("/tmp")).is_err());
+        assert!(container_workdir(Some("../escape")).is_err());
+        assert!(container_workdir(Some("/project/../escape")).is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_env_until_daemon_contract_supports_it() {
+        let transport = ScriptedTransport::new(vec![]);
+        let adapter = DockerSandboxCommandTransport::new(transport);
+        let mut command = request("env");
+        command.extra_env.insert("A".to_string(), "B".to_string());
+
+        let error = adapter.run_command(command).await.unwrap_err();
+        assert!(format!("{error}").contains("environment overrides"));
+    }
+
+    #[tokio::test]
+    async fn maps_daemon_timeout_to_process_timeout() {
+        let transport = ScriptedTransport::new(vec![Ok(Response {
+            id: Some("x".to_string()),
+            result: None,
+            error: Some(RpcError::new("tool_error", "timed out after 7s")),
+        })]);
+        let adapter = DockerSandboxCommandTransport::new(transport);
+
+        let error = adapter.run_command(request("sleep 100")).await.unwrap_err();
+        assert_eq!(error, RuntimeProcessError::Timeout(Duration::from_secs(7)));
+    }
+}

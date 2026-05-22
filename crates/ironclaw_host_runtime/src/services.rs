@@ -1046,6 +1046,18 @@ where
         self
     }
 
+    pub fn with_tenant_sandbox_process_port_dyn(
+        mut self,
+        process_port: Arc<dyn RuntimeProcessPort>,
+    ) -> Self {
+        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
+            "dyn RuntimeProcessPort",
+            ProductionImplementationReadiness::UnverifiedProductionImplementation,
+        ));
+        self.tenant_sandbox_process_port = Some(process_port);
+        self
+    }
+
     /// Attaches the host HTTP egress shape required for production runtime
     /// adapters. The service must use staged network-policy handoffs and secret
     /// injection handoffs, not request-local/test policy fallback.
