@@ -57,6 +57,8 @@ pub enum NativeExtensionError {
     Secret(#[from] ironclaw_secrets::SecretStoreError),
     #[error(transparent)]
     Network(#[from] ironclaw_network::NetworkHttpError),
+    #[error(transparent)]
+    Extension(#[from] ironclaw_extensions::ExtensionError),
 }
 
 pub fn register_all(

@@ -33,6 +33,39 @@ pub struct FirstPartyCapabilityRequest {
     pub input: Value,
 }
 
+impl FirstPartyCapabilityRequest {
+    /// Construct a request for first-party handler tests in downstream crates.
+    ///
+    /// `FirstPartyCapabilityRequest` and `InvocationServices` are both
+    /// `#[non_exhaustive]`, so external test crates cannot struct-literal
+    /// either. This constructor provides a stable seam for integration-testing
+    /// host-owned handlers: it takes the fields a handler-under-test typically
+    /// needs (`capability_id`, `scope`, `input`, and an optional
+    /// `runtime_http_egress`) and builds inert `InvocationServices` (an
+    /// in-memory filesystem and the local process port) internally. It is
+    /// `#[doc(hidden)]` because it is a test seam, not production surface.
+    #[doc(hidden)]
+    pub fn for_test(
+        capability_id: CapabilityId,
+        scope: ResourceScope,
+        input: Value,
+        runtime_http_egress: Option<Arc<dyn ironclaw_host_api::RuntimeHttpEgress>>,
+    ) -> Self {
+        Self {
+            capability_id,
+            scope,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            services: InvocationServices {
+                filesystem: Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+                runtime_http_egress,
+                process: Arc::new(crate::LocalHostProcessPort),
+            },
+            input,
+        }
+    }
+}
+
 impl fmt::Debug for FirstPartyCapabilityRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

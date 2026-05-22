@@ -1,3 +1,4 @@
+pub mod calendar;
 pub mod client;
 pub mod credential;
 pub mod network;
@@ -22,12 +23,17 @@ pub fn register(
     secrets: Arc<dyn SecretStore>,
     output: &mut RegistrationOutput,
 ) -> Result<(), NativeExtensionError> {
-    let _credential_resolver = credential::GoogleCredentialResolver::new(secrets);
+    let resolver = Arc::new(credential::GoogleCredentialResolver::new(secrets));
     if let Some(provider) = oauth_provider::GoogleProvider::from_config(env)? {
-        output.oauth_providers.push(provider);
         output
             .network_policies
             .push(network::google_api_network_policy());
+        // Calendar handlers issue HTTP through the per-invocation host
+        // `runtime_http_egress` (HostHttpEgressService), not a transport built
+        // here, so no standalone HTTP client is constructed at registration.
+        let oauth_provider: Arc<dyn ironclaw_oauth::OAuthProvider> = provider.clone();
+        calendar::register_calendar(resolver, oauth_provider, output)?;
+        output.oauth_providers.push(provider);
     }
     Ok(())
 }
