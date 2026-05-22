@@ -91,6 +91,7 @@ pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use process_port::{
     CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
+    TenantSandboxProcessScope,
 };
 pub use production::DefaultHostRuntime;
 pub use services::{

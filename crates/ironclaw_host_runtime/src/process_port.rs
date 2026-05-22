@@ -9,7 +9,7 @@
 use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{MountView, ResourceScope};
+use ironclaw_host_api::{MountView, ProjectId, ResourceScope, TenantId};
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
 use thiserror::Error;
@@ -113,10 +113,31 @@ pub trait SandboxCommandTransport: Send + Sync {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
 }
 
+/// Tenant/project binding for a tenant-isolated process port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantSandboxProcessScope {
+    tenant_id: TenantId,
+    project_id: ProjectId,
+}
+
+impl TenantSandboxProcessScope {
+    pub fn new(tenant_id: TenantId, project_id: ProjectId) -> Self {
+        Self {
+            tenant_id,
+            project_id,
+        }
+    }
+
+    fn matches(&self, scope: &ResourceScope) -> bool {
+        scope.tenant_id == self.tenant_id && scope.project_id.as_ref() == Some(&self.project_id)
+    }
+}
+
 /// Tenant-isolated process port backed by a sandbox command transport.
 #[derive(Clone)]
 pub struct TenantSandboxProcessPort {
     transport: std::sync::Arc<dyn SandboxCommandTransport>,
+    expected_scope: Option<TenantSandboxProcessScope>,
 }
 
 impl std::fmt::Debug for TenantSandboxProcessPort {
@@ -124,13 +145,31 @@ impl std::fmt::Debug for TenantSandboxProcessPort {
         formatter
             .debug_struct("TenantSandboxProcessPort")
             .field("transport", &"<sandbox command transport>")
+            .field("expected_scope", &self.expected_scope)
             .finish()
     }
 }
 
 impl TenantSandboxProcessPort {
     pub fn new(transport: std::sync::Arc<dyn SandboxCommandTransport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            expected_scope: None,
+        }
+    }
+
+    pub fn new_scoped(
+        transport: std::sync::Arc<dyn SandboxCommandTransport>,
+        expected_scope: TenantSandboxProcessScope,
+    ) -> Self {
+        Self {
+            transport,
+            expected_scope: Some(expected_scope),
+        }
+    }
+
+    pub fn is_scope_bound(&self) -> bool {
+        self.expected_scope.is_some()
     }
 }
 
@@ -140,6 +179,13 @@ impl RuntimeProcessPort for TenantSandboxProcessPort {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        if let Some(expected_scope) = &self.expected_scope
+            && !expected_scope.matches(&request.scope)
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "tenant sandbox process scope does not match bound project".to_string(),
+            ));
+        }
         let timeout = request
             .timeout_secs
             .map(Duration::from_secs)
@@ -444,6 +490,41 @@ mod tests {
             requests[0].timeout_secs,
             Some(DEFAULT_COMMAND_TIMEOUT.as_secs())
         );
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_rejects_scope_mismatch() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
+        let port = TenantSandboxProcessPort::new_scoped(
+            transport.clone(),
+            TenantSandboxProcessScope::new(
+                TenantId::new("tenant-a").unwrap(),
+                ProjectId::new("project-a").unwrap(),
+            ),
+        );
+
+        let error = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope {
+                    tenant_id: TenantId::new("tenant-a").unwrap(),
+                    user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+                    agent_id: None,
+                    project_id: Some(ProjectId::new("project-b").unwrap()),
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: ironclaw_host_api::InvocationId::new(),
+                },
+                mounts: None,
+                command: "echo sandbox".to_string(),
+                workdir: None,
+                timeout_secs: None,
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("scope does not match"));
+        assert!(transport.requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

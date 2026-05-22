@@ -20,6 +20,8 @@ use super::protocol::{Request, Response, RpcError};
 use super::transport::SandboxTransport;
 
 const CONTAINER_PROJECT_ROOT: &str = "/project";
+const DEFAULT_TIMEOUT_SECS: u64 = 120;
+const MAX_MERGED_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Reborn process-command transport backed by the V1 sandbox daemon.
 #[derive(Debug, Clone)]
@@ -64,15 +66,24 @@ impl SandboxCommandTransport for DockerSandboxCommandTransport {
 
         let workdir = container_workdir(request.workdir.as_deref())?;
         let timeout_secs = request.timeout_secs;
+        let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
         let start = Instant::now();
-        let output = self
-            .run_tool(serde_json::json!({
+        let output = match tokio::time::timeout(
+            timeout,
+            self.run_tool(serde_json::json!({
                 "command": request.command,
                 "workdir": workdir,
                 "timeout": timeout_secs,
-            }))
-            .await
-            .map_err(|error| map_shell_timeout(error, timeout_secs))?;
+            })),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|error| map_shell_timeout(error, timeout_secs))?,
+            Err(_) => {
+                self.transport.reset().await;
+                return Err(RuntimeProcessError::Timeout(timeout));
+            }
+        };
         let (merged_output, exit_code) = parse_shell_output(output)?;
         Ok(CommandExecutionOutput {
             output: merged_output,
@@ -111,7 +122,9 @@ fn map_shell_timeout(error: RuntimeProcessError, timeout_secs: Option<u64>) -> R
         RuntimeProcessError::ExecutionFailed(message)
             if message.to_ascii_lowercase().contains("timed out") =>
         {
-            RuntimeProcessError::Timeout(Duration::from_secs(timeout_secs.unwrap_or(120)))
+            RuntimeProcessError::Timeout(Duration::from_secs(
+                timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
+            ))
         }
         _ => error,
     }
@@ -138,9 +151,22 @@ fn parse_shell_output(output: Value) -> Result<(String, i64), RuntimeProcessErro
     } else if stderr.is_empty() {
         stdout.to_string()
     } else {
-        format!("{stdout}\n{stderr}")
+        let separator = if stdout.ends_with('\n') { "" } else { "\n" };
+        format!("{stdout}{separator}{stderr}")
     };
-    Ok((merged, exit_code))
+    Ok((truncate_merged_output(&merged), exit_code))
+}
+
+fn truncate_merged_output(output: &str) -> String {
+    if output.len() <= MAX_MERGED_OUTPUT_BYTES {
+        return output.to_string();
+    }
+    let mut end = MAX_MERGED_OUTPUT_BYTES;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = &output[..end]; // safety: end is adjusted to a UTF-8 char boundary before slicing.
+    format!("{truncated}... [truncated]")
 }
 
 fn container_workdir(workdir: Option<&str>) -> Result<String, RuntimeProcessError> {
@@ -184,7 +210,9 @@ fn validate_relative_workdir(path: &str) -> Result<(), RuntimeProcessError> {
 mod tests {
     use super::*;
     use ironclaw_engine::MountError;
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
     struct ScriptedTransport {
@@ -209,6 +237,26 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct SlowTransport {
+        reset_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SandboxTransport for SlowTransport {
+        async fn dispatch(&self, _request: Request) -> Result<Response, MountError> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(ok_response(serde_json::json!({
+                "stdout": "too late",
+                "exit_code": 0,
+            })))
+        }
+
+        async fn reset(&self) {
+            self.reset_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     fn ok_response(output: Value) -> Response {
         Response {
             id: Some("x".to_string()),
@@ -226,6 +274,15 @@ mod tests {
             timeout_secs: Some(7),
             extra_env: Default::default(),
         }
+    }
+
+    fn non_empty_mounts() -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/projects/workspace").unwrap(),
+            MountPermissions::read_only(),
+        )])
+        .unwrap()
     }
 
     #[tokio::test]
@@ -293,6 +350,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_scoped_mounts_until_daemon_contract_supports_it() {
+        let transport = ScriptedTransport::new(vec![]);
+        let adapter = DockerSandboxCommandTransport::new(transport);
+        let mut command = request("pwd");
+        command.mounts = Some(non_empty_mounts());
+
+        let error = adapter.run_command(command).await.unwrap_err();
+        assert!(format!("{error}").contains("scoped mounts"));
+    }
+
+    #[tokio::test]
+    async fn enforces_timeout_at_transport_boundary_and_resets_session() {
+        let transport = Arc::new(SlowTransport::default());
+        let adapter = DockerSandboxCommandTransport::new(transport.clone());
+        let mut command = request("sleep 60");
+        command.timeout_secs = Some(2);
+
+        let error = adapter.run_command(command).await.unwrap_err();
+
+        assert_eq!(error, RuntimeProcessError::Timeout(Duration::from_secs(2)));
+        assert_eq!(transport.reset_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn maps_daemon_timeout_to_process_timeout() {
         let transport = ScriptedTransport::new(vec![Ok(Response {
             id: Some("x".to_string()),
@@ -303,5 +384,60 @@ mod tests {
 
         let error = adapter.run_command(request("sleep 100")).await.unwrap_err();
         assert_eq!(error, RuntimeProcessError::Timeout(Duration::from_secs(7)));
+    }
+
+    #[tokio::test]
+    async fn transport_dispatch_error_maps_to_runtime_process_error() {
+        let transport = ScriptedTransport::new(vec![Err(MountError::Backend {
+            reason: "docker exec failed".to_string(),
+        })]);
+        let adapter = DockerSandboxCommandTransport::new(transport);
+
+        let error = adapter.run_command(request("pwd")).await.unwrap_err();
+
+        assert!(format!("{error}").contains("sandbox transport failed"));
+        assert!(format!("{error}").contains("docker exec failed"));
+    }
+
+    #[tokio::test]
+    async fn daemon_malformed_responses_are_rejected() {
+        let cases = [
+            Response {
+                id: Some("x".to_string()),
+                result: None,
+                error: None,
+            },
+            Response {
+                id: Some("x".to_string()),
+                result: Some(serde_json::json!({})),
+                error: None,
+            },
+            ok_response(serde_json::json!({
+                "stdout": "missing exit code",
+            })),
+        ];
+
+        for response in cases {
+            let transport = ScriptedTransport::new(vec![Ok(response)]);
+            let adapter = DockerSandboxCommandTransport::new(transport);
+
+            let error = adapter.run_command(request("pwd")).await.unwrap_err();
+
+            assert!(matches!(error, RuntimeProcessError::ExecutionFailed(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn merges_stdout_and_stderr_without_double_spacing() {
+        let transport = ScriptedTransport::new(vec![Ok(ok_response(serde_json::json!({
+            "stdout": "out\n",
+            "stderr": "err",
+            "exit_code": 0,
+        })))]);
+        let adapter = DockerSandboxCommandTransport::new(transport);
+
+        let output = adapter.run_command(request("cargo test")).await.unwrap();
+
+        assert_eq!(output.output, "out\nerr");
     }
 }

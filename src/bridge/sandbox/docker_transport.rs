@@ -181,6 +181,11 @@ impl SandboxTransport for DockerTransport {
 
         outcome
     }
+
+    async fn reset(&self) {
+        let mut guard = self.session.lock().await;
+        *guard = None;
+    }
 }
 
 async fn dispatch_one(

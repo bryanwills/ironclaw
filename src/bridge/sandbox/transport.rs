@@ -29,4 +29,7 @@ pub trait SandboxTransport: Send + Sync + std::fmt::Debug {
     /// broken) and surface to the engine as [`MountError::Backend`].
     /// Tool-level failures are returned via `Response::error` instead.
     async fn dispatch(&self, request: Request) -> Result<Response, MountError>;
+
+    /// Drop any cached command/session state so the next call reconnects.
+    async fn reset(&self) {}
 }

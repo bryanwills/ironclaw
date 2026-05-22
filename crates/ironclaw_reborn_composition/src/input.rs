@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_runtime::{RuntimeProcessPort, SchedulerTurnRunWakeNotifier};
+use ironclaw_host_runtime::{
+    RuntimeProcessPort, SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort,
+};
 use ironclaw_trust::HostTrustPolicy;
 
 use crate::RebornCompositionProfile;
@@ -14,10 +16,15 @@ pub struct RebornBuildInput {
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     pub(crate) turn_run_wake_notifier: Option<Arc<SchedulerTurnRunWakeNotifier>>,
-    pub(crate) tenant_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
+    pub(crate) tenant_sandbox_process_port: Option<TenantSandboxProcessPortInput>,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
+}
+
+pub(crate) enum TenantSandboxProcessPortInput {
+    ProductionCandidate(Arc<TenantSandboxProcessPort>),
+    Unverified(Arc<dyn RuntimeProcessPort>),
 }
 
 pub(crate) enum RebornStorageInput {
@@ -155,9 +162,20 @@ impl RebornBuildInput {
 
     pub fn with_tenant_sandbox_process_port(
         mut self,
+        process_port: Arc<TenantSandboxProcessPort>,
+    ) -> Self {
+        self.tenant_sandbox_process_port = Some(
+            TenantSandboxProcessPortInput::ProductionCandidate(process_port),
+        );
+        self
+    }
+
+    pub fn with_unverified_tenant_sandbox_process_port_dyn(
+        mut self,
         process_port: Arc<dyn RuntimeProcessPort>,
     ) -> Self {
-        self.tenant_sandbox_process_port = Some(process_port);
+        self.tenant_sandbox_process_port =
+            Some(TenantSandboxProcessPortInput::Unverified(process_port));
         self
     }
 

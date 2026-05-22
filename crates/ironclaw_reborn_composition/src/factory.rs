@@ -27,7 +27,7 @@ use ironclaw_turns::{
     InMemoryTurnStateStore,
 };
 
-use crate::input::RebornStorageInput;
+use crate::input::{RebornStorageInput, TenantSandboxProcessPortInput};
 use crate::{
     RebornBuildError, RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
     RebornReadiness, RebornReadinessState,
@@ -181,7 +181,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         services = services.with_runtime_policy(runtime_policy);
     }
     if let Some(process_port) = input.tenant_sandbox_process_port {
-        services = services.with_tenant_sandbox_process_port_dyn(process_port);
+        services = match process_port {
+            TenantSandboxProcessPortInput::ProductionCandidate(process_port) => {
+                services.with_production_tenant_sandbox_process_port(process_port)
+            }
+            TenantSandboxProcessPortInput::Unverified(process_port) => {
+                services.with_tenant_sandbox_process_port_dyn(process_port)
+            }
+        };
     }
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
@@ -394,7 +401,7 @@ struct RebornProductionWiring {
     trust_policy: Arc<HostTrustPolicy>,
     runtime_policy: EffectiveRuntimePolicy,
     turn_run_wake_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
-    tenant_sandbox_process_port: Option<Arc<dyn ironclaw_host_runtime::RuntimeProcessPort>>,
+    tenant_sandbox_process_port: Option<TenantSandboxProcessPortInput>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -402,7 +409,7 @@ fn production_wiring(
     trust_policy: Option<Arc<HostTrustPolicy>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
     turn_run_wake_notifier: Option<Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>>,
-    tenant_sandbox_process_port: Option<Arc<dyn ironclaw_host_runtime::RuntimeProcessPort>>,
+    tenant_sandbox_process_port: Option<TenantSandboxProcessPortInput>,
 ) -> Result<RebornProductionWiring, RebornBuildError> {
     let trust_policy = trust_policy.ok_or(RebornBuildError::MissingProductionTrustPolicy)?;
     if !trust_policy.has_sources() {
@@ -489,7 +496,14 @@ async fn build_libsql_production(
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
     if let Some(process_port) = production_wiring.tenant_sandbox_process_port {
-        services = services.with_tenant_sandbox_process_port_dyn(process_port);
+        services = match process_port {
+            TenantSandboxProcessPortInput::ProductionCandidate(process_port) => {
+                services.with_production_tenant_sandbox_process_port(process_port)
+            }
+            TenantSandboxProcessPortInput::Unverified(process_port) => {
+                services.with_tenant_sandbox_process_port_dyn(process_port)
+            }
+        };
     }
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
@@ -560,7 +574,14 @@ async fn build_postgres_production(
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
     if let Some(process_port) = production_wiring.tenant_sandbox_process_port {
-        services = services.with_tenant_sandbox_process_port_dyn(process_port);
+        services = match process_port {
+            TenantSandboxProcessPortInput::ProductionCandidate(process_port) => {
+                services.with_production_tenant_sandbox_process_port(process_port)
+            }
+            TenantSandboxProcessPortInput::Unverified(process_port) => {
+                services.with_tenant_sandbox_process_port_dyn(process_port)
+            }
+        };
     }
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
@@ -646,10 +667,11 @@ mod tests {
     async fn local_dev_composes_injected_tenant_sandbox_process_port() {
         let dir = tempfile::tempdir().expect("tempdir");
         let process_port = Arc::new(RecordingProcessPort::default());
+        let process_port_dyn: Arc<dyn RuntimeProcessPort> = process_port.clone();
         let services = build_reborn_services(
             RebornBuildInput::local_dev("sandbox-port-owner", dir.path().join("local-dev"))
                 .with_runtime_policy(tenant_sandbox_process_policy())
-                .with_tenant_sandbox_process_port(process_port.clone()),
+                .with_unverified_tenant_sandbox_process_port_dyn(process_port_dyn),
         )
         .await
         .expect("local-dev services build");

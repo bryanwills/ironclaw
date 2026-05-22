@@ -1046,6 +1046,23 @@ where
         self
     }
 
+    pub fn with_production_tenant_sandbox_process_port(
+        mut self,
+        process_port: Arc<TenantSandboxProcessPort>,
+    ) -> Self {
+        let readiness = if process_port.is_scope_bound() {
+            ProductionImplementationReadiness::ProductionCandidate
+        } else {
+            ProductionImplementationReadiness::UnverifiedProductionImplementation
+        };
+        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
+            "TenantSandboxProcessPort",
+            readiness,
+        ));
+        self.tenant_sandbox_process_port = Some(process_port);
+        self
+    }
+
     pub fn with_tenant_sandbox_process_port_dyn(
         mut self,
         process_port: Arc<dyn RuntimeProcessPort>,
