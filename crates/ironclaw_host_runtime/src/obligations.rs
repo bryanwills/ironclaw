@@ -37,7 +37,7 @@ pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from
 /// Entries also expire after a short TTL so abandoned handoffs from setup
 /// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
 #[derive(Clone)]
-pub struct RuntimeSecretInjectionStore {
+pub(crate) struct RuntimeSecretInjectionStore {
     state: Arc<RuntimeSecretInjectionState>,
 }
 
@@ -52,11 +52,11 @@ struct RuntimeSecretInjectionEntry {
 }
 
 impl RuntimeSecretInjectionStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn with_ttl(ttl: Duration) -> Self {
+    pub(crate) fn with_ttl(ttl: Duration) -> Self {
         Self {
             state: Arc::new(RuntimeSecretInjectionState {
                 secrets: Mutex::new(HashMap::new()),
@@ -65,7 +65,7 @@ impl RuntimeSecretInjectionStore {
         }
     }
 
-    pub fn insert(
+    pub(crate) fn insert(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -86,7 +86,7 @@ impl RuntimeSecretInjectionStore {
         Ok(())
     }
 
-    pub fn take(
+    pub(crate) fn take(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -108,7 +108,7 @@ impl RuntimeSecretInjectionStore {
     ///
     /// Background process lifecycle cleanup is guarded by a single-active-handoff
     /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
-    pub fn discard_for_capability(
+    pub(crate) fn discard_for_capability(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -131,7 +131,8 @@ impl RuntimeSecretInjectionStore {
         Ok(secrets.keys().any(|key| key.matches_scope(&scope_key)))
     }
 
-    pub fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
+    #[cfg(test)]
+    pub(crate) fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
         let mut secrets = self.lock()?;
         Ok(prune_expired_entries(&mut secrets, Instant::now()))
     }
@@ -175,7 +176,7 @@ fn prune_expired_entries(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeSecretInjectionStoreError {
+pub(crate) enum RuntimeSecretInjectionStoreError {
     Unavailable,
 }
 
@@ -263,16 +264,16 @@ impl RuntimeSecretInjectionScopeKey {
 /// every network operation in the invocation; obligation completion/abort or
 /// process lifecycle cleanup owns the final discard.
 #[derive(Debug, Clone, Default)]
-pub struct NetworkObligationPolicyStore {
+pub(crate) struct NetworkObligationPolicyStore {
     policies: Arc<Mutex<HashMap<NetworkPolicyKey, NetworkPolicy>>>,
 }
 
 impl NetworkObligationPolicyStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(
+    pub(crate) fn insert(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -284,7 +285,7 @@ impl NetworkObligationPolicyStore {
             .insert(NetworkPolicyKey::new(scope, capability_id), policy);
     }
 
-    pub fn get(
+    pub(crate) fn get(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -296,7 +297,7 @@ impl NetworkObligationPolicyStore {
             .cloned()
     }
 
-    pub fn take(
+    pub(crate) fn take(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -311,7 +312,11 @@ impl NetworkObligationPolicyStore {
     ///
     /// Background process lifecycle cleanup is guarded by a single-active-handoff
     /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
-    pub fn discard_for_capability(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
+    pub(crate) fn discard_for_capability(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) {
         let _ = self.take(scope, capability_id);
     }
 

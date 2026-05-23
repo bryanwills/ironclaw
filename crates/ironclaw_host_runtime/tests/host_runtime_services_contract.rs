@@ -43,10 +43,10 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion, DefaultHostRuntime, HostHttpEgressService, HostRuntime,
-    HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    RuntimeStatusRequest, RuntimeWorkId,
+    HostRuntimeServices, NoExposureGuard, ProcessObligationLifecycleStore,
+    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -69,6 +69,7 @@ use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
     RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
 };
+use ironclaw_safety::{LeakAction, LeakPattern, LeakSeverity};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
@@ -92,6 +93,7 @@ use ironclaw_wasm::{
     WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest, WasmStagedRuntimeCredential,
     WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
 };
+use regex::Regex;
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
@@ -2754,6 +2756,45 @@ async fn host_runtime_services_redacts_output_through_builtin_obligation_handler
             let serialized = serde_json::to_string(&completed.output).unwrap();
             assert!(serialized.contains("[REDACTED]"));
             assert!(!serialized.contains(leaked));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn host_runtime_services_redacts_output_with_injected_no_exposure_guard() {
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![Obligation::RedactOutput]));
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_no_exposure_guard(Arc::new(sentinel_guard()))
+    .with_script_runtime(script_runtime);
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant(script_capability_id()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"authorization": "SENTINEL-12345"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.output, json!({"authorization": "[REDACTED]"}));
         }
         other => panic!("expected completed outcome, got {other:?}"),
     }
@@ -5894,6 +5935,15 @@ fn trust_decision_with_dispatch_authority() -> TrustDecision {
         provenance: TrustProvenance::Default,
         evaluated_at: Utc::now(),
     }
+}
+
+fn sentinel_guard() -> NoExposureGuard {
+    NoExposureGuard::with_patterns(vec![LeakPattern {
+        name: "sentinel".to_string(),
+        regex: Regex::new("SENTINEL-[0-9]+").expect("valid sentinel regex"),
+        severity: LeakSeverity::Critical,
+        action: LeakAction::Redact,
+    }])
 }
 
 fn read_directory_text(root: &std::path::Path) -> String {

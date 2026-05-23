@@ -5,7 +5,7 @@
 //! `LeakDetector` directly, so production egress policy has one composition
 //! seam to grow from.
 
-use ironclaw_safety::{LeakDetectionError, LeakDetector};
+use ironclaw_safety::{LeakDetectionError, LeakDetector, LeakPattern};
 use serde_json::{Map, Value};
 use std::fmt;
 use thiserror::Error;
@@ -85,8 +85,16 @@ impl NoExposureGuard {
         }
     }
 
+    /// Construct a guard with explicit leak patterns for host composition tests
+    /// and specialized deployments.
+    pub fn with_patterns(patterns: Vec<LeakPattern>) -> Self {
+        Self {
+            detector: LeakDetector::with_patterns(patterns),
+        }
+    }
+
     #[cfg(test)]
-    fn with_detector(detector: LeakDetector) -> Self {
+    pub(crate) fn with_detector(detector: LeakDetector) -> Self {
         Self { detector }
     }
 
@@ -309,6 +317,19 @@ mod tests {
         let error = guard
             .check_json(ExposureBoundary::SseEvent, value)
             .expect_err("deep json should fail closed");
+
+        assert_eq!(error.code(), NoExposureViolation::CODE);
+        assert_eq!(error.boundary(), ExposureBoundary::SseEvent);
+    }
+
+    #[test]
+    fn check_json_rejects_excessive_node_count() {
+        let guard = NoExposureGuard::new();
+        let value = Value::Array(vec![Value::String("ok".to_string()); MAX_JSON_NODES]);
+
+        let error = guard
+            .check_json(ExposureBoundary::SseEvent, value)
+            .expect_err("excessive json nodes should fail closed");
 
         assert_eq!(error.code(), NoExposureViolation::CODE);
         assert_eq!(error.boundary(), ExposureBoundary::SseEvent);

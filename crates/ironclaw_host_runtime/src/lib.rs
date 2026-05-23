@@ -24,6 +24,7 @@
 //!   in upper-stack vocabulary (e.g. agent loop / adapter / admin).
 #![warn(unreachable_pub)]
 
+use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, CorrelationId, ExecutionContext, ExtensionId, NetworkPolicy,
@@ -79,8 +80,7 @@ pub use first_party_tools::{
 };
 pub use no_exposure_guard::{ExposureBoundary, NoExposureGuard, NoExposureViolation};
 pub use obligations::{
-    BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
-    ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
+    BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
 };
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use production::DefaultHostRuntime;
@@ -784,12 +784,18 @@ impl<N, S> HostHttpEgressService<N, S> {
         &self.no_exposure_guard
     }
 
-    pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
+    pub(crate) fn with_secret_injection_store(
+        mut self,
+        store: Arc<RuntimeSecretInjectionStore>,
+    ) -> Self {
         self.secret_injections = Some(store);
         self
     }
 
-    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+    pub(crate) fn with_network_policy_store(
+        mut self,
+        store: Arc<NetworkObligationPolicyStore>,
+    ) -> Self {
         self.network_policy_store = Some(store);
         self.network_policy_source = NetworkPolicySource::StagedObligation;
         self

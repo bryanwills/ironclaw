@@ -1066,6 +1066,7 @@ where
         };
         let runtime_http_egress = Arc::new(
             crate::HostHttpEgressService::new(network, SharedSecretStore(secret_store))
+                .with_no_exposure_guard(Arc::clone(&self.no_exposure_guard))
                 .with_network_policy_store(Arc::clone(&self.network_policy_store))
                 .with_secret_injection_store(Arc::clone(&self.secret_injection_store)),
         );
@@ -2506,15 +2507,17 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
         NetworkTargetPattern, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
-        RuntimeCredentialTarget, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId,
-        UserId,
+        RuntimeCredentialTarget, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
+        SecretHandle, TenantId, UserId,
     };
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     };
     use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
     use ironclaw_resources::InMemoryResourceGovernor;
+    use ironclaw_safety::{LeakAction, LeakPattern, LeakSeverity};
     use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+    use regex::Regex;
 
     use super::*;
 
@@ -2593,6 +2596,40 @@ mod tests {
                 "authorization".to_string(),
                 "Bearer graph-secret".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn host_http_egress_helper_uses_configured_no_exposure_guard() {
+        let network = RecordingNetwork::ok();
+        let recorded_requests = Arc::clone(&network.requests);
+        let services = test_services()
+            .with_secret_store(Arc::new(InMemorySecretStore::new()))
+            .with_no_exposure_guard(Arc::new(sentinel_guard()))
+            .try_with_host_http_egress(network)
+            .expect("host HTTP egress should wire with graph secret store");
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        services
+            .network_policy_store
+            .insert(&scope, &capability_id, staged_policy());
+        let egress = configured_egress(&services);
+
+        let error = egress
+            .execute(RuntimeHttpEgressRequest {
+                url: "https://api.example.test/v1/SENTINEL-12345".to_string(),
+                ..request_without_credentials(scope, capability_id)
+            })
+            .expect_err("configured no-exposure guard should block sentinel URL");
+
+        assert!(matches!(
+            error,
+            RuntimeHttpEgressError::Request { ref reason, .. }
+                if reason == "credential_leak_blocked"
+        ));
+        assert!(
+            recorded_requests.lock().unwrap().is_empty(),
+            "request must be blocked before network dispatch"
         );
     }
 
@@ -2713,6 +2750,15 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    fn sentinel_guard() -> NoExposureGuard {
+        NoExposureGuard::with_patterns(vec![LeakPattern {
+            name: "sentinel".to_string(),
+            regex: Regex::new("SENTINEL-[0-9]+").expect("valid sentinel regex"),
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Redact,
+        }])
     }
 
     #[derive(Clone)]
