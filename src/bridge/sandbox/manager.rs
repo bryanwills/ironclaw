@@ -1,15 +1,15 @@
-//! [`ProjectSandboxManager`] — owns one [`DockerTransport`] per project.
+//! [`ProjectSandboxManager`] — owns per-project sandbox handles.
 //!
 //! Lazily creates the per-project sandbox container on first use, hands out
-//! a shared [`SandboxTransport`] handle that the project's
-//! [`ContainerizedFilesystemBackend`] dispatches into, and exposes lifecycle
-//! hooks (`shutdown_project`, `shutdown_all`) for engine teardown.
+//! shared transport handles that the project's sandbox integrations dispatch
+//! into, and exposes lifecycle hooks (`shutdown_project`, `shutdown_all`) for
+//! engine teardown.
 //!
 //! The manager is the single owner of `bollard::Docker` so all sandbox
 //! activity routes through one connection. The Phase 6 router constructs
 //! exactly one `ProjectSandboxManager` and shares it across all projects.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -27,12 +27,28 @@ use super::docker_transport::DockerTransport;
 use super::lifecycle;
 use super::transport::SandboxTransport;
 
+struct ProjectSandboxHandles {
+    container_id: String,
+    filesystem_transport: Option<Arc<DockerTransport>>,
+    command_transport: Option<Arc<DockerSandboxCommandTransport>>,
+    process_ports: HashMap<TenantId, Arc<TenantSandboxProcessPort>>,
+}
+
+impl ProjectSandboxHandles {
+    fn new(container_id: String) -> Self {
+        Self {
+            container_id,
+            filesystem_transport: None,
+            command_transport: None,
+            process_ports: HashMap::new(),
+        }
+    }
+}
+
 /// One process-wide manager that vends sandbox transports per project.
 pub struct ProjectSandboxManager {
     docker: Docker,
-    transports: Mutex<HashMap<ProjectId, Arc<DockerTransport>>>,
-    command_transports: Mutex<HashMap<ProjectId, Arc<DockerSandboxCommandTransport>>>,
-    process_ports: Mutex<HashMap<(TenantId, ProjectId), Arc<TenantSandboxProcessPort>>>,
+    projects: Mutex<HashMap<ProjectId, ProjectSandboxHandles>>,
 }
 
 impl std::fmt::Debug for ProjectSandboxManager {
@@ -45,10 +61,51 @@ impl ProjectSandboxManager {
     pub fn new(docker: Docker) -> Self {
         Self {
             docker,
-            transports: Mutex::new(HashMap::new()),
-            command_transports: Mutex::new(HashMap::new()),
-            process_ports: Mutex::new(HashMap::new()),
+            projects: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn ensure_project_started(
+        &self,
+        projects: &mut HashMap<ProjectId, ProjectSandboxHandles>,
+        project_id: ProjectId,
+        host_workspace_path: &PathBuf,
+    ) -> Result<(), MountError> {
+        if projects.contains_key(&project_id) {
+            return Ok(());
+        }
+
+        let container_id =
+            lifecycle::ensure_running(&self.docker, project_id, host_workspace_path).await?;
+        projects.insert(project_id, ProjectSandboxHandles::new(container_id));
+        Ok(())
+    }
+
+    /// Get-or-create a Reborn sandbox process-command transport from a
+    /// started project's cached handles.
+    ///
+    /// This uses a separate Docker exec session from the containerized
+    /// filesystem backend, so long-running commands cannot monopolize
+    /// filesystem RPCs for the same project.
+    fn command_transport_for(
+        &self,
+        project_id: ProjectId,
+        handles: &mut ProjectSandboxHandles,
+    ) -> Arc<DockerSandboxCommandTransport> {
+        if let Some(existing) = &handles.command_transport {
+            return existing.clone();
+        }
+
+        debug!(
+            project_id = %project_id,
+            container_id = %handles.container_id,
+            "ProjectSandboxManager: created sandbox command transport"
+        );
+        let transport = Arc::new(DockerSandboxCommandTransport::new(Arc::new(
+            DockerTransport::new(self.docker.clone(), handles.container_id.clone()),
+        )));
+        handles.command_transport = Some(transport.clone());
+        transport
     }
 
     /// Get-or-create the transport for `project_id`. The first call ensures
@@ -65,56 +122,39 @@ impl ProjectSandboxManager {
         project_id: ProjectId,
         host_workspace_path: PathBuf,
     ) -> Result<Arc<dyn SandboxTransport>, MountError> {
-        let mut guard = self.transports.lock().await;
+        let mut projects = self.projects.lock().await;
 
         // Fast path: return cached transport.
-        if let Some(existing) = guard.get(&project_id) {
+        if let Some(existing) = projects
+            .get(&project_id)
+            .and_then(|handles| handles.filesystem_transport.as_ref())
+        {
             return Ok(existing.clone() as Arc<dyn SandboxTransport>);
         }
 
         // Slow path: create the container and transport while holding the
         // lock, so concurrent calls for the same project_id wait rather
         // than spawning a duplicate container.
-        let container_id =
-            lifecycle::ensure_running(&self.docker, project_id, &host_workspace_path).await?;
+        self.ensure_project_started(&mut projects, project_id, &host_workspace_path)
+            .await?;
+        let handles = projects
+            .get_mut(&project_id)
+            .ok_or_else(|| MountError::Backend {
+                reason: format!(
+                    "sandbox project cache missing after startup for project {project_id}"
+                ),
+            })?;
         debug!(
             project_id = %project_id,
-            container_id = %container_id,
+            container_id = %handles.container_id,
             "ProjectSandboxManager: created sandbox transport"
         );
-        let transport = Arc::new(DockerTransport::new(self.docker.clone(), container_id));
-        guard.insert(project_id, transport.clone());
+        let transport = Arc::new(DockerTransport::new(
+            self.docker.clone(),
+            handles.container_id.clone(),
+        ));
+        handles.filesystem_transport = Some(transport.clone());
         Ok(transport as Arc<dyn SandboxTransport>)
-    }
-
-    /// Get-or-create a Reborn sandbox process-command transport for `project_id`.
-    ///
-    /// This uses a separate Docker exec session from the containerized
-    /// filesystem backend, so long-running commands cannot monopolize
-    /// filesystem RPCs for the same project.
-    #[allow(dead_code)]
-    pub async fn command_transport_for(
-        &self,
-        project_id: ProjectId,
-        host_workspace_path: PathBuf,
-    ) -> Result<Arc<dyn SandboxCommandTransport>, MountError> {
-        let mut guard = self.command_transports.lock().await;
-        if let Some(existing) = guard.get(&project_id) {
-            return Ok(existing.clone() as Arc<dyn SandboxCommandTransport>);
-        }
-
-        let container_id =
-            lifecycle::ensure_running(&self.docker, project_id, &host_workspace_path).await?;
-        debug!(
-            project_id = %project_id,
-            container_id = %container_id,
-            "ProjectSandboxManager: created sandbox command transport"
-        );
-        let transport = Arc::new(DockerSandboxCommandTransport::new(Arc::new(
-            DockerTransport::new(self.docker.clone(), container_id),
-        )));
-        guard.insert(project_id, transport.clone());
-        Ok(transport as Arc<dyn SandboxCommandTransport>)
     }
 
     /// Get-or-create the Reborn tenant-sandbox process port for `project_id`.
@@ -130,16 +170,28 @@ impl ProjectSandboxManager {
         project_id: ProjectId,
         host_workspace_path: PathBuf,
     ) -> Result<Arc<TenantSandboxProcessPort>, MountError> {
+        let mut projects = self.projects.lock().await;
+        if let Some(existing) = projects
+            .get(&project_id)
+            .and_then(|handles| handles.process_ports.get(&tenant_id))
         {
-            let port_guard = self.process_ports.lock().await;
-            if let Some(existing) = port_guard.get(&(tenant_id.clone(), project_id)) {
-                return Ok(existing.clone());
-            }
+            return Ok(existing.clone());
         }
 
-        let transport = self
-            .command_transport_for(project_id, host_workspace_path)
+        self.ensure_project_started(&mut projects, project_id, &host_workspace_path)
             .await?;
+        let handles = projects
+            .get_mut(&project_id)
+            .ok_or_else(|| MountError::Backend {
+                reason: format!(
+                    "sandbox project cache missing after startup for project {project_id}"
+                ),
+            })?;
+        if let Some(existing) = handles.process_ports.get(&tenant_id) {
+            return Ok(existing.clone());
+        }
+
+        let transport = self.command_transport_for(project_id, handles);
         let scoped_project_id =
             HostProjectId::new(project_id.to_string()).map_err(|error| MountError::Backend {
                 reason: format!(
@@ -147,14 +199,10 @@ impl ProjectSandboxManager {
                 ),
             })?;
         let port = Arc::new(TenantSandboxProcessPort::new_scoped(
-            transport,
+            transport as Arc<dyn SandboxCommandTransport>,
             TenantSandboxProcessScope::new(tenant_id.clone(), scoped_project_id),
         ));
-        let mut port_guard = self.process_ports.lock().await;
-        if let Some(existing) = port_guard.get(&(tenant_id.clone(), project_id)) {
-            return Ok(existing.clone());
-        }
-        port_guard.insert((tenant_id, project_id), port.clone());
+        handles.process_ports.insert(tenant_id, port.clone());
         Ok(port)
     }
 
@@ -163,18 +211,10 @@ impl ProjectSandboxManager {
     /// quickly. Use [`Self::reset_project`] for full removal.
     #[allow(dead_code)]
     pub async fn shutdown_project(&self, project_id: ProjectId) {
-        let mut guard = self.transports.lock().await;
-        let had_filesystem_transport = guard.remove(&project_id).is_some();
-        drop(guard);
-        let mut command_guard = self.command_transports.lock().await;
-        let had_command_transport = command_guard.remove(&project_id).is_some();
-        drop(command_guard);
-        let mut port_guard = self.process_ports.lock().await;
-        let process_port_count = port_guard.len();
-        port_guard.retain(|(_, pid), _| *pid != project_id);
-        let had_process_port = process_port_count != port_guard.len();
-        drop(port_guard);
-        if had_filesystem_transport || had_command_transport || had_process_port {
+        let mut projects = self.projects.lock().await;
+        let had_project = projects.remove(&project_id).is_some();
+        drop(projects);
+        if had_project {
             lifecycle::stop(&self.docker, project_id).await;
         }
     }
@@ -184,15 +224,9 @@ impl ProjectSandboxManager {
     /// untouched — it's the user's data, not the sandbox's.
     #[allow(dead_code)]
     pub async fn reset_project(&self, project_id: ProjectId) {
-        let mut guard = self.transports.lock().await;
-        guard.remove(&project_id);
-        drop(guard);
-        let mut command_guard = self.command_transports.lock().await;
-        command_guard.remove(&project_id);
-        drop(command_guard);
-        let mut port_guard = self.process_ports.lock().await;
-        port_guard.retain(|(_, pid), _| *pid != project_id);
-        drop(port_guard);
+        let mut projects = self.projects.lock().await;
+        projects.remove(&project_id);
+        drop(projects);
         lifecycle::stop(&self.docker, project_id).await;
         lifecycle::remove(&self.docker, project_id).await;
     }
@@ -200,18 +234,10 @@ impl ProjectSandboxManager {
     /// Stop every cached transport. Called at engine teardown.
     #[allow(dead_code)]
     pub async fn shutdown_all(&self) {
-        let mut guard = self.transports.lock().await;
-        let mut pids: HashSet<ProjectId> = guard.keys().copied().collect();
-        guard.clear();
-        drop(guard);
-        let mut command_guard = self.command_transports.lock().await;
-        pids.extend(command_guard.keys().copied());
-        command_guard.clear();
-        drop(command_guard);
-        let mut port_guard = self.process_ports.lock().await;
-        pids.extend(port_guard.keys().map(|(_, pid)| *pid));
-        port_guard.clear();
-        drop(port_guard);
+        let mut projects = self.projects.lock().await;
+        let pids: Vec<ProjectId> = projects.keys().copied().collect();
+        projects.clear();
+        drop(projects);
         for pid in pids {
             lifecycle::stop(&self.docker, pid).await;
         }
@@ -246,14 +272,14 @@ mod tests {
                 error: None,
             })
         }
+
+        async fn reset(&self) {}
     }
 
     fn manager_for_test() -> ProjectSandboxManager {
         ProjectSandboxManager {
             docker: Docker::connect_with_local_defaults().expect("docker client config"),
-            transports: Mutex::new(HashMap::new()),
-            command_transports: Mutex::new(HashMap::new()),
-            process_ports: Mutex::new(HashMap::new()),
+            projects: Mutex::new(HashMap::new()),
         }
     }
 
@@ -290,20 +316,14 @@ mod tests {
     async fn command_transport_for_returns_cached_wrapper() {
         let manager = manager_for_test();
         let project_id = ProjectId::new();
-        manager
-            .command_transports
-            .lock()
-            .await
-            .insert(project_id, command_transport("command"));
+        let mut projects = manager.projects.lock().await;
+        let handles = projects
+            .entry(project_id)
+            .or_insert_with(|| ProjectSandboxHandles::new("test-container".to_string()));
+        handles.command_transport = Some(command_transport("command"));
 
-        let first = manager
-            .command_transport_for(project_id, PathBuf::from("/unused"))
-            .await
-            .unwrap();
-        let second = manager
-            .command_transport_for(project_id, PathBuf::from("/unused"))
-            .await
-            .unwrap();
+        let first = manager.command_transport_for(project_id, handles);
+        let second = manager.command_transport_for(project_id, handles);
 
         assert!(Arc::ptr_eq(&first, &second));
     }
@@ -313,11 +333,12 @@ mod tests {
         let manager = manager_for_test();
         let tenant_id = TenantId::new("tenant-a").unwrap();
         let project_id = ProjectId::new();
-        manager
-            .command_transports
-            .lock()
-            .await
-            .insert(project_id, command_transport("scoped"));
+        let mut projects = manager.projects.lock().await;
+        let handles = projects
+            .entry(project_id)
+            .or_insert_with(|| ProjectSandboxHandles::new("test-container".to_string()));
+        handles.command_transport = Some(command_transport("scoped"));
+        drop(projects);
 
         let first = manager
             .process_port_for(tenant_id.clone(), project_id, PathBuf::from("/unused"))

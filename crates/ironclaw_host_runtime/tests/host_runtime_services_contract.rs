@@ -1223,15 +1223,13 @@ fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_s
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
     .with_runtime_policy(hosted_dev_runtime_policy())
-    .with_production_tenant_sandbox_process_port(Arc::new(
-        TenantSandboxProcessPort::new_scoped(
-            Arc::new(ProductionCandidateSandboxTransport),
-            TenantSandboxProcessScope::new(
-                TenantId::new("tenant-a").unwrap(),
-                ProjectId::new("project-a").unwrap(),
-            ),
+    .with_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new_scoped(
+        Arc::new(ProductionCandidateSandboxTransport),
+        TenantSandboxProcessScope::new(
+            TenantId::new("tenant-a").unwrap(),
+            ProjectId::new("project-a").unwrap(),
         ),
-    ));
+    )));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))

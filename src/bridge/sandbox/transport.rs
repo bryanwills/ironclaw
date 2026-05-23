@@ -31,5 +31,5 @@ pub trait SandboxTransport: Send + Sync + std::fmt::Debug {
     async fn dispatch(&self, request: Request) -> Result<Response, MountError>;
 
     /// Drop any cached command/session state so the next call reconnects.
-    async fn reset(&self) {}
+    async fn reset(&self);
 }

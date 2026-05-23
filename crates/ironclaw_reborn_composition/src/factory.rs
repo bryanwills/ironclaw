@@ -116,10 +116,10 @@ where
 {
     match process_port {
         Some(TenantSandboxProcessPortInput::ProductionCandidate(process_port)) => {
-            services.with_production_tenant_sandbox_process_port(process_port)
+            services.with_tenant_sandbox_process_port(process_port)
         }
         Some(TenantSandboxProcessPortInput::Unverified(process_port)) => {
-            services.with_tenant_sandbox_process_port_dyn(process_port)
+            services.with_unverified_tenant_sandbox_process_port_dyn(process_port)
         }
         None => services,
     }

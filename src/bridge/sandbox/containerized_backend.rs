@@ -312,6 +312,8 @@ mod tests {
                 Ok(responses.remove(0))
             }
         }
+
+        async fn reset(&self) {}
     }
 
     fn ok_resp(output: Value) -> Response {

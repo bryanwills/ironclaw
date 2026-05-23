@@ -253,6 +253,8 @@ mod tests {
             self.captured.lock().unwrap().push(request);
             self.responses.lock().unwrap().remove(0)
         }
+
+        async fn reset(&self) {}
     }
 
     #[derive(Debug, Default)]
