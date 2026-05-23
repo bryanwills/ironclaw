@@ -22,6 +22,26 @@
 //!
 //! Both share the invariant: open the root fd once, walk fd-relative, never
 //! trust an absolute path again.
+//!
+//! ## Bind-mount / cross-device scope
+//!
+//! Neither `RESOLVE_BENEATH` (Linux) nor the portable per-component walk blocks
+//! traversal *across a mount point* that lives **inside** the mount root. On
+//! Linux this would require `RESOLVE_NO_XDEV`; on the portable walk it would
+//! require an `st_dev` consistency check on every hop. We deliberately do not
+//! enforce either, under the assumption that **a tenant mount root is a flat
+//! storage directory that contains no nested mounts/bind-mounts**. Under that
+//! assumption there is no cross-device object to traverse to, so the omission is
+//! safe.
+//!
+//! If that assumption is ever violated — e.g. a tenant root could contain a
+//! bind mount onto another tenant's storage — that nested mount *would* be a
+//! real escape vector, because `RESOLVE_BENEATH` only constrains the logical
+//! path (`..`/symlinks/absolute), not device boundaries. Adding
+//! `RESOLVE_NO_XDEV` (Linux) plus an `st_dev` check (portable walk) is the
+//! follow-up to close it; it is intentionally deferred to avoid breaking
+//! legitimate same-root traversal when a tenant root happens to span devices
+//! for unrelated reasons.
 
 use std::ffi::OsStr;
 use std::os::fd::OwnedFd;
@@ -75,6 +95,11 @@ pub(super) enum ResolveError {
     Escape,
     /// A path component was not found. Maps to `NotFound`.
     NotFound,
+    /// A path component that should have been a directory was a regular file (or
+    /// other non-directory). This is a legitimate "not a directory" condition,
+    /// NOT a symlink escape — e.g. `/workspace/file/child` where `file` is a
+    /// regular file. Maps to a non-escape `Backend` error.
+    NotADirectory,
     /// Any other OS error. Maps to `Backend`.
     Os(rustix::io::Errno),
 }
@@ -83,19 +108,19 @@ impl From<rustix::io::Errno> for ResolveError {
     fn from(errno: rustix::io::Errno) -> Self {
         match errno {
             // `ELOOP`/`EXDEV`: openat2(RESOLVE_BENEATH) or an `O_NOFOLLOW` leaf
-            // open refused to traverse a symlink / cross a device boundary.
+            // open refused to traverse a symlink / cross a device boundary. These
+            // are the only errnos that genuinely indicate a containment escape.
+            rustix::io::Errno::LOOP | rustix::io::Errno::XDEV => ResolveError::Escape,
+            // `ENOTDIR`: a path component that we tried to descend through is not
+            // a directory. On Linux `openat2` returns `ELOOP` (handled above) for
+            // a symlinked component, so `ENOTDIR` here means a *regular file*
+            // ancestor — a normal "not a directory" error, never an escape.
             //
-            // `ENOTDIR`: on the non-Linux per-component walk, an intermediate
-            // `openat(O_DIRECTORY | O_NOFOLLOW)` against a symlinked or
-            // non-directory ancestor fails with `ENOTDIR` rather than `ELOOP`
-            // (observed on macOS). That is the same containment violation the
-            // kernel reports as `ELOOP`/`EXDEV` on Linux, so we classify it as
-            // an escape to keep cross-platform parity. `openat2` on Linux never
-            // surfaces `ENOTDIR` for a symlinked component (it returns `ELOOP`),
-            // so this mapping does not over-trigger there.
-            rustix::io::Errno::LOOP | rustix::io::Errno::XDEV | rustix::io::Errno::NOTDIR => {
-                ResolveError::Escape
-            }
+            // On the non-Linux per-component walk an `O_NOFOLLOW` open of a
+            // symlink also yields `ELOOP` (not `ENOTDIR`), so the same reasoning
+            // holds; the walk additionally disambiguates explicitly via
+            // `fstatat` (see `open_beneath_walk`) before this conversion is hit.
+            rustix::io::Errno::NOTDIR => ResolveError::NotADirectory,
             rustix::io::Errno::NOENT => ResolveError::NotFound,
             other => ResolveError::Os(other),
         }
@@ -161,11 +186,23 @@ fn open_beneath_linux(
 
 /// Portable per-component walk for non-Linux Unix (macOS dev/CI).
 ///
-/// Each intermediate component is opened with `O_DIRECTORY | O_NOFOLLOW` so a
-/// symlinked ancestor fails with `ELOOP`. The leaf is opened with the caller's
-/// `oflags | O_NOFOLLOW`. Because every hop is relative to a fd we already hold,
-/// there is no absolute-path re-resolution and the walk is race-free by
-/// construction.
+/// Each intermediate component is opened with `O_DIRECTORY | O_NOFOLLOW`. The
+/// leaf is opened with the caller's `oflags | O_NOFOLLOW`. Because every hop is
+/// relative to a fd we already hold, there is no absolute-path re-resolution and
+/// the walk is race-free by construction.
+///
+/// ## Errno disambiguation
+///
+/// On macOS an intermediate `openat(O_DIRECTORY | O_NOFOLLOW)` fails with
+/// `ENOTDIR` for **both** a symlinked ancestor and a regular-file ancestor
+/// (`O_NOFOLLOW` refuses to follow the symlink, so the kernel sees a non-dir at
+/// that slot in either case). Errno alone therefore cannot tell a symlink escape
+/// from a benign "not a directory" condition. When an intermediate open fails
+/// with `ENOTDIR` (or `ELOOP`) we `fstatat(AT_SYMLINK_NOFOLLOW)` the offending
+/// component — without following it — to classify it: a symlink is a containment
+/// `Escape`, anything else is a normal `NotADirectory`. The `fstatat` is on the
+/// same `parent_fd` we already hold, so it introduces no absolute-path
+/// re-resolution and no new TOCTOU window.
 #[cfg(not(target_os = "linux"))]
 fn open_beneath_walk(
     root_fd: &OwnedFd,
@@ -185,19 +222,57 @@ fn open_beneath_walk(
                 component.as_str(),
                 oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 mode,
-            )?
+            )
+            .map_err(|errno| classify_walk_errno(errno, parent_fd, component))?
         } else {
             rustix::fs::openat(
                 parent_fd,
                 component.as_str(),
                 OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
-            )?
+            )
+            .map_err(|errno| classify_walk_errno(errno, parent_fd, component))?
         };
         parent = Some(next);
     }
     // `parent` is always `Some` here: a non-root tail has >= 1 component.
     parent.ok_or(ResolveError::Escape)
+}
+
+/// Classify an `errno` from a failed `openat(… O_NOFOLLOW)` on the portable
+/// walk (intermediate or leaf component). `ENOTDIR`/`ELOOP` are ambiguous on
+/// macOS — a symlinked component opened `O_NOFOLLOW` surfaces as `ENOTDIR` (with
+/// `O_DIRECTORY`) or `ELOOP`, and a regular-file component opened `O_DIRECTORY`
+/// also surfaces as `ENOTDIR` — so we `fstatat(AT_SYMLINK_NOFOLLOW)` the
+/// component, relative to the fd we already hold (never an absolute path), to
+/// decide: symlink → `Escape`, otherwise → `NotADirectory`. Any other errno
+/// passes through the standard mapping.
+#[cfg(not(target_os = "linux"))]
+fn classify_walk_errno(
+    errno: rustix::io::Errno,
+    parent_fd: std::os::fd::BorrowedFd<'_>,
+    component: &str,
+) -> ResolveError {
+    use rustix::fs::{AtFlags, FileType};
+
+    match errno {
+        rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP => {
+            match rustix::fs::statat(parent_fd, component, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => {
+                    if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink {
+                        ResolveError::Escape
+                    } else {
+                        ResolveError::NotADirectory
+                    }
+                }
+                // The component vanished between the open and the stat: treat as
+                // not-found rather than guessing.
+                Err(rustix::io::Errno::NOENT) => ResolveError::NotFound,
+                Err(other) => ResolveError::from(other),
+            }
+        }
+        other => ResolveError::from(other),
+    }
 }
 
 /// Open the parent directory of `tail` race-free, returning the dir fd and the

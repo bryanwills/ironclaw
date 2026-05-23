@@ -18,12 +18,11 @@
 mod resolver;
 
 use std::os::fd::OwnedFd;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{HostPath, VirtualPath};
-use ironclaw_safety::sensitive_paths::is_sensitive_path;
+use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
 use rustix::fs::{Mode, OFlags, RawMode};
 
 use crate::{
@@ -50,11 +49,6 @@ pub struct LocalFilesystem {
 #[derive(Debug, Clone)]
 struct LocalMount {
     virtual_root: VirtualPath,
-    /// Canonical host path — retained for advisory `is_sensitive_path` checks
-    /// and error context only. **Never** used to open files (that would
-    /// reintroduce the absolute-path re-resolution TOCTOU window). All opens go
-    /// through `root_dir`.
-    host_root: PathBuf,
     /// Owned fd onto the mount root directory, opened once at mount time.
     /// Every operation resolves fd-relative to this handle.
     root_dir: Arc<OwnedFd>,
@@ -115,7 +109,6 @@ impl LocalFilesystem {
 
         self.mounts.push(LocalMount {
             virtual_root,
-            host_root: canonical_root,
             root_dir: Arc::new(root_dir),
         });
         Ok(())
@@ -363,7 +356,6 @@ impl RootFilesystem for LocalFilesystem {
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let (mount, tail) = self.resolve_mount_tail(path, FilesystemOperation::Stat)?;
         let root = Arc::clone(&mount.root_dir);
-        let host_root = mount.host_root.clone();
         let vpath = path.clone();
         run_blocking(path.clone(), FilesystemOperation::Stat, move || {
             // Open the resolved entry race-free, then fstat the fd. Files open
@@ -390,15 +382,21 @@ impl RootFilesystem for LocalFilesystem {
                 .map_err(|e| errno_to_filesystem(e, vpath.clone(), FilesystemOperation::Stat))?;
             let file_type = file_type_from_raw_mode(stat.st_mode);
             let modified = system_time_from_stat(stat.st_mtime as i64, stat.st_mtime_nsec as i64);
-            // `is_sensitive_path` is advisory and operates on the host path;
-            // reconstruct it purely for the flag. This value never gates access.
-            let host_path = reconstruct_host_path(&host_root, &vpath);
+            // The `sensitive` flag is advisory metadata, not an access gate, so
+            // we classify on the *virtual* path string. Crucially this performs
+            // ZERO host-path filesystem resolution: using the canonicalizing
+            // `is_sensitive_path` here would reintroduce a path-based lookup on
+            // attacker-influenced input *after* the fd-safe `fstat`, recreating
+            // exactly the TOCTOU window this backend eliminates everywhere else
+            // (the reconstructed host path could resolve to a different object
+            // than the fd we just stat'd). `is_sensitive_path_str` is pure string
+            // matching against the same sensitive-path patterns.
             Ok(FileStat {
                 path: vpath.clone(),
                 file_type,
                 len: stat.st_size as u64,
                 modified,
-                sensitive: is_sensitive_path(&host_path),
+                sensitive: is_sensitive_path_str(vpath.as_str()),
             })
         })
         .await
@@ -472,9 +470,45 @@ fn ensure_parent_dirs(
     })
 }
 
+/// Classify a failed descend `openat(O_DIRECTORY | O_NOFOLLOW)` on a component
+/// that already exists. On macOS both a symlinked and a regular-file component
+/// surface as `ENOTDIR` (`O_NOFOLLOW` refuses to follow the symlink), so errno
+/// alone is ambiguous. We `fstatat(AT_SYMLINK_NOFOLLOW)` the component, relative
+/// to the fd we already hold (no absolute-path re-resolution), to decide:
+/// symlink → `SymlinkEscape`, otherwise → a non-escape "not a directory"
+/// `Backend` error. Errnos other than `ENOTDIR`/`ELOOP` use the standard map.
+fn classify_descend_errno(
+    errno: rustix::io::Errno,
+    parent_fd: std::os::fd::BorrowedFd<'_>,
+    component: &str,
+    path: &VirtualPath,
+    operation: FilesystemOperation,
+) -> FilesystemError {
+    match errno {
+        rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP => {
+            match rustix::fs::statat(parent_fd, as_os_str(component), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => {
+                    if file_type_from_raw_mode(stat.st_mode) == FileType::Symlink {
+                        FilesystemError::SymlinkEscape { path: path.clone() }
+                    } else {
+                        FilesystemError::Backend {
+                            path: path.clone(),
+                            operation,
+                            reason: "not a directory".to_string(),
+                        }
+                    }
+                }
+                Err(other) => errno_to_filesystem(other, path.clone(), operation),
+            }
+        }
+        other => errno_to_filesystem(other, path.clone(), operation),
+    }
+}
+
 /// `mkdir -p` walk: create each component fd-relative with `mkdirat`, ignoring
 /// `EEXIST` (idempotent), then descend via `openat(O_DIRECTORY|O_NOFOLLOW)`. A
-/// symlinked component fails with `ELOOP` → `SymlinkEscape`.
+/// symlinked component is rejected as `SymlinkEscape` (disambiguated from a
+/// benign regular-file component via `fstatat`; see `classify_descend_errno`).
 fn mkdir_all(
     root: &OwnedFd,
     tail: &ResolvedTail,
@@ -513,7 +547,13 @@ fn mkdir_all(
             Mode::empty(),
         )
         .map_err(|errno| {
-            errno_to_filesystem(errno, path.clone(), FilesystemOperation::CreateDirAll)
+            classify_descend_errno(
+                errno,
+                parent_fd,
+                component,
+                path,
+                FilesystemOperation::CreateDirAll,
+            )
         })?;
         current = Some(next);
     }
@@ -562,18 +602,6 @@ fn delete_at(parent_fd: &OwnedFd, name: &str, path: &VirtualPath) -> Result<(), 
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-/// Best-effort host-path reconstruction for the advisory `is_sensitive_path`
-/// flag only. Never used to open files and cannot affect containment.
-fn reconstruct_host_path(host_root: &std::path::Path, path: &VirtualPath) -> PathBuf {
-    let mut out = host_root.to_path_buf();
-    for segment in path.as_str().trim_start_matches('/').split('/') {
-        if !segment.is_empty() {
-            out.push(segment);
-        }
-    }
-    out
-}
-
 fn file_type_from_rustix(ft: RustixFileType) -> FileType {
     if ft == RustixFileType::RegularFile {
         FileType::File
@@ -609,6 +637,11 @@ fn map_resolve_error(
     match error {
         ResolveError::Escape => FilesystemError::SymlinkEscape { path },
         ResolveError::NotFound => FilesystemError::NotFound { path, operation },
+        ResolveError::NotADirectory => FilesystemError::Backend {
+            path,
+            operation,
+            reason: "not a directory".to_string(),
+        },
         ResolveError::Os(errno) => errno_to_filesystem(errno, path, operation),
     }
 }
@@ -626,13 +659,23 @@ fn errno_to_filesystem(
         "local filesystem backend errno"
     );
     match errno {
-        // See `ResolveError::from` for why `ENOTDIR` is treated as an escape:
-        // every `openat` in this backend uses `O_NOFOLLOW`, so `ENOTDIR` on a
-        // directory-typed open means a symlinked / non-directory ancestor — a
-        // containment violation, matching Linux's `ELOOP`/`EXDEV`.
-        rustix::io::Errno::LOOP | rustix::io::Errno::XDEV | rustix::io::Errno::NOTDIR => {
+        // Only `ELOOP`/`EXDEV` indicate a genuine containment escape: every
+        // `openat` in this backend uses `O_NOFOLLOW`, so a symlinked component is
+        // reported as `ELOOP` and a cross-device hop as `EXDEV`.
+        rustix::io::Errno::LOOP | rustix::io::Errno::XDEV => {
             FilesystemError::SymlinkEscape { path }
         }
+        // `ENOTDIR` means a path component is a regular file where a directory
+        // was expected (e.g. `/workspace/file/child` where `file` is a file).
+        // With `O_NOFOLLOW` a symlink would surface as `ELOOP`, never `ENOTDIR`,
+        // so this is a normal "not a directory" error — NOT a symlink escape.
+        // Mapping it to `SymlinkEscape` would be a behavioral regression and
+        // would pollute escape telemetry.
+        rustix::io::Errno::NOTDIR => FilesystemError::Backend {
+            path,
+            operation,
+            reason: "not a directory".to_string(),
+        },
         rustix::io::Errno::NOENT => FilesystemError::NotFound { path, operation },
         other => FilesystemError::Backend {
             path,

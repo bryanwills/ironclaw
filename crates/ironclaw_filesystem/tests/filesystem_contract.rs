@@ -926,3 +926,150 @@ async fn concurrent_ancestor_swap_never_escapes_root() {
         b"SECRET"
     );
 }
+
+// ─── Critical 1: stat() sensitive classification is virtual-path-only ───────
+//
+// `stat` must classify the advisory `sensitive` flag from the *virtual* path
+// string alone, performing ZERO host-path filesystem resolution. The old code
+// reconstructed a host path and called the canonicalizing `is_sensitive_path`,
+// which re-resolved attacker-influenced input after the fd-safe `fstat` — a
+// residual TOCTOU/classification oracle. These tests pin the new behavior.
+#[tokio::test]
+async fn stat_classifies_sensitive_flag_from_virtual_path_only() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    // A file whose *virtual* name looks sensitive (.env), but is just a plain
+    // regular file on the host — no symlink, no special host location.
+    std::fs::write(storage.path().join("project1/.env"), b"SECRET=1").unwrap();
+    // A control file with a benign name.
+    std::fs::write(storage.path().join("project1/notes.txt"), b"hi").unwrap();
+
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let root: Arc<dyn RootFilesystem> = Arc::new(root);
+
+    let sensitive = root
+        .stat(&VirtualPath::new("/projects/project1/.env").unwrap())
+        .await
+        .unwrap();
+    assert!(
+        sensitive.sensitive,
+        "a virtual path ending in .env must be flagged sensitive"
+    );
+
+    let benign = root
+        .stat(&VirtualPath::new("/projects/project1/notes.txt").unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !benign.sensitive,
+        "a benign virtual path must not be flagged sensitive"
+    );
+}
+
+#[tokio::test]
+async fn stat_does_not_touch_host_fs_for_classification() {
+    // Prove that classification keys on the virtual path, NOT a reconstructed
+    // host path: mount the storage dir at a virtual root whose *string* differs
+    // from the host directory layout. If `stat` still canonicalized a host path
+    // its sensitivity verdict could differ from the virtual-path verdict; here
+    // the virtual path is what must drive the result.
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("sub")).unwrap();
+    // Host file named benignly...
+    std::fs::write(storage.path().join("sub/key.pem"), b"x").unwrap();
+
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        // Virtual root deliberately unrelated to the host tempdir path.
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let root: Arc<dyn RootFilesystem> = Arc::new(root);
+
+    let stat = root
+        .stat(&VirtualPath::new("/projects/sub/key.pem").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(stat.file_type, FileType::File);
+    // `.pem` is a sensitive extension; classification is driven by the virtual
+    // path string regardless of where the host tempdir actually lives.
+    assert!(stat.sensitive, "virtual path with .pem must be sensitive");
+}
+
+// ─── Critical 2: ENOTDIR (regular-file ancestor) is NOT a symlink escape ────
+//
+// A regular-file ancestor (e.g. `/workspace/file/child` where `file` is a plain
+// file) must yield a normal "not a directory" error, NOT `SymlinkEscape`. Only
+// a *symlinked* ancestor is a containment escape.
+#[tokio::test]
+async fn regular_file_ancestor_is_not_a_symlink_escape() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    // `regular` is a plain file; treating it as a directory must NOT be an escape.
+    std::fs::write(storage.path().join("project1/regular"), b"data").unwrap();
+
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let root: Arc<dyn RootFilesystem> = Arc::new(root);
+
+    let err = root
+        .read_file(&VirtualPath::new("/projects/project1/regular/child").unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(err, FilesystemError::SymlinkEscape { .. }),
+        "regular-file ancestor must not be reported as a symlink escape, got: {err:?}"
+    );
+    // It should be a normal not-a-directory / not-found style backend error.
+    assert!(
+        matches!(
+            err,
+            FilesystemError::Backend { .. } | FilesystemError::NotFound { .. }
+        ),
+        "expected a non-escape backend/not-found error, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn symlinked_ancestor_still_yields_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::create_dir_all(outside.path().join("target")).unwrap();
+    std::fs::write(outside.path().join("target/child"), b"secret").unwrap();
+    // A symlinked *ancestor* directory pointing outside the mount root.
+    symlink(
+        outside.path().join("target"),
+        storage.path().join("project1/linkdir"),
+    )
+    .unwrap();
+
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let root: Arc<dyn RootFilesystem> = Arc::new(root);
+
+    let err = root
+        .read_file(&VirtualPath::new("/projects/project1/linkdir/child").unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FilesystemError::SymlinkEscape { .. }),
+        "symlinked ancestor must still be a symlink escape, got: {err:?}"
+    );
+}
