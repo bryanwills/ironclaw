@@ -262,7 +262,7 @@ async fn webui_event_stream_accepts_legacy_partial_origin_cursor() {
 }
 
 #[test]
-fn webui_projection_snapshot_retains_activity_fanout_for_resumable_delivery() {
+fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping() {
     let tenant_id = TenantId::new("webui-activity-cap-tenant").unwrap();
     let user_id = UserId::new("webui-activity-cap-user").unwrap();
     let agent_id = AgentId::new("webui-activity-cap-agent").unwrap();
@@ -319,8 +319,8 @@ fn webui_projection_snapshot_retains_activity_fanout_for_resumable_delivery() {
     .unwrap()
     .unwrap();
 
-    assert_eq!(total, WEBUI_PROJECTION_PAGE_LIMIT + 11);
-    assert_eq!(payloads.len(), WEBUI_PROJECTION_PAGE_LIMIT + 11);
+    assert_eq!(total, WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
+    assert_eq!(payloads.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
     assert!(matches!(
         &payloads[0].payload,
         ProductOutboundPayload::ProjectionSnapshot { state } if state.items.len() == 1
@@ -333,12 +333,12 @@ fn webui_projection_snapshot_retains_activity_fanout_for_resumable_delivery() {
                 ProductOutboundPayload::CapabilityActivity(_)
             ))
             .count(),
-        WEBUI_PROJECTION_PAGE_LIMIT + 10
+        WEBUI_PROJECTION_PAGE_LIMIT
     );
 }
 
 #[tokio::test]
-async fn webui_event_stream_resumes_overflow_activity_fanout_without_dropping() {
+async fn webui_event_stream_bounds_large_activity_history_before_dto_construction() {
     let tenant_id = TenantId::new("webui-activity-overflow-tenant").unwrap();
     let user_id = UserId::new("webui-activity-overflow-user").unwrap();
     let agent_id = AgentId::new("webui-activity-overflow-agent").unwrap();
@@ -388,15 +388,9 @@ async fn webui_event_stream_resumes_overflow_activity_fanout_without_dropping() 
             .as_str(),
     )
     .unwrap();
-    assert!(initial_cursor.runtime.is_none());
-    assert_eq!(
-        initial_cursor.runtime_item.expect("runtime item").as_u64(),
-        activity_count as u64
-    );
-    assert_eq!(
-        initial_cursor.runtime_payloads_delivered,
-        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS
-    );
+    assert!(initial_cursor.runtime.is_some());
+    assert!(initial_cursor.runtime_item.is_none());
+    assert_eq!(initial_cursor.runtime_payloads_delivered, 0);
     assert!(matches!(
         initial_events[0].payload(),
         ProductOutboundPayload::ProjectionSnapshot { .. }
@@ -418,10 +412,9 @@ async fn webui_event_stream_resumes_overflow_activity_fanout_without_dropping() 
         .await
         .unwrap();
 
-    assert_eq!(resumed_events.len(), 4);
+    assert!(resumed_events.is_empty());
     let emitted_activity_count = initial_events
         .iter()
-        .chain(resumed_events.iter())
         .filter(|event| {
             matches!(
                 event.payload(),
@@ -429,17 +422,7 @@ async fn webui_event_stream_resumes_overflow_activity_fanout_without_dropping() 
             )
         })
         .count();
-    assert_eq!(emitted_activity_count, activity_count);
-    let resumed_cursor = parse_webui_projection_cursor(
-        resumed_events
-            .last()
-            .expect("resumed event")
-            .projection_cursor()
-            .as_str(),
-    )
-    .unwrap();
-    assert!(resumed_cursor.runtime.is_some());
-    assert_eq!(resumed_cursor.runtime_payloads_delivered, 0);
+    assert_eq!(emitted_activity_count, WEBUI_PROJECTION_PAGE_LIMIT);
 
     let final_events = services
         .webui_event_stream()
@@ -452,9 +435,9 @@ async fn webui_event_stream_resumes_overflow_activity_fanout_without_dropping() 
                 ThreadId::new("webui-activity-overflow-thread").unwrap(),
             ),
             after_cursor: Some(
-                resumed_events
+                initial_events
                     .last()
-                    .expect("resumed event")
+                    .expect("initial event")
                     .projection_cursor()
                     .clone(),
             ),
@@ -518,22 +501,22 @@ async fn webui_event_stream_rebases_stale_partial_activity_cursor() {
     let agent_id = AgentId::new("webui-activity-stale-agent").unwrap();
     let thread_id = ThreadId::new("webui-activity-stale-thread").unwrap();
     let capability = CapabilityId::new("script.echo").unwrap();
+    let initial_invocation = InvocationId::new();
+    let newer_invocation = InvocationId::new();
     let event_log = Arc::new(InMemoryDurableEventLog::new());
-    for _ in 0..WEBUI_RUNTIME_ITEM_MAX_PAYLOADS {
-        event_log
-            .append(RuntimeEvent::dispatch_requested(
-                resource_scope(
-                    &tenant_id,
-                    &user_id,
-                    &agent_id,
-                    &thread_id,
-                    InvocationId::new(),
-                ),
-                capability.clone(),
-            ))
-            .await
-            .unwrap();
-    }
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                initial_invocation,
+            ),
+            capability.clone(),
+        ))
+        .await
+        .unwrap();
 
     let event_log_dyn: Arc<dyn DurableEventLog> = event_log.clone();
     let actor = TurnActor::new(user_id.clone());
@@ -556,11 +539,8 @@ async fn webui_event_stream_rebases_stale_partial_activity_cursor() {
         })
         .await
         .unwrap();
-    let stale_cursor = initial_events
-        .last()
-        .expect("initial event")
-        .projection_cursor()
-        .clone();
+    assert_eq!(initial_events.len(), 2);
+    let stale_cursor = initial_events[0].projection_cursor().clone();
 
     event_log
         .append(RuntimeEvent::dispatch_requested(
@@ -569,7 +549,7 @@ async fn webui_event_stream_rebases_stale_partial_activity_cursor() {
                 &user_id,
                 &agent_id,
                 &thread_id,
-                InvocationId::new(),
+                newer_invocation,
             ),
             capability,
         ))
@@ -586,11 +566,25 @@ async fn webui_event_stream_rebases_stale_partial_activity_cursor() {
         .await
         .unwrap();
 
-    assert_eq!(resumed_events.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
+    assert_eq!(resumed_events.len(), 3);
     assert!(matches!(
         resumed_events[0].payload(),
         ProductOutboundPayload::ProjectionSnapshot { .. }
     ));
+    assert!(resumed_events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::CapabilityActivity(activity)
+                if activity.invocation_id == initial_invocation
+        )
+    }));
+    assert!(resumed_events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::CapabilityActivity(activity)
+                if activity.invocation_id == newer_invocation
+        )
+    }));
     let resumed_cursor = parse_webui_projection_cursor(
         resumed_events
             .last()
@@ -599,14 +593,9 @@ async fn webui_event_stream_rebases_stale_partial_activity_cursor() {
             .as_str(),
     )
     .unwrap();
-    assert_eq!(
-        resumed_cursor.runtime_item.expect("runtime item").as_u64(),
-        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS as u64 + 1
-    );
-    assert_eq!(
-        resumed_cursor.runtime_payloads_delivered,
-        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS
-    );
+    assert!(resumed_cursor.runtime.is_some());
+    assert!(resumed_cursor.runtime_item.is_none());
+    assert_eq!(resumed_cursor.runtime_payloads_delivered, 0);
 }
 
 #[tokio::test]

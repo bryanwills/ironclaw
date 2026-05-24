@@ -1004,6 +1004,49 @@ async fn replay_projection_folds_dispatch_lifecycle_into_capability_activity() {
 }
 
 #[tokio::test]
+async fn replay_projection_snapshot_bounds_capability_activity_window_to_request_limit() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-tool-activity-window").unwrap());
+    let capability = capability_id();
+    let mut invocations = Vec::new();
+
+    for _ in 0..5 {
+        let invocation_id = InvocationId::new();
+        invocations.push(invocation_id);
+        let mut invocation_scope = scope.clone();
+        invocation_scope.invocation_id = invocation_id;
+        log.append(RuntimeEvent::dispatch_requested(
+            invocation_scope,
+            capability.clone(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 3,
+        })
+        .await
+        .unwrap();
+
+    let activity_invocations = snapshot
+        .capability_activities
+        .iter()
+        .map(|activity| activity.invocation_id)
+        .collect::<Vec<_>>();
+    assert_eq!(activity_invocations.len(), 3);
+    assert!(activity_invocations.contains(&invocations[2]));
+    assert!(activity_invocations.contains(&invocations[3]));
+    assert!(activity_invocations.contains(&invocations[4]));
+    assert!(!activity_invocations.contains(&invocations[0]));
+    assert!(!activity_invocations.contains(&invocations[1]));
+}
+
+#[tokio::test]
 async fn replay_projection_updates_capability_activity_only_for_touched_invocations() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));

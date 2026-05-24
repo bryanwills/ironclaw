@@ -1216,15 +1216,18 @@ impl ReplayEventProjectionService {
     /// consumers that use snapshots to rebase after a replay gap.
     ///
     /// The same bounded-memory contract applies: pages are folded
-    /// incrementally, allocation is `O(scoped runs)` regardless of stream
-    /// length, and scanning more than [`STATE_REPLAY_MAX_EVENTS`] events
-    /// surfaces [`ProjectionError::RebaseRequired`] instead of silently
-    /// returning a partial run-state view.
+    /// incrementally, allocation is `O(scoped runs + requested activity
+    /// window)` regardless of stream length, and scanning more than
+    /// [`STATE_REPLAY_MAX_EVENTS`] events surfaces
+    /// [`ProjectionError::RebaseRequired`] instead of silently returning a
+    /// partial run-state view.
     async fn fold_runtime_to_head(
         &self,
         scope: &ProjectionScope,
+        capability_activity_limit: usize,
     ) -> Result<RuntimeProjectionState, ProjectionError> {
-        let mut state = RuntimeProjectionState::default();
+        let mut state =
+            RuntimeProjectionState::with_capability_activity_limit(capability_activity_limit);
         let mut after: Option<EventCursor> = None;
         let mut scanned: usize = 0;
         loop {
@@ -1352,6 +1355,7 @@ impl EventProjectionService for ReplayEventProjectionService {
         request: ProjectionRequest,
     ) -> Result<ProjectionSnapshot, ProjectionError> {
         let scope = request.scope.clone();
+        let limit = request.limit;
         let page = self.read_runtime(request).await?;
         let timeline = project_timeline(&page.entries);
         // Snapshot's `runs` always reflect the current scoped stream head,
@@ -1359,7 +1363,7 @@ impl EventProjectionService for ReplayEventProjectionService {
         // page (or a `limit=1` request) would otherwise surface a stale
         // `Running` status for a run whose terminal event lives on the
         // next page — see PR #3212 review feedback (discussion_r3195454963).
-        let folded = self.fold_runtime_to_head(&scope).await?;
+        let folded = self.fold_runtime_to_head(&scope, limit).await?;
         let (mut runs, mut capability_activities) = folded.into_parts();
         sort_runs_for_projection(&mut runs);
         sort_capability_activities_for_projection(&mut capability_activities);

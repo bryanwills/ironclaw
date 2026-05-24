@@ -125,18 +125,19 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
 
         let resumes_runtime_item = origin_cursor.runtime_payloads_delivered > 0;
         let mut batch = WebuiProjectionBatch::new(origin_cursor);
-        if let Some(item) = subscription.next().await {
-            if batch.push_runtime_item(item, &request.scope)? && !resumes_runtime_item {
-                for _ in 1..WEBUI_PROJECTION_PAGE_LIMIT {
-                    if !batch.has_runtime_payload_capacity() {
-                        break;
-                    }
-                    let Some(item) = subscription.try_next_buffered() else {
-                        break;
-                    };
-                    if !batch.push_runtime_item(item, &request.scope)? {
-                        break;
-                    }
+        if let Some(item) = subscription.next().await
+            && batch.push_runtime_item(item, &request.scope)?
+            && !resumes_runtime_item
+        {
+            for _ in 1..WEBUI_PROJECTION_PAGE_LIMIT {
+                if !batch.has_runtime_payload_capacity() {
+                    break;
+                }
+                let Some(item) = subscription.try_next_buffered() else {
+                    break;
+                };
+                if !batch.push_runtime_item(item, &request.scope)? {
+                    break;
                 }
             }
         }
@@ -394,16 +395,7 @@ fn item_to_payloads(
     expected_item: Option<EventCursor>,
     already_delivered: usize,
     capacity: usize,
-) -> Result<
-    Option<(
-        EventProjectionCursor,
-        EventProjectionCursor,
-        Vec<RuntimePayload>,
-        usize,
-        usize,
-    )>,
-    ProductAdapterError,
-> {
+) -> RuntimePayloadItemResult {
     match item {
         ProjectionStreamItem::Snapshot(envelope) => {
             let cursor = envelope.cursor();
@@ -455,16 +447,7 @@ fn snapshot_payloads(
     expected_item: Option<EventCursor>,
     already_delivered: usize,
     capacity: usize,
-) -> Result<
-    Option<(
-        EventProjectionCursor,
-        EventProjectionCursor,
-        Vec<RuntimePayload>,
-        usize,
-        usize,
-    )>,
-    ProductAdapterError,
-> {
+) -> RuntimePayloadItemResult {
     let item_cursor = snapshot_item_cursor(&snapshot, &cursor);
     let candidates = snapshot_payload_candidates(snapshot, cursor.scope.clone());
     if candidates.is_empty() {
@@ -502,16 +485,7 @@ fn replay_payloads(
     expected_item: Option<EventCursor>,
     already_delivered: usize,
     capacity: usize,
-) -> Result<
-    Option<(
-        EventProjectionCursor,
-        EventProjectionCursor,
-        Vec<RuntimePayload>,
-        usize,
-        usize,
-    )>,
-    ProductAdapterError,
-> {
+) -> RuntimePayloadItemResult {
     let item_cursor = replay_item_cursor(replay, &cursor);
     let candidates = replay_payload_candidates(replay, cursor.scope.clone());
     if candidates.is_empty() {
@@ -547,6 +521,15 @@ struct RuntimePayload {
     payload: ProductOutboundPayload,
 }
 
+type RuntimePayloadItem = (
+    EventProjectionCursor,
+    EventProjectionCursor,
+    Vec<RuntimePayload>,
+    usize,
+    usize,
+);
+type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
+
 enum RuntimePayloadCandidate {
     State { runs: Vec<RunStatusProjection> },
     CapabilityActivity(CapabilityActivityProjection),
@@ -562,22 +545,33 @@ fn snapshot_payload_candidates(
     snapshot: ProjectionSnapshot,
     _scope: EventProjectionScope,
 ) -> Vec<RuntimePayloadCandidate> {
-    runtime_payload_candidates(snapshot.runs, snapshot.capability_activities)
+    runtime_payload_candidates(
+        snapshot.runs,
+        snapshot.capability_activities,
+        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS,
+    )
 }
 
 fn replay_payload_candidates(
     replay: &ProjectionReplay,
     _scope: EventProjectionScope,
 ) -> Vec<RuntimePayloadCandidate> {
-    runtime_payload_candidates(replay.runs.clone(), replay.capability_activities.clone())
+    runtime_payload_candidates(
+        replay.runs.clone(),
+        replay.capability_activities.clone(),
+        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS,
+    )
 }
 
 fn runtime_payload_candidates(
     runs: Vec<RunStatusProjection>,
     capability_activities: Vec<CapabilityActivityProjection>,
+    max_payloads: usize,
 ) -> Vec<RuntimePayloadCandidate> {
+    let state_payloads = usize::from(!runs.is_empty());
+    let activity_payloads = max_payloads.saturating_sub(state_payloads);
     let mut candidates = Vec::with_capacity(
-        usize::from(!runs.is_empty()).saturating_add(capability_activities.len()),
+        state_payloads.saturating_add(activity_payloads.min(capability_activities.len())),
     );
     if !runs.is_empty() {
         candidates.push(RuntimePayloadCandidate::State { runs });
@@ -585,6 +579,7 @@ fn runtime_payload_candidates(
     candidates.extend(
         capability_activities
             .into_iter()
+            .take(activity_payloads)
             .map(RuntimePayloadCandidate::CapabilityActivity),
     );
     candidates

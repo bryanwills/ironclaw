@@ -12,12 +12,24 @@ use crate::{
 pub(crate) struct RuntimeProjectionState {
     runs: HashMap<InvocationId, RunStatusProjection>,
     capability_activities: HashMap<InvocationId, CapabilityActivityProjection>,
+    capability_activity_limit: Option<usize>,
 }
 
 impl RuntimeProjectionState {
+    pub(crate) fn with_capability_activity_limit(limit: usize) -> Self {
+        Self {
+            capability_activity_limit: Some(limit),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn apply(&mut self, entry: &EventLogEntry<RuntimeEvent>) {
         apply_run_event(&mut self.runs, entry);
         apply_capability_activity_event(&mut self.capability_activities, entry);
+        enforce_capability_activity_limit(
+            &mut self.capability_activities,
+            self.capability_activity_limit,
+        );
     }
 
     pub(crate) fn into_parts(
@@ -28,6 +40,40 @@ impl RuntimeProjectionState {
             self.capability_activities.into_values().collect(),
         )
     }
+}
+
+fn enforce_capability_activity_limit(
+    activities: &mut HashMap<InvocationId, CapabilityActivityProjection>,
+    limit: Option<usize>,
+) {
+    let Some(limit) = limit else {
+        return;
+    };
+    while activities.len() > limit {
+        let Some(invocation_id) = least_recent_capability_activity(activities) else {
+            return;
+        };
+        activities.remove(&invocation_id);
+    }
+}
+
+fn least_recent_capability_activity(
+    activities: &HashMap<InvocationId, CapabilityActivityProjection>,
+) -> Option<InvocationId> {
+    activities
+        .iter()
+        .min_by(|(_, left), (_, right)| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.last_cursor.cmp(&right.last_cursor))
+                .then_with(|| {
+                    right
+                        .invocation_id
+                        .as_uuid()
+                        .cmp(&left.invocation_id.as_uuid())
+                })
+        })
+        .map(|(invocation_id, _)| *invocation_id)
 }
 
 pub(crate) fn sort_runs_for_projection(runs: &mut [RunStatusProjection]) {
