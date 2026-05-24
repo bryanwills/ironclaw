@@ -2,6 +2,9 @@ use super::turn_events::WEBUI_TURN_EVENT_PAGE_LIMIT;
 use super::*;
 
 use async_trait::async_trait;
+use ironclaw_event_projections::{
+    CapabilityActivityProjection, ProjectionSnapshot, ThreadTimeline,
+};
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, ResourceScope, RuntimeKind, TenantId,
@@ -180,6 +183,71 @@ async fn webui_event_stream_resumes_inside_multi_payload_runtime_projection_item
         parse_webui_projection_cursor(resumed_events[0].projection_cursor().as_str()).unwrap();
     assert!(resumed_cursor.runtime.is_some());
     assert_eq!(resumed_cursor.runtime_payloads_delivered, 0);
+}
+
+#[test]
+fn webui_projection_snapshot_caps_activity_fanout_to_resumable_payload_count() {
+    let tenant_id = TenantId::new("webui-activity-cap-tenant").unwrap();
+    let user_id = UserId::new("webui-activity-cap-user").unwrap();
+    let agent_id = AgentId::new("webui-activity-cap-agent").unwrap();
+    let thread_id = ThreadId::new("webui-activity-cap-thread").unwrap();
+    let capability = CapabilityId::new("script.echo").unwrap();
+    let actor = TurnActor::new(user_id);
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone());
+    let projection_scope = runtime_projection_scope(&actor, &scope);
+    let cursor =
+        EventProjectionCursor::for_scope(projection_scope, ironclaw_events::EventCursor::new(1));
+    let snapshot = ProjectionSnapshot {
+        timeline: ThreadTimeline {
+            entries: Vec::new(),
+        },
+        runs: vec![RunStatusProjection {
+            invocation_id: InvocationId::new(),
+            capability_id: capability.clone(),
+            thread_id: Some(thread_id.clone()),
+            status: RunProjectionStatus::Running,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        }],
+        capability_activities: (0..(WEBUI_PROJECTION_PAGE_LIMIT + 10))
+            .map(|index| CapabilityActivityProjection {
+                invocation_id: InvocationId::new(),
+                capability_id: capability.clone(),
+                thread_id: Some(thread_id.clone()),
+                status: ironclaw_event_projections::CapabilityActivityStatus::Running,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                output_bytes: None,
+                error_kind: None,
+                last_cursor: ironclaw_events::EventCursor::new(index as u64 + 1),
+                updated_at: chrono::Utc::now(),
+            })
+            .collect(),
+        next_cursor: cursor.clone(),
+        truncated: false,
+    };
+
+    let (_, payloads) = snapshot_payloads(&scope, snapshot, cursor)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(payloads.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
+    assert!(matches!(
+        &payloads[0],
+        ProductOutboundPayload::ProjectionSnapshot { state } if state.items.len() == 1
+    ));
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| matches!(payload, ProductOutboundPayload::CapabilityActivity(_)))
+            .count(),
+        WEBUI_PROJECTION_PAGE_LIMIT
+    );
 }
 
 #[tokio::test]

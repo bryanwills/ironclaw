@@ -31,6 +31,7 @@ mod turn_events;
 use turn_events::{TurnEventBridge, TurnEventPayload};
 
 const WEBUI_PROJECTION_PAGE_LIMIT: usize = 256;
+const WEBUI_RUNTIME_ITEM_MAX_PAYLOADS: usize = WEBUI_PROJECTION_PAGE_LIMIT + 1;
 const WEBUI_PROJECTION_ADAPTER_ID: &str = "webui_v2";
 const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
 
@@ -353,7 +354,11 @@ fn snapshot_payloads(
     if let Some(state) = run_status_projection_state(scope, snapshot.runs)? {
         payloads.push(ProductOutboundPayload::ProjectionSnapshot { state });
     }
-    payloads.extend(capability_activity_payloads(snapshot.capability_activities));
+    let activity_limit = remaining_runtime_payload_slots(payloads.len());
+    payloads.extend(capability_activity_payloads(
+        snapshot.capability_activities,
+        activity_limit,
+    ));
     Ok((!payloads.is_empty()).then_some((cursor, payloads)))
 }
 
@@ -366,10 +371,16 @@ fn replay_payloads(
     if let Some(state) = run_status_projection_state(scope, replay.runs.clone())? {
         payloads.push(ProductOutboundPayload::ProjectionUpdate { state });
     }
+    let activity_limit = remaining_runtime_payload_slots(payloads.len());
     payloads.extend(capability_activity_payloads(
         replay.capability_activities.clone(),
+        activity_limit,
     ));
     Ok((!payloads.is_empty()).then_some((cursor, payloads)))
+}
+
+fn remaining_runtime_payload_slots(existing_payloads: usize) -> usize {
+    WEBUI_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(existing_payloads)
 }
 
 fn snapshot_from_envelope(
@@ -413,9 +424,11 @@ fn run_status_projection_state(
 
 fn capability_activity_payloads(
     activities: Vec<CapabilityActivityProjection>,
+    limit: usize,
 ) -> Vec<ProductOutboundPayload> {
     activities
         .into_iter()
+        .take(limit)
         .map(|activity| {
             ProductOutboundPayload::CapabilityActivity(CapabilityActivityView {
                 invocation_id: activity.invocation_id,

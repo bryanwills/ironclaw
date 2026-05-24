@@ -1410,6 +1410,15 @@ async fn replay_projection_keeps_spawned_process_run_active_until_terminal_proce
     assert_eq!(snapshot.runs.len(), 1);
     assert_eq!(snapshot.runs[0].process_id, Some(process_id));
     assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Running);
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    assert_eq!(
+        snapshot.capability_activities[0].process_id,
+        Some(process_id)
+    );
+    assert_eq!(
+        snapshot.capability_activities[0].status,
+        CapabilityActivityStatus::Running
+    );
 }
 
 #[tokio::test]

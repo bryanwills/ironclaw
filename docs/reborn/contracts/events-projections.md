@@ -109,6 +109,9 @@ Reducer rules:
 - product-facing capability activity projections expose only metadata-safe
   lifecycle facts; raw tool arguments, raw output, command strings, host paths,
   and provider payloads stay outside the projection contract
+- transport adapters may bound activity fan-out per projection item; bounded
+  snapshots must prefer the most recently updated activity facts and keep
+  reconnect cursors resumable
 - may cache output, but cache is not source of truth
 - must tolerate unknown future event types by ignoring or preserving them according to version policy
 

@@ -153,6 +153,10 @@ tool/capability execution. They expose only the safe activity DTO
 (`invocation_id`, `capability_id`, status, provider/runtime/process metadata,
 byte counts, sanitized error kind, timestamp) and must not carry raw tool
 arguments, raw results, command strings, host paths, or provider payloads.
+Snapshot/replay drains bound activity fan-out per projection item so every
+emitted SSE cursor remains resumable through `Last-Event-ID`; when the folded
+activity set is larger than the bound, the stream emits the most recently
+updated activity facts.
 
 The browser resumes via `Last-Event-ID` on auto-reconnect; the handler
 prefers that header over the `?after_cursor=` query parameter, falling

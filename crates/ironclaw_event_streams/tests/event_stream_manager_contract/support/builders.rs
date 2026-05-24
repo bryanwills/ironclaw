@@ -129,6 +129,19 @@ fn snapshot_for_thread(scope: &ProjectionScope, cursor: u64, thread: &str) -> Pr
     snapshot
 }
 
+fn snapshot_with_activity_thread(
+    scope: &ProjectionScope,
+    cursor: u64,
+    thread: &str,
+) -> ProjectionSnapshot {
+    let mut snapshot = snapshot(scope, cursor);
+    let thread_id = Some(ThreadId::new(thread).unwrap());
+    for activity in &mut snapshot.capability_activities {
+        activity.thread_id = thread_id.clone();
+    }
+    snapshot
+}
+
 fn replay(scope: &ProjectionScope, cursor: u64, next: u64) -> ProjectionReplay {
     ProjectionReplay {
         updates: vec![timeline_entry(
