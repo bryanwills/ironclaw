@@ -13,7 +13,7 @@ use ironclaw_event_streams::{
     ProjectionStreamError as EventProjectionStreamError, ProjectionStreamItem,
     ProjectionSubscribeRequest, ProjectionTarget, ProjectionViewClass, SubscriberCapabilities,
 };
-use ironclaw_events::{DurableEventLog, EventStreamKey, ReadScope};
+use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -106,12 +106,12 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
             .map(|cursor| parse_webui_projection_cursor(cursor.as_str()))
             .transpose()?
             .unwrap_or_default();
-        validate_webui_projection_cursor_scope(&origin_cursor, &request.scope)?;
+        validate_webui_projection_cursor_scope(&origin_cursor, &request.scope, &projection_scope)?;
         let mut subscription = self
             .manager
             .subscribe(ProjectionSubscribeRequest {
                 actor: request.actor.clone(),
-                scope: projection_scope,
+                scope: projection_scope.clone(),
                 view: ProjectionViewClass::ProductThread,
                 target: ProjectionTarget::Thread {
                     thread_id: request.scope.thread_id.clone(),
@@ -123,14 +123,38 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
             .await
             .map_err(map_event_stream_error)?;
 
-        let mut batch = WebuiProjectionBatch::new(origin_cursor);
+        let resumes_runtime_item = origin_cursor.runtime_payloads_delivered > 0;
+        let mut batch = WebuiProjectionBatch::new(
+            origin_cursor,
+            EventProjectionCursor::origin_for_scope(projection_scope),
+        );
         if let Some(item) = subscription.next().await {
-            batch.push_runtime_item(item, &request.scope)?;
-            for _ in 1..WEBUI_PROJECTION_PAGE_LIMIT {
+            if batch.push_runtime_item(item, &request.scope)? && !resumes_runtime_item {
+                for _ in 1..WEBUI_PROJECTION_PAGE_LIMIT {
+                    if !batch.has_runtime_payload_capacity() {
+                        break;
+                    }
+                    let Some(item) = subscription.try_next_buffered() else {
+                        break;
+                    };
+                    if !batch.push_runtime_item(item, &request.scope)? {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if batch.runtime_payloads_pushed == 0 && !resumes_runtime_item {
+            for _ in 0..WEBUI_PROJECTION_PAGE_LIMIT {
+                if !batch.has_runtime_payload_capacity() {
+                    break;
+                }
                 let Some(item) = subscription.try_next_buffered() else {
                     break;
                 };
-                batch.push_runtime_item(item, &request.scope)?;
+                if !batch.push_runtime_item(item, &request.scope)? {
+                    break;
+                }
             }
         }
 
@@ -166,13 +190,17 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
 
 struct WebuiProjectionBatch {
     cursor: WebuiProjectionCursor,
+    runtime_origin: EventProjectionCursor,
+    runtime_payloads_pushed: usize,
     payloads: Vec<(WebuiProjectionCursor, ProductOutboundPayload)>,
 }
 
 impl WebuiProjectionBatch {
-    fn new(cursor: WebuiProjectionCursor) -> Self {
+    fn new(cursor: WebuiProjectionCursor, runtime_origin: EventProjectionCursor) -> Self {
         Self {
             cursor,
+            runtime_origin,
+            runtime_payloads_pushed: 0,
             payloads: Vec::new(),
         }
     }
@@ -183,44 +211,91 @@ impl WebuiProjectionBatch {
 
     fn push_runtime_payloads(
         &mut self,
-        cursor: EventProjectionCursor,
-        payloads: Vec<ProductOutboundPayload>,
-    ) {
-        let total = payloads.len();
+        final_cursor: EventProjectionCursor,
+        item_cursor: EventProjectionCursor,
+        payloads: Vec<RuntimePayload>,
+        total: usize,
+        already_delivered: usize,
+    ) -> Result<bool, ProductAdapterError> {
         if total == 0 {
-            return;
+            return Ok(true);
         }
 
-        let base_runtime = self.cursor.runtime.clone();
-        let already_delivered = self.cursor.runtime_payloads_delivered.min(total);
+        if already_delivered > 0 && already_delivered >= total {
+            return Err(ProductAdapterError::InvalidIdentifier {
+                kind: "projection_cursor",
+                reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
+            });
+        }
         if already_delivered == total {
-            self.cursor.runtime = Some(cursor);
+            self.cursor.runtime = Some(max_projection_cursor(final_cursor, item_cursor));
+            self.cursor.runtime_item = None;
             self.cursor.runtime_payloads_delivered = 0;
-            return;
+            return Ok(true);
         }
 
-        for (index, payload) in payloads.into_iter().enumerate().skip(already_delivered) {
-            let delivered = index + 1;
+        let remaining_capacity =
+            WEBUI_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(self.runtime_payloads_pushed);
+        if remaining_capacity == 0 {
+            return Ok(false);
+        }
+
+        for (index, runtime_payload) in payloads.into_iter().take(remaining_capacity).enumerate() {
+            let delivered = already_delivered + index + 1;
+            self.runtime_payloads_pushed += 1;
             if delivered == total {
-                self.cursor.runtime = Some(cursor.clone());
+                self.cursor.runtime = Some(max_projection_cursor(
+                    final_cursor.clone(),
+                    item_cursor.clone(),
+                ));
+                self.cursor.runtime_item = None;
                 self.cursor.runtime_payloads_delivered = 0;
             } else {
-                self.cursor.runtime = base_runtime.clone();
+                self.cursor.runtime = self.cursor.runtime.clone();
+                self.cursor.runtime_item = Some(item_cursor.runtime);
                 self.cursor.runtime_payloads_delivered = delivered;
             }
-            self.push(payload);
+            self.push(runtime_payload.payload);
         }
+        Ok(self.cursor.runtime_payloads_delivered == 0)
     }
 
     fn push_runtime_item(
         &mut self,
         item: ProjectionStreamItem,
         scope: &TurnScope,
-    ) -> Result<(), ProductAdapterError> {
-        if let Some((cursor, payloads)) = item_to_payloads(item, scope)? {
-            self.push_runtime_payloads(cursor, payloads);
+    ) -> Result<bool, ProductAdapterError> {
+        let already_delivered = self.cursor.runtime_payloads_delivered;
+        let remaining_capacity =
+            WEBUI_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(self.runtime_payloads_pushed);
+        let base_cursor = self
+            .cursor
+            .runtime
+            .clone()
+            .unwrap_or_else(|| self.runtime_origin.clone());
+        if let Some((final_cursor, item_cursor, payloads, total, already_delivered)) =
+            item_to_payloads(
+                item,
+                scope,
+                base_cursor,
+                self.cursor.runtime_item,
+                already_delivered,
+                remaining_capacity,
+            )?
+        {
+            return self.push_runtime_payloads(
+                final_cursor,
+                item_cursor,
+                payloads,
+                total,
+                already_delivered,
+            );
         }
-        Ok(())
+        Ok(true)
+    }
+
+    fn has_runtime_payload_capacity(&self) -> bool {
+        self.runtime_payloads_pushed < WEBUI_RUNTIME_ITEM_MAX_PAYLOADS
     }
 
     fn push_turn(&mut self, cursor: TurnEventProjectionCursor, payload: ProductOutboundPayload) {
@@ -258,6 +333,8 @@ fn runtime_projection_scope(actor: &TurnActor, scope: &TurnScope) -> EventProjec
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct WebuiProjectionCursor {
     runtime: Option<EventProjectionCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_item: Option<EventCursor>,
     turn: Option<TurnEventProjectionCursor>,
     #[serde(default, skip_serializing_if = "is_zero")]
     runtime_payloads_delivered: usize,
@@ -275,10 +352,10 @@ fn parse_webui_projection_cursor(
             || parsed.turn.is_some()
             || parsed.runtime_payloads_delivered > 0)
     {
-        if parsed.runtime_payloads_delivered > WEBUI_PROJECTION_PAGE_LIMIT {
+        if parsed.runtime_payloads_delivered > WEBUI_RUNTIME_ITEM_MAX_PAYLOADS + 1 {
             return Err(ProductAdapterError::InvalidIdentifier {
                 kind: "projection_cursor",
-                reason: "runtime delivery offset exceeds projection page limit".to_string(),
+                reason: "runtime delivery offset exceeds runtime item payload limit".to_string(),
             });
         }
         return Ok(parsed);
@@ -291,6 +368,7 @@ fn parse_webui_projection_cursor(
     })?;
     Ok(WebuiProjectionCursor {
         runtime: Some(runtime),
+        runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 0,
     })
@@ -299,7 +377,16 @@ fn parse_webui_projection_cursor(
 fn validate_webui_projection_cursor_scope(
     cursor: &WebuiProjectionCursor,
     scope: &TurnScope,
+    projection_scope: &EventProjectionScope,
 ) -> Result<(), ProductAdapterError> {
+    if let Some(runtime) = cursor.runtime.as_ref()
+        && &runtime.scope != projection_scope
+    {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "runtime cursor scope does not match subscription scope".to_string(),
+        });
+    }
     if let Some(turn) = cursor.turn.as_ref()
         && &turn.scope != scope
     {
@@ -322,19 +409,56 @@ fn product_cursor_from_webui_cursor(
 fn item_to_payloads(
     item: ProjectionStreamItem,
     scope: &TurnScope,
-) -> Result<Option<(EventProjectionCursor, Vec<ProductOutboundPayload>)>, ProductAdapterError> {
+    base_cursor: EventProjectionCursor,
+    expected_item: Option<EventCursor>,
+    already_delivered: usize,
+    capacity: usize,
+) -> Result<
+    Option<(
+        EventProjectionCursor,
+        EventProjectionCursor,
+        Vec<RuntimePayload>,
+        usize,
+        usize,
+    )>,
+    ProductAdapterError,
+> {
     match item {
         ProjectionStreamItem::Snapshot(envelope) => {
             let cursor = envelope.cursor();
-            snapshot_payloads(scope, snapshot_from_envelope(envelope)?, cursor)
+            snapshot_payloads(
+                scope,
+                snapshot_from_envelope(envelope)?,
+                cursor,
+                base_cursor,
+                expected_item,
+                already_delivered,
+                capacity,
+            )
         }
         ProjectionStreamItem::Update(envelope) => {
             let cursor = envelope.cursor();
-            replay_payloads(scope, replay_from_envelope(envelope.as_ref())?, cursor)
+            replay_payloads(
+                scope,
+                replay_from_envelope(envelope.as_ref())?,
+                cursor,
+                base_cursor,
+                expected_item,
+                already_delivered,
+                capacity,
+            )
         }
         ProjectionStreamItem::RebaseRequired { snapshot, .. } => {
             let cursor = snapshot.cursor();
-            snapshot_payloads(scope, snapshot_from_envelope(*snapshot)?, cursor)
+            snapshot_payloads(
+                scope,
+                snapshot_from_envelope(*snapshot)?,
+                cursor,
+                base_cursor,
+                expected_item,
+                already_delivered,
+                capacity,
+            )
         }
         ProjectionStreamItem::Lagged { .. } => Err(ProductAdapterError::WorkflowRejected {
             kind: ProductWorkflowRejectionKind::Unavailable,
@@ -350,38 +474,254 @@ fn snapshot_payloads(
     scope: &TurnScope,
     snapshot: ProjectionSnapshot,
     cursor: EventProjectionCursor,
-) -> Result<Option<(EventProjectionCursor, Vec<ProductOutboundPayload>)>, ProductAdapterError> {
-    let mut payloads = Vec::new();
-    if let Some(state) = run_status_projection_state(scope, snapshot.runs)? {
-        payloads.push(ProductOutboundPayload::ProjectionSnapshot { state });
+    _base_cursor: EventProjectionCursor,
+    expected_item: Option<EventCursor>,
+    already_delivered: usize,
+    capacity: usize,
+) -> Result<
+    Option<(
+        EventProjectionCursor,
+        EventProjectionCursor,
+        Vec<RuntimePayload>,
+        usize,
+        usize,
+    )>,
+    ProductAdapterError,
+> {
+    let item_cursor = snapshot_item_cursor(&snapshot, &cursor);
+    let candidates = snapshot_payload_candidates(snapshot, cursor.scope.clone());
+    if candidates.is_empty() {
+        return Ok(None);
     }
-    let activity_limit = remaining_runtime_payload_slots(payloads.len());
-    payloads.extend(capability_activity_payloads(
-        snapshot.capability_activities,
-        activity_limit,
-    )?);
-    Ok((!payloads.is_empty()).then_some((cursor, payloads)))
+    let total = candidates.len();
+    let already_delivered =
+        effective_runtime_payload_offset(already_delivered, expected_item, item_cursor.runtime);
+    if already_delivered > 0 && already_delivered >= total {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
+        });
+    }
+    let payloads = runtime_payloads_from_candidates(
+        scope,
+        candidates,
+        StatePayloadKind::Snapshot,
+        already_delivered,
+        capacity,
+    )?;
+    Ok(Some((
+        cursor,
+        item_cursor,
+        payloads,
+        total,
+        already_delivered,
+    )))
 }
 
 fn replay_payloads(
     scope: &TurnScope,
     replay: &ProjectionReplay,
     cursor: EventProjectionCursor,
-) -> Result<Option<(EventProjectionCursor, Vec<ProductOutboundPayload>)>, ProductAdapterError> {
-    let mut payloads = Vec::new();
-    if let Some(state) = run_status_projection_state(scope, replay.runs.clone())? {
-        payloads.push(ProductOutboundPayload::ProjectionUpdate { state });
+    _base_cursor: EventProjectionCursor,
+    expected_item: Option<EventCursor>,
+    already_delivered: usize,
+    capacity: usize,
+) -> Result<
+    Option<(
+        EventProjectionCursor,
+        EventProjectionCursor,
+        Vec<RuntimePayload>,
+        usize,
+        usize,
+    )>,
+    ProductAdapterError,
+> {
+    let item_cursor = replay_item_cursor(replay, &cursor);
+    let candidates = replay_payload_candidates(replay, cursor.scope.clone());
+    if candidates.is_empty() {
+        return Ok(None);
     }
-    let activity_limit = remaining_runtime_payload_slots(payloads.len());
-    payloads.extend(capability_activity_payloads(
-        replay.capability_activities.clone(),
-        activity_limit,
-    )?);
-    Ok((!payloads.is_empty()).then_some((cursor, payloads)))
+    let total = candidates.len();
+    let already_delivered =
+        effective_runtime_payload_offset(already_delivered, expected_item, item_cursor.runtime);
+    if already_delivered > 0 && already_delivered >= total {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
+        });
+    }
+    let payloads = runtime_payloads_from_candidates(
+        scope,
+        candidates,
+        StatePayloadKind::Update,
+        already_delivered,
+        capacity,
+    )?;
+    Ok(Some((
+        cursor,
+        item_cursor,
+        payloads,
+        total,
+        already_delivered,
+    )))
 }
 
-fn remaining_runtime_payload_slots(existing_payloads: usize) -> usize {
-    WEBUI_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(existing_payloads)
+#[derive(Debug)]
+struct RuntimePayload {
+    payload: ProductOutboundPayload,
+}
+
+enum RuntimePayloadCandidate {
+    State { runs: Vec<RunStatusProjection> },
+    CapabilityActivity(CapabilityActivityProjection),
+}
+
+#[derive(Clone, Copy)]
+enum StatePayloadKind {
+    Snapshot,
+    Update,
+}
+
+fn snapshot_payload_candidates(
+    snapshot: ProjectionSnapshot,
+    _scope: EventProjectionScope,
+) -> Vec<RuntimePayloadCandidate> {
+    runtime_payload_candidates(snapshot.runs, snapshot.capability_activities)
+}
+
+fn replay_payload_candidates(
+    replay: &ProjectionReplay,
+    _scope: EventProjectionScope,
+) -> Vec<RuntimePayloadCandidate> {
+    runtime_payload_candidates(replay.runs.clone(), replay.capability_activities.clone())
+}
+
+fn runtime_payload_candidates(
+    runs: Vec<RunStatusProjection>,
+    capability_activities: Vec<CapabilityActivityProjection>,
+) -> Vec<RuntimePayloadCandidate> {
+    let mut candidates = Vec::with_capacity(
+        usize::from(!runs.is_empty()).saturating_add(capability_activities.len()),
+    );
+    if !runs.is_empty() {
+        candidates.push(RuntimePayloadCandidate::State { runs });
+    }
+    candidates.extend(
+        capability_activities
+            .into_iter()
+            .map(RuntimePayloadCandidate::CapabilityActivity),
+    );
+    candidates
+}
+
+fn runtime_payloads_from_candidates(
+    scope: &TurnScope,
+    candidates: Vec<RuntimePayloadCandidate>,
+    state_kind: StatePayloadKind,
+    already_delivered: usize,
+    capacity: usize,
+) -> Result<Vec<RuntimePayload>, ProductAdapterError> {
+    candidates
+        .into_iter()
+        .skip(already_delivered)
+        .take(capacity)
+        .map(|candidate| runtime_payload_from_candidate(scope, candidate, state_kind))
+        .collect()
+}
+
+fn runtime_payload_from_candidate(
+    scope: &TurnScope,
+    candidate: RuntimePayloadCandidate,
+    state_kind: StatePayloadKind,
+) -> Result<RuntimePayload, ProductAdapterError> {
+    match candidate {
+        RuntimePayloadCandidate::State { runs, .. } => {
+            let state = run_status_projection_state(scope, runs)?
+                .ok_or_else(|| internal_projection_error("missing run projection state"))?;
+            let payload = match state_kind {
+                StatePayloadKind::Snapshot => ProductOutboundPayload::ProjectionSnapshot { state },
+                StatePayloadKind::Update => ProductOutboundPayload::ProjectionUpdate { state },
+            };
+            Ok(RuntimePayload { payload })
+        }
+        RuntimePayloadCandidate::CapabilityActivity(activity) => {
+            CapabilityActivityView::new(CapabilityActivityViewInput {
+                invocation_id: activity.invocation_id,
+                thread_id: activity.thread_id,
+                capability_id: activity.capability_id,
+                status: capability_activity_status_wire(activity.status),
+                provider: activity.provider,
+                runtime: activity.runtime,
+                process_id: activity.process_id,
+                output_bytes: activity.output_bytes,
+                error_kind: activity.error_kind,
+                updated_at: activity.updated_at,
+            })
+            .map(ProductOutboundPayload::CapabilityActivity)
+            .map(|payload| RuntimePayload { payload })
+        }
+    }
+}
+
+fn effective_runtime_payload_offset(
+    already_delivered: usize,
+    expected_item: Option<EventCursor>,
+    item_cursor: EventCursor,
+) -> usize {
+    if already_delivered > 0 && expected_item.is_some() && expected_item != Some(item_cursor) {
+        0
+    } else {
+        already_delivered
+    }
+}
+
+fn max_projection_cursor(
+    left: EventProjectionCursor,
+    right: EventProjectionCursor,
+) -> EventProjectionCursor {
+    if right.runtime > left.runtime {
+        right
+    } else {
+        left
+    }
+}
+
+fn snapshot_item_cursor(
+    snapshot: &ProjectionSnapshot,
+    fallback: &EventProjectionCursor,
+) -> EventProjectionCursor {
+    let runtime = snapshot
+        .runs
+        .iter()
+        .map(|run| run.last_cursor)
+        .chain(
+            snapshot
+                .capability_activities
+                .iter()
+                .map(|activity| activity.last_cursor),
+        )
+        .max()
+        .unwrap_or(fallback.runtime);
+    EventProjectionCursor::for_scope(fallback.scope.clone(), runtime)
+}
+
+fn replay_item_cursor(
+    replay: &ProjectionReplay,
+    fallback: &EventProjectionCursor,
+) -> EventProjectionCursor {
+    let runtime = replay
+        .runs
+        .iter()
+        .map(|run| run.last_cursor)
+        .chain(
+            replay
+                .capability_activities
+                .iter()
+                .map(|activity| activity.last_cursor),
+        )
+        .max()
+        .unwrap_or(fallback.runtime);
+    EventProjectionCursor::for_scope(fallback.scope.clone(), runtime)
 }
 
 fn snapshot_from_envelope(
@@ -421,31 +761,6 @@ fn run_status_projection_state(
         return Ok(None);
     }
     ProductProjectionState::new(scope.thread_id.to_string(), items).map(Some)
-}
-
-fn capability_activity_payloads(
-    activities: Vec<CapabilityActivityProjection>,
-    limit: usize,
-) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
-    activities
-        .into_iter()
-        .take(limit)
-        .map(|activity| {
-            CapabilityActivityView::new(CapabilityActivityViewInput {
-                invocation_id: activity.invocation_id,
-                thread_id: activity.thread_id,
-                capability_id: activity.capability_id,
-                status: capability_activity_status_wire(activity.status),
-                provider: activity.provider,
-                runtime: activity.runtime,
-                process_id: activity.process_id,
-                output_bytes: activity.output_bytes,
-                error_kind: activity.error_kind,
-                updated_at: activity.updated_at,
-            })
-            .map(ProductOutboundPayload::CapabilityActivity)
-        })
-        .collect::<Result<Vec<_>, _>>()
 }
 
 fn capability_activity_status_wire(

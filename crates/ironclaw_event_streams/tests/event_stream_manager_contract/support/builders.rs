@@ -195,6 +195,20 @@ fn replay_for_thread(
     replay
 }
 
+fn replay_with_activity_thread(
+    scope: &ProjectionScope,
+    cursor: u64,
+    next: u64,
+    thread: &str,
+) -> ProjectionReplay {
+    let mut replay = replay(scope, cursor, next);
+    let thread_id = Some(ThreadId::new(thread).unwrap());
+    for activity in &mut replay.capability_activities {
+        activity.thread_id = thread_id.clone();
+    }
+    replay
+}
+
 fn timeline_entry(scope: &ProjectionScope, cursor: u64, kind: TimelineEntryKind) -> TimelineEntry {
     TimelineEntry {
         cursor: EventCursor::new(cursor),

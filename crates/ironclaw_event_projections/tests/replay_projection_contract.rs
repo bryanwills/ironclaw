@@ -2131,6 +2131,51 @@ async fn replay_projection_snapshot_runs_reflect_current_stream_head_under_trunc
 }
 
 #[tokio::test]
+async fn replay_projection_snapshot_capability_activities_reflect_current_stream_head_under_truncation()
+ {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let capability = capability_id();
+    let provider = provider_id();
+
+    log.append(RuntimeEvent::dispatch_requested(
+        scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        scope.clone(),
+        capability,
+        provider,
+        RuntimeKind::Script,
+        7,
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.timeline.entries.len(), 1);
+    assert!(snapshot.truncated);
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    assert_eq!(
+        snapshot.capability_activities[0].status,
+        CapabilityActivityStatus::Completed,
+        "snapshot must fold capability activity through stream head; truncated timeline must not leak stale Started status"
+    );
+    assert_eq!(snapshot.capability_activities[0].output_bytes, Some(7));
+}
+
+#[tokio::test]
 async fn replay_projection_snapshot_runs_reflect_process_failed_under_truncation() {
     // Same shape as the previous test but with a `ProcessFailed` terminal
     // event, since the reviewer specifically called out

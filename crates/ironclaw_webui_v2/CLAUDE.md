@@ -155,8 +155,10 @@ byte counts, sanitized error kind, timestamp) and must not carry raw tool
 arguments, raw results, command strings, host paths, or provider payloads.
 Snapshot/replay drains bound activity fan-out per projection item so every
 emitted SSE cursor remains resumable through `Last-Event-ID`; when the folded
-activity set is larger than the bound, the stream emits the most recently
-updated activity facts.
+activity set is larger than the bound, the stream splits the overflow across
+resumable projection cursors. Partial cursors carry the runtime item watermark
+and delivered payload count, so reconnect drains continue from the same folded
+item when it is stable and restart that item when the folded head changes.
 
 The browser resumes via `Last-Event-ID` on auto-reconnect; the handler
 prefers that header over the `?after_cursor=` query parameter, falling

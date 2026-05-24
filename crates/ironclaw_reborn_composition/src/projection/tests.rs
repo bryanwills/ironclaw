@@ -206,7 +206,8 @@ async fn webui_event_stream_resumes_inside_multi_payload_runtime_projection_item
     ));
     let partial_cursor =
         parse_webui_projection_cursor(initial_events[0].projection_cursor().as_str()).unwrap();
-    assert_eq!(partial_cursor.runtime, None);
+    assert!(partial_cursor.runtime.is_none());
+    assert!(partial_cursor.runtime_item.is_some());
     assert_eq!(partial_cursor.runtime_payloads_delivered, 1);
 
     let resumed_events = services
@@ -231,8 +232,57 @@ async fn webui_event_stream_resumes_inside_multi_payload_runtime_projection_item
     assert_eq!(resumed_cursor.runtime_payloads_delivered, 0);
 }
 
+#[tokio::test]
+async fn webui_event_stream_accepts_legacy_partial_origin_cursor() {
+    let tenant_id = TenantId::new("webui-activity-legacy-tenant").unwrap();
+    let user_id = UserId::new("webui-activity-legacy-user").unwrap();
+    let agent_id = AgentId::new("webui-activity-legacy-agent").unwrap();
+    let thread_id = ThreadId::new("webui-activity-legacy-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+            CapabilityId::new("script.echo").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
+    let legacy_cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+        runtime: None,
+        runtime_item: None,
+        turn: None,
+        runtime_payloads_delivered: 1,
+    })
+    .unwrap();
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-activity-legacy-reply").unwrap(),
+    );
+
+    let resumed_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(legacy_cursor),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(resumed_events.len(), 1);
+    assert!(matches!(
+        resumed_events[0].payload(),
+        ProductOutboundPayload::CapabilityActivity(activity)
+            if activity.invocation_id == invocation_id
+    ));
+}
+
 #[test]
-fn webui_projection_snapshot_caps_activity_fanout_to_resumable_payload_count() {
+fn webui_projection_snapshot_retains_activity_fanout_for_resumable_delivery() {
     let tenant_id = TenantId::new("webui-activity-cap-tenant").unwrap();
     let user_id = UserId::new("webui-activity-cap-user").unwrap();
     let agent_id = AgentId::new("webui-activity-cap-agent").unwrap();
@@ -278,21 +328,305 @@ fn webui_projection_snapshot_caps_activity_fanout_to_resumable_payload_count() {
         truncated: false,
     };
 
-    let (_, payloads) = snapshot_payloads(&scope, snapshot, cursor)
-        .unwrap()
-        .unwrap();
+    let (_, _, payloads, total, _) = snapshot_payloads(
+        &scope,
+        snapshot,
+        cursor.clone(),
+        EventProjectionCursor::origin_for_scope(cursor.scope.clone()),
+        None,
+        0,
+        WEBUI_PROJECTION_PAGE_LIMIT + 11,
+    )
+    .unwrap()
+    .unwrap();
 
-    assert_eq!(payloads.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
+    assert_eq!(total, WEBUI_PROJECTION_PAGE_LIMIT + 11);
+    assert_eq!(payloads.len(), WEBUI_PROJECTION_PAGE_LIMIT + 11);
     assert!(matches!(
-        &payloads[0],
+        &payloads[0].payload,
         ProductOutboundPayload::ProjectionSnapshot { state } if state.items.len() == 1
     ));
     assert_eq!(
         payloads
             .iter()
-            .filter(|payload| matches!(payload, ProductOutboundPayload::CapabilityActivity(_)))
+            .filter(|payload| matches!(
+                payload.payload,
+                ProductOutboundPayload::CapabilityActivity(_)
+            ))
             .count(),
-        WEBUI_PROJECTION_PAGE_LIMIT
+        WEBUI_PROJECTION_PAGE_LIMIT + 10
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_resumes_overflow_activity_fanout_without_dropping() {
+    let tenant_id = TenantId::new("webui-activity-overflow-tenant").unwrap();
+    let user_id = UserId::new("webui-activity-overflow-user").unwrap();
+    let agent_id = AgentId::new("webui-activity-overflow-agent").unwrap();
+    let thread_id = ThreadId::new("webui-activity-overflow-thread").unwrap();
+    let capability = CapabilityId::new("script.echo").unwrap();
+    let activity_count = WEBUI_RUNTIME_ITEM_MAX_PAYLOADS + 3;
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    for _ in 0..activity_count {
+        event_log
+            .append(RuntimeEvent::dispatch_requested(
+                resource_scope(
+                    &tenant_id,
+                    &user_id,
+                    &agent_id,
+                    &thread_id,
+                    InvocationId::new(),
+                ),
+                capability.clone(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-activity-overflow-reply").unwrap(),
+    );
+    let initial_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: actor.clone(),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(initial_events.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
+    let initial_cursor = parse_webui_projection_cursor(
+        initial_events
+            .last()
+            .expect("initial event")
+            .projection_cursor()
+            .as_str(),
+    )
+    .unwrap();
+    assert!(initial_cursor.runtime.is_none());
+    assert_eq!(
+        initial_cursor.runtime_item.expect("runtime item").as_u64(),
+        activity_count as u64
+    );
+    assert_eq!(
+        initial_cursor.runtime_payloads_delivered,
+        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS
+    );
+    assert!(matches!(
+        initial_events[0].payload(),
+        ProductOutboundPayload::ProjectionSnapshot { .. }
+    ));
+
+    let resumed_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(
+                initial_events
+                    .last()
+                    .expect("initial event")
+                    .projection_cursor()
+                    .clone(),
+            ),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(resumed_events.len(), 4);
+    let emitted_activity_count = initial_events
+        .iter()
+        .chain(resumed_events.iter())
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::CapabilityActivity(_)
+            )
+        })
+        .count();
+    assert_eq!(emitted_activity_count, activity_count);
+    let resumed_cursor = parse_webui_projection_cursor(
+        resumed_events
+            .last()
+            .expect("resumed event")
+            .projection_cursor()
+            .as_str(),
+    )
+    .unwrap();
+    assert!(resumed_cursor.runtime.is_some());
+    assert_eq!(resumed_cursor.runtime_payloads_delivered, 0);
+
+    let final_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(UserId::new("webui-activity-overflow-user").unwrap()),
+            scope: TurnScope::new(
+                TenantId::new("webui-activity-overflow-tenant").unwrap(),
+                Some(AgentId::new("webui-activity-overflow-agent").unwrap()),
+                None,
+                ThreadId::new("webui-activity-overflow-thread").unwrap(),
+            ),
+            after_cursor: Some(
+                resumed_events
+                    .last()
+                    .expect("resumed event")
+                    .projection_cursor()
+                    .clone(),
+            ),
+        })
+        .await
+        .unwrap();
+    assert!(final_events.is_empty());
+}
+
+#[tokio::test]
+async fn webui_event_stream_mints_resumable_cursors_for_long_valid_scope_ids() {
+    let tenant_id = TenantId::new(long_test_id("tenant", 't')).unwrap();
+    let user_id = UserId::new(long_test_id("user", 'u')).unwrap();
+    let agent_id = AgentId::new(long_test_id("agent", 'a')).unwrap();
+    let thread_id = ThreadId::new(long_test_id("thread", 'h')).unwrap();
+    let capability = CapabilityId::new("script.echo").unwrap();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    for _ in 0..(WEBUI_RUNTIME_ITEM_MAX_PAYLOADS + 1) {
+        event_log
+            .append(RuntimeEvent::dispatch_requested(
+                resource_scope(
+                    &tenant_id,
+                    &user_id,
+                    &agent_id,
+                    &thread_id,
+                    InvocationId::new(),
+                ),
+                capability.clone(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-activity-long-scope-reply").unwrap(),
+    );
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.projection_cursor().as_str().len() <= 1024)
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_rebases_stale_partial_activity_cursor() {
+    let tenant_id = TenantId::new("webui-activity-stale-tenant").unwrap();
+    let user_id = UserId::new("webui-activity-stale-user").unwrap();
+    let agent_id = AgentId::new("webui-activity-stale-agent").unwrap();
+    let thread_id = ThreadId::new("webui-activity-stale-thread").unwrap();
+    let capability = CapabilityId::new("script.echo").unwrap();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    for _ in 0..WEBUI_RUNTIME_ITEM_MAX_PAYLOADS {
+        event_log
+            .append(RuntimeEvent::dispatch_requested(
+                resource_scope(
+                    &tenant_id,
+                    &user_id,
+                    &agent_id,
+                    &thread_id,
+                    InvocationId::new(),
+                ),
+                capability.clone(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    let event_log_dyn: Arc<dyn DurableEventLog> = event_log.clone();
+    let actor = TurnActor::new(user_id.clone());
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-activity-stale-reply").unwrap(),
+    );
+    let initial_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: actor.clone(),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    let stale_cursor = initial_events
+        .last()
+        .expect("initial event")
+        .projection_cursor()
+        .clone();
+
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                InvocationId::new(),
+            ),
+            capability,
+        ))
+        .await
+        .unwrap();
+
+    let resumed_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(stale_cursor),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(resumed_events.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
+    assert!(matches!(
+        resumed_events[0].payload(),
+        ProductOutboundPayload::ProjectionSnapshot { .. }
+    ));
+    let resumed_cursor = parse_webui_projection_cursor(
+        resumed_events
+            .last()
+            .expect("resumed event")
+            .projection_cursor()
+            .as_str(),
+    )
+    .unwrap();
+    assert_eq!(
+        resumed_cursor.runtime_item.expect("runtime item").as_u64(),
+        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS as u64 + 1
+    );
+    assert_eq!(
+        resumed_cursor.runtime_payloads_delivered,
+        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS
     );
 }
 
@@ -536,6 +870,7 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
     let scope_b = TurnScope::new(tenant_id, Some(agent_id), None, thread_b);
     let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
         runtime: None,
+        runtime_item: None,
         turn: Some(TurnEventProjectionCursor::for_scope(
             scope_a,
             TurnEventCursor(10),
@@ -552,6 +887,55 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
         .webui_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
+            scope: scope_b,
+            after_cursor: Some(cursor),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn webui_event_stream_rejects_foreign_composite_runtime_cursor() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_a = ThreadId::new("webui-events-thread-a").unwrap();
+    let thread_b = ThreadId::new("webui-events-thread-b").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id);
+    let scope_a = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_a.clone(),
+    );
+    let scope_b = TurnScope::new(tenant_id, Some(agent_id), None, thread_b);
+    let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+        runtime: Some(EventProjectionCursor::origin_for_scope(
+            runtime_projection_scope(&actor, &scope_a),
+        )),
+        runtime_item: None,
+        turn: None,
+        runtime_payloads_delivered: 1,
+    })
+    .unwrap();
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    );
+
+    let error = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
             scope: scope_b,
             after_cursor: Some(cursor),
         })
@@ -817,6 +1201,104 @@ async fn webui_event_stream_rejects_malformed_projection_cursor() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn webui_event_stream_rejects_runtime_delivery_offset_above_payload_limit() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id);
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
+    let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+        runtime: Some(EventProjectionCursor::origin_for_scope(
+            runtime_projection_scope(&actor, &scope),
+        )),
+        runtime_item: None,
+        turn: None,
+        runtime_payloads_delivered: WEBUI_RUNTIME_ITEM_MAX_PAYLOADS + 2,
+    })
+    .unwrap();
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    );
+
+    let error = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(cursor),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn webui_event_stream_rejects_runtime_delivery_offset_above_item_payload_count() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+            CapabilityId::new("script.echo").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
+    let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+        runtime: Some(EventProjectionCursor::origin_for_scope(
+            runtime_projection_scope(&actor, &scope),
+        )),
+        runtime_item: None,
+        turn: None,
+        runtime_payloads_delivered: 3,
+    })
+    .unwrap();
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    );
+
+    let error = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(cursor),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            ..
+        }
+    ));
+}
+
+fn long_test_id(prefix: &str, character: char) -> String {
+    format!("{prefix}-{}", character.to_string().repeat(96))
 }
 
 fn resource_scope(
