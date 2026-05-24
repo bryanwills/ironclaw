@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
     AuditProjectionCursor, AuditProjectionError, AuditProjectionRequest, AuditProjectionService,
-    AuditProjectionStage, AuditStreamResume, EventProjectionService, EventStreamManager,
-    MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError, ProjectionRequest,
-    ProjectionScope, ReplayAuditProjectionService, ReplayEventProjectionService,
+    AuditProjectionStage, AuditStreamResume, CapabilityActivityStatus, EventProjectionService,
+    EventStreamManager, MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError,
+    ProjectionRequest, ProjectionScope, ReplayAuditProjectionService, ReplayEventProjectionService,
     RunProjectionStatus, RuntimeStreamResume, TimelineEntryKind,
 };
 use ironclaw_events::{
@@ -952,6 +952,147 @@ async fn replay_projection_updates_resume_after_projection_cursor() {
 }
 
 #[tokio::test]
+async fn replay_projection_folds_dispatch_lifecycle_into_capability_activity() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-tool-activity").unwrap());
+    let capability = capability_id();
+    let provider = provider_id();
+
+    log.append(RuntimeEvent::dispatch_requested(
+        scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::runtime_selected(
+        scope.clone(),
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        scope.clone(),
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+        42,
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    let activity = &snapshot.capability_activities[0];
+    assert_eq!(activity.capability_id, capability);
+    assert_eq!(activity.thread_id, scope.thread_id);
+    assert_eq!(activity.status, CapabilityActivityStatus::Completed);
+    assert_eq!(activity.provider.as_ref(), Some(&provider));
+    assert_eq!(activity.runtime, Some(RuntimeKind::Script));
+    assert_eq!(activity.output_bytes, Some(42));
+    assert_eq!(activity.error_kind, None);
+}
+
+#[tokio::test]
+async fn replay_projection_updates_capability_activity_only_for_touched_invocations() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope_a = scope_for_thread(ThreadId::new("thread-tool-activity-a").unwrap());
+    let scope_b = scope_for_thread(ThreadId::new("thread-tool-activity-b").unwrap());
+    let capability = capability_id();
+    let provider = provider_id();
+
+    let first = log
+        .append(RuntimeEvent::dispatch_requested(
+            scope_a.clone(),
+            capability.clone(),
+        ))
+        .await
+        .unwrap();
+    log.append(RuntimeEvent::dispatch_requested(
+        scope_b,
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        scope_a.clone(),
+        capability,
+        provider,
+        RuntimeKind::Script,
+        7,
+    ))
+    .await
+    .unwrap();
+
+    let replay = service
+        .updates(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope_a),
+            after: Some(ProjectionCursor::for_scope(
+                ProjectionScope::from_resource_scope(&scope_a),
+                first.cursor,
+            )),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(replay.updates.len(), 1);
+    assert_eq!(replay.capability_activities.len(), 1);
+    assert_eq!(
+        replay.capability_activities[0].status,
+        CapabilityActivityStatus::Completed
+    );
+    assert_eq!(replay.capability_activities[0].output_bytes, Some(7));
+}
+
+#[tokio::test]
+async fn replay_projection_capability_activity_stays_metadata_only() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-tool-activity-safe").unwrap());
+
+    log.append(RuntimeEvent::dispatch_failed(
+        scope.clone(),
+        capability_id(),
+        Some(provider_id()),
+        Some(RuntimeKind::Script),
+        "RAW_PROVIDER_ERROR_SENTINEL sk-secret /host/path TOOL_OUTPUT_SENTINEL",
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    let rendered = serde_json::to_string(&snapshot.capability_activities).unwrap();
+
+    assert!(!rendered.contains("RAW_PROVIDER_ERROR_SENTINEL"));
+    assert!(!rendered.contains("TOOL_OUTPUT_SENTINEL"));
+    assert!(!rendered.contains("sk-secret"));
+    assert!(!rendered.contains("/host/path"));
+    assert_eq!(
+        snapshot.capability_activities[0].error_kind.as_deref(),
+        Some(UNCLASSIFIED_ERROR_KIND)
+    );
+}
+
+#[tokio::test]
 async fn replay_projection_keeps_model_completed_running_until_reply_finalized() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));
@@ -1593,6 +1734,15 @@ async fn replay_projection_dispatch_succeeded_does_not_clobber_terminal_process_
         snapshot.runs[0].error_kind.as_deref(),
         Some("process_crashed")
     );
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    assert_eq!(
+        snapshot.capability_activities[0].status,
+        CapabilityActivityStatus::Failed
+    );
+    assert_eq!(
+        snapshot.capability_activities[0].error_kind.as_deref(),
+        Some("process_crashed")
+    );
 }
 
 /// Same regression, but for `process_killed` followed by
@@ -1645,6 +1795,11 @@ async fn replay_projection_dispatch_succeeded_does_not_clobber_terminal_process_
 
     assert_eq!(snapshot.runs.len(), 1);
     assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Killed);
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    assert_eq!(
+        snapshot.capability_activities[0].status,
+        CapabilityActivityStatus::Killed
+    );
 }
 
 /// Regression for review comment 3178562852: `updates(limit=1)` on a

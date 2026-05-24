@@ -148,6 +148,12 @@ The per-poll ownership probe goes through `SessionThreadService::read_thread`
 (metadata-only) rather than `list_thread_history`, so an active stream does
 not reload the full message transcript every second.
 
+`capability_activity` SSE frames are projection-derived lifecycle metadata for
+tool/capability execution. They expose only the safe activity DTO
+(`invocation_id`, `capability_id`, status, provider/runtime/process metadata,
+byte counts, sanitized error kind, timestamp) and must not carry raw tool
+arguments, raw results, command strings, host paths, or provider payloads.
+
 The browser resumes via `Last-Event-ID` on auto-reconnect; the handler
 prefers that header over the `?after_cursor=` query parameter, falling
 back to the projection origin when neither is supplied.

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{
-    EventProjectionService, ProjectionCursor as EventProjectionCursor, ProjectionReplay,
+    CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
+    ProjectionCursor as EventProjectionCursor, ProjectionReplay,
     ProjectionScope as EventProjectionScope, ProjectionSnapshot, ReplayEventProjectionService,
     RunProjectionStatus, RunStatusProjection,
 };
@@ -15,11 +16,11 @@ use ironclaw_event_streams::{
 use ironclaw_events::{DurableEventLog, EventStreamKey, ReadScope};
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
-    ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
-    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
-    RedactedString,
+    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView, ExternalActorRef,
+    ExternalConversationRef, ProductAdapterError, ProductAdapterId, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+    ProductWorkflowRejectionKind, ProjectionCursor as ProductProjectionCursor, ProjectionStream,
+    ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
@@ -178,9 +179,35 @@ impl WebuiProjectionBatch {
         &self.cursor
     }
 
-    fn push_runtime(&mut self, cursor: EventProjectionCursor, payload: ProductOutboundPayload) {
-        self.cursor.runtime = Some(cursor);
-        self.push(payload);
+    fn push_runtime_payloads(
+        &mut self,
+        cursor: EventProjectionCursor,
+        payloads: Vec<ProductOutboundPayload>,
+    ) {
+        let total = payloads.len();
+        if total == 0 {
+            return;
+        }
+
+        let base_runtime = self.cursor.runtime.clone();
+        let already_delivered = self.cursor.runtime_payloads_delivered.min(total);
+        if already_delivered == total {
+            self.cursor.runtime = Some(cursor);
+            self.cursor.runtime_payloads_delivered = 0;
+            return;
+        }
+
+        for (index, payload) in payloads.into_iter().enumerate().skip(already_delivered) {
+            let delivered = index + 1;
+            if delivered == total {
+                self.cursor.runtime = Some(cursor.clone());
+                self.cursor.runtime_payloads_delivered = 0;
+            } else {
+                self.cursor.runtime = base_runtime.clone();
+                self.cursor.runtime_payloads_delivered = delivered;
+            }
+            self.push(payload);
+        }
     }
 
     fn push_runtime_item(
@@ -188,8 +215,8 @@ impl WebuiProjectionBatch {
         item: ProjectionStreamItem,
         scope: &TurnScope,
     ) -> Result<(), ProductAdapterError> {
-        if let Some((cursor, payload)) = item_to_payload(item, scope)? {
-            self.push_runtime(cursor, payload);
+        if let Some((cursor, payloads)) = item_to_payloads(item, scope)? {
+            self.push_runtime_payloads(cursor, payloads);
         }
         Ok(())
     }
@@ -230,14 +257,28 @@ fn runtime_projection_scope(actor: &TurnActor, scope: &TurnScope) -> EventProjec
 struct WebuiProjectionCursor {
     runtime: Option<EventProjectionCursor>,
     turn: Option<TurnEventProjectionCursor>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    runtime_payloads_delivered: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 fn parse_webui_projection_cursor(
     cursor: &str,
 ) -> Result<WebuiProjectionCursor, ProductAdapterError> {
     if let Ok(parsed) = serde_json::from_str::<WebuiProjectionCursor>(cursor)
-        && (parsed.runtime.is_some() || parsed.turn.is_some())
+        && (parsed.runtime.is_some()
+            || parsed.turn.is_some()
+            || parsed.runtime_payloads_delivered > 0)
     {
+        if parsed.runtime_payloads_delivered > WEBUI_PROJECTION_PAGE_LIMIT {
+            return Err(ProductAdapterError::InvalidIdentifier {
+                kind: "projection_cursor",
+                reason: "runtime delivery offset exceeds projection page limit".to_string(),
+            });
+        }
         return Ok(parsed);
     }
     let runtime = serde_json::from_str::<EventProjectionCursor>(cursor).map_err(|_| {
@@ -249,6 +290,7 @@ fn parse_webui_projection_cursor(
     Ok(WebuiProjectionCursor {
         runtime: Some(runtime),
         turn: None,
+        runtime_payloads_delivered: 0,
     })
 }
 
@@ -275,27 +317,22 @@ fn product_cursor_from_webui_cursor(
     )
 }
 
-fn item_to_payload(
+fn item_to_payloads(
     item: ProjectionStreamItem,
     scope: &TurnScope,
-) -> Result<Option<(EventProjectionCursor, ProductOutboundPayload)>, ProductAdapterError> {
+) -> Result<Option<(EventProjectionCursor, Vec<ProductOutboundPayload>)>, ProductAdapterError> {
     match item {
         ProjectionStreamItem::Snapshot(envelope) => {
             let cursor = envelope.cursor();
-            Ok(snapshot_state(scope, snapshot_from_envelope(envelope)?)?
-                .map(|state| (cursor, ProductOutboundPayload::ProjectionSnapshot { state })))
+            snapshot_payloads(scope, snapshot_from_envelope(envelope)?, cursor)
         }
         ProjectionStreamItem::Update(envelope) => {
             let cursor = envelope.cursor();
-            Ok(
-                replay_state(scope, replay_from_envelope(envelope.as_ref())?)?
-                    .map(|state| (cursor, ProductOutboundPayload::ProjectionUpdate { state })),
-            )
+            replay_payloads(scope, replay_from_envelope(envelope.as_ref())?, cursor)
         }
         ProjectionStreamItem::RebaseRequired { snapshot, .. } => {
             let cursor = snapshot.cursor();
-            Ok(snapshot_state(scope, snapshot_from_envelope(*snapshot)?)?
-                .map(|state| (cursor, ProductOutboundPayload::ProjectionSnapshot { state })))
+            snapshot_payloads(scope, snapshot_from_envelope(*snapshot)?, cursor)
         }
         ProjectionStreamItem::Lagged { .. } => Err(ProductAdapterError::WorkflowRejected {
             kind: ProductWorkflowRejectionKind::Unavailable,
@@ -305,6 +342,34 @@ fn item_to_payload(
         }),
         ProjectionStreamItem::KeepAlive => Ok(None),
     }
+}
+
+fn snapshot_payloads(
+    scope: &TurnScope,
+    snapshot: ProjectionSnapshot,
+    cursor: EventProjectionCursor,
+) -> Result<Option<(EventProjectionCursor, Vec<ProductOutboundPayload>)>, ProductAdapterError> {
+    let mut payloads = Vec::new();
+    if let Some(state) = run_status_projection_state(scope, snapshot.runs)? {
+        payloads.push(ProductOutboundPayload::ProjectionSnapshot { state });
+    }
+    payloads.extend(capability_activity_payloads(snapshot.capability_activities));
+    Ok((!payloads.is_empty()).then_some((cursor, payloads)))
+}
+
+fn replay_payloads(
+    scope: &TurnScope,
+    replay: &ProjectionReplay,
+    cursor: EventProjectionCursor,
+) -> Result<Option<(EventProjectionCursor, Vec<ProductOutboundPayload>)>, ProductAdapterError> {
+    let mut payloads = Vec::new();
+    if let Some(state) = run_status_projection_state(scope, replay.runs.clone())? {
+        payloads.push(ProductOutboundPayload::ProjectionUpdate { state });
+    }
+    payloads.extend(capability_activity_payloads(
+        replay.capability_activities.clone(),
+    ));
+    Ok((!payloads.is_empty()).then_some((cursor, payloads)))
 }
 
 fn snapshot_from_envelope(
@@ -329,20 +394,6 @@ fn replay_from_envelope(
     }
 }
 
-fn snapshot_state(
-    scope: &TurnScope,
-    snapshot: ProjectionSnapshot,
-) -> Result<Option<ProductProjectionState>, ProductAdapterError> {
-    run_status_projection_state(scope, snapshot.runs)
-}
-
-fn replay_state(
-    scope: &TurnScope,
-    replay: &ProjectionReplay,
-) -> Result<Option<ProductProjectionState>, ProductAdapterError> {
-    run_status_projection_state(scope, replay.runs.clone())
-}
-
 fn run_status_projection_state(
     scope: &TurnScope,
     runs: Vec<RunStatusProjection>,
@@ -358,6 +409,40 @@ fn run_status_projection_state(
         return Ok(None);
     }
     ProductProjectionState::new(scope.thread_id.to_string(), items).map(Some)
+}
+
+fn capability_activity_payloads(
+    activities: Vec<CapabilityActivityProjection>,
+) -> Vec<ProductOutboundPayload> {
+    activities
+        .into_iter()
+        .map(|activity| {
+            ProductOutboundPayload::CapabilityActivity(CapabilityActivityView {
+                invocation_id: activity.invocation_id,
+                thread_id: activity.thread_id,
+                capability_id: activity.capability_id,
+                status: capability_activity_status_wire(activity.status),
+                provider: activity.provider,
+                runtime: activity.runtime,
+                process_id: activity.process_id,
+                output_bytes: activity.output_bytes,
+                error_kind: activity.error_kind,
+                updated_at: activity.updated_at,
+            })
+        })
+        .collect()
+}
+
+fn capability_activity_status_wire(
+    status: CapabilityActivityStatus,
+) -> CapabilityActivityStatusView {
+    match status {
+        CapabilityActivityStatus::Started => CapabilityActivityStatusView::Started,
+        CapabilityActivityStatus::Running => CapabilityActivityStatusView::Running,
+        CapabilityActivityStatus::Completed => CapabilityActivityStatusView::Completed,
+        CapabilityActivityStatus::Failed => CapabilityActivityStatusView::Failed,
+        CapabilityActivityStatus::Killed => CapabilityActivityStatusView::Killed,
+    }
 }
 
 fn envelope_to_outbound(

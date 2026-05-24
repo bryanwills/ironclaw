@@ -2440,7 +2440,8 @@ mod tests {
         assert!(
             stream.events.iter().all(|event| matches!(
                 event.payload(),
-                ProductOutboundPayload::ProjectionSnapshot { .. }
+                ProductOutboundPayload::CapabilityActivity(_)
+                    | ProductOutboundPayload::ProjectionSnapshot { .. }
                     | ProductOutboundPayload::ProjectionUpdate { .. }
             )),
             "webui bundle should expose only projection stream events"

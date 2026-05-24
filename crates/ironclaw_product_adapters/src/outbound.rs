@@ -1,6 +1,9 @@
 //! Outbound envelope, projection-derived payloads, and projection cursor.
 
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
+};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
@@ -90,6 +93,30 @@ pub enum ProgressKind {
     Typing,
     ToolRunning,
     Reflecting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityActivityView {
+    pub invocation_id: InvocationId,
+    pub thread_id: Option<ThreadId>,
+    pub capability_id: CapabilityId,
+    pub status: CapabilityActivityStatusView,
+    pub provider: Option<ExtensionId>,
+    pub runtime: Option<RuntimeKind>,
+    pub process_id: Option<ProcessId>,
+    pub output_bytes: Option<u64>,
+    pub error_kind: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityActivityStatusView {
+    Started,
+    Running,
+    Completed,
+    Failed,
+    Killed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +242,7 @@ impl<'de> Deserialize<'de> for ProductProjectionState {
 pub enum ProductOutboundPayload {
     FinalReply(FinalReplyView),
     Progress(ProgressUpdateView),
+    CapabilityActivity(CapabilityActivityView),
     GatePrompt(GatePromptView),
     AuthPrompt(AuthPromptView),
     ProjectionSnapshot { state: ProductProjectionState },
@@ -325,5 +353,39 @@ mod tests {
         };
         let json = serde_json::to_value(&view).expect("serialize");
         assert_eq!(json["text"], "hello world");
+    }
+
+    #[test]
+    fn capability_activity_view_is_metadata_only() {
+        let view = CapabilityActivityView {
+            invocation_id: InvocationId::new(),
+            thread_id: Some(ThreadId::new("thread-tool-activity").expect("thread id")),
+            capability_id: CapabilityId::new("script.echo").expect("capability id"),
+            status: CapabilityActivityStatusView::Completed,
+            provider: Some(ExtensionId::new("script").expect("provider id")),
+            runtime: Some(RuntimeKind::Script),
+            process_id: None,
+            output_bytes: Some(12),
+            error_kind: None,
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_value(&view).expect("serialize");
+        let rendered = serde_json::to_string(&json).expect("render");
+
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["output_bytes"], 12);
+        for forbidden in [
+            "arguments",
+            "args",
+            "result",
+            "raw_output",
+            "command",
+            "host_path",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "capability activity leaked raw field name: {forbidden}"
+            );
+        }
     }
 }

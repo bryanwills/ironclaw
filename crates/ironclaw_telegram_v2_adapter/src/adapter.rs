@@ -291,7 +291,8 @@ impl ProductAdapter for TelegramV2Adapter {
                 .await;
                 return Ok(ProductRenderOutcome::Deferred);
             }
-            ProductOutboundPayload::ProjectionSnapshot { .. }
+            ProductOutboundPayload::CapabilityActivity(_)
+            | ProductOutboundPayload::ProjectionSnapshot { .. }
             | ProductOutboundPayload::ProjectionUpdate { .. }
             | ProductOutboundPayload::KeepAlive => {
                 // Telegram never consumes projection subscriptions; the

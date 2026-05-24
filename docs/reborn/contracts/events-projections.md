@@ -94,6 +94,7 @@ Examples:
 
 - conversation sidebar
 - active run progress
+- capability/tool activity lifecycle metadata
 - job list
 - project/thread visibility
 - extension capability surface
@@ -105,6 +106,9 @@ Reducer rules:
 - deterministic for the same input state/events
 - side-effect free
 - rebuildable after restart
+- product-facing capability activity projections expose only metadata-safe
+  lifecycle facts; raw tool arguments, raw output, command strings, host paths,
+  and provider payloads stay outside the projection contract
 - may cache output, but cache is not source of truth
 - must tolerate unknown future event types by ignoring or preserving them according to version policy
 
