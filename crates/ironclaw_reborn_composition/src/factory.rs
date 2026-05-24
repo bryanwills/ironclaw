@@ -13,7 +13,7 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::{
-    EffectKind, MountAlias, MountGrant, MountPermissions, MountView, PackageId, VirtualPath,
+    EffectKind, MountAlias, MountGrant, MountPermissions, MountView, PackageId, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
@@ -34,12 +34,12 @@ use ironclaw_turns::{
     InMemoryTurnStateStore,
 };
 
-use crate::input::RebornStorageInput;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServicePorts, RebornProductAuthServices,
     RebornReadiness, RebornReadinessState,
 };
+use crate::{input::RebornStorageInput, lifecycle::RebornLocalSkillManagementPort};
 
 pub struct RebornServices {
     pub host_runtime: Option<Arc<dyn ironclaw_host_runtime::HostRuntime>>,
@@ -54,6 +54,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     pub(crate) thread_service: Arc<InMemorySessionThreadService>,
+    pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
 }
@@ -134,6 +135,7 @@ fn production_config(
 async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
     let RebornBuildInput {
         profile,
+        owner_id,
         storage,
         runtime_policy,
         product_auth_ports,
@@ -178,6 +180,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     )?;
 
     let filesystem = Arc::new(filesystem);
+    let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
+    let skill_management = Arc::new(RebornLocalSkillManagementPort::new(
+        owner_user_id,
+        Arc::clone(&filesystem),
+        local_dev_skill_management_mount_view()?,
+    ));
     let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::clone(&filesystem),
         local_dev_skill_mount_view()?,
@@ -195,6 +205,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
         loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
+        skill_management,
         skill_filesystem,
         workspace_filesystem,
     });
@@ -294,6 +305,38 @@ fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
         grant("/skills", "/projects/skills")?,
         grant("/tenant-shared/skills", "/projects/tenant-shared/skills")?,
         grant("/system/skills", "/projects/system/skills")?,
+    ])
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })
+}
+
+fn local_dev_skill_management_mount_view() -> Result<MountView, RebornBuildError> {
+    let grant = |alias: &str,
+                 target: &str,
+                 permissions: MountPermissions|
+     -> Result<MountGrant, RebornBuildError> {
+        Ok(MountGrant::new(
+            MountAlias::new(alias).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?,
+            VirtualPath::new(target).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?,
+            permissions,
+        ))
+    };
+    MountView::new(vec![
+        grant(
+            "/skills",
+            "/projects/skills",
+            MountPermissions::read_write_list_delete(),
+        )?,
+        grant(
+            "/system/skills",
+            "/projects/system/skills",
+            MountPermissions::read_only(),
+        )?,
     ])
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),

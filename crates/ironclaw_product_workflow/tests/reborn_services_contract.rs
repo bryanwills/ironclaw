@@ -10,12 +10,15 @@ use ironclaw_product_adapters::{
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ProductWorkflowError, RebornGetRunStateRequest,
+    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -151,6 +154,61 @@ struct FakeTurnCoordinator {
     submit_error: Mutex<Option<TurnError>>,
     run_state_error: Mutex<Option<TurnError>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
+}
+
+#[derive(Default)]
+struct RecordingSetupLifecycleFacade {
+    setup_calls: Mutex<Vec<(LifecycleProductContext, LifecycleProductAction)>>,
+}
+
+impl RecordingSetupLifecycleFacade {
+    fn setup_calls(&self) -> Vec<(LifecycleProductContext, LifecycleProductAction)> {
+        self.setup_calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl LifecycleProductFacade for RecordingSetupLifecycleFacade {
+    async fn execute(
+        &self,
+        context: LifecycleProductContext,
+        action: LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        self.setup_calls
+            .lock()
+            .expect("lock")
+            .push((context, action.clone()));
+        let package_ref = match &action {
+            LifecycleProductAction::ExtensionConfigure { package_ref, .. } => package_ref.clone(),
+            _ => {
+                return Err(ProductWorkflowError::UnsupportedActionKind {
+                    kind: action.command_name().to_string(),
+                });
+            }
+        };
+        Ok(LifecycleProductResponse::projection(
+            Some(package_ref),
+            LifecyclePhase::Configured,
+            vec![LifecycleReadinessBlocker::runtime(Some(
+                "runtime-readiness".to_string(),
+            ))?],
+        ))
+    }
+}
+
+struct FailingSetupLifecycleFacade {
+    error: ProductWorkflowError,
+}
+
+#[async_trait]
+impl LifecycleProductFacade for FailingSetupLifecycleFacade {
+    async fn execute(
+        &self,
+        _context: LifecycleProductContext,
+        _action: LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(self.error.clone())
+    }
 }
 
 impl FakeTurnCoordinator {
@@ -289,6 +347,161 @@ impl TurnCoordinator for FakeTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(17),
         })
+    }
+}
+
+#[tokio::test]
+async fn setup_extension_returns_lifecycle_projection_from_facade() {
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let lifecycle = Arc::new(RecordingSetupLifecycleFacade::default());
+    let services =
+        RebornServices::new(threads, coordinator).with_lifecycle_product_facade(lifecycle.clone());
+    let caller = caller();
+    let request = WebUiSetupExtensionRequest {
+        action: Some("begin".to_string()),
+        payload: Some(json!({"mode": "dry_run"})),
+    };
+
+    let response = services
+        .setup_extension(
+            caller.clone(),
+            ironclaw_common::ExtensionName::new("github").unwrap(),
+            request.clone(),
+        )
+        .await
+        .expect("setup projection");
+
+    assert_eq!(response.extension_name.as_str(), "github");
+    assert_eq!(response.phase, LifecyclePhase::Configured);
+    assert_eq!(
+        response.package_ref,
+        Some(LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap())
+    );
+    assert_eq!(
+        response.blockers,
+        vec![LifecycleReadinessBlocker::runtime(Some("runtime-readiness".to_string())).unwrap()]
+    );
+    let calls = lifecycle.setup_calls();
+    assert_eq!(calls.len(), 1);
+    let LifecycleProductContext::Surface(context) = &calls[0].0 else {
+        panic!("setup extension must execute from a surface context");
+    };
+    assert_eq!(context.tenant_id, caller.tenant_id);
+    assert_eq!(context.user_id, caller.user_id);
+    assert_eq!(
+        calls[0].1,
+        LifecycleProductAction::ExtensionConfigure {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .unwrap(),
+            payload: Some(json!({
+                "action": request.action,
+                "payload": request.payload,
+            })),
+        }
+    );
+}
+
+#[tokio::test]
+async fn setup_extension_without_facade_returns_unwired_lifecycle_projection() {
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator);
+
+    let response = services
+        .setup_extension(
+            caller(),
+            ironclaw_common::ExtensionName::new("github").unwrap(),
+            WebUiSetupExtensionRequest::default(),
+        )
+        .await
+        .expect("setup projection");
+
+    assert_eq!(response.extension_name.as_str(), "github");
+    assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
+    assert_eq!(
+        response.package_ref,
+        Some(LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap())
+    );
+    assert_eq!(
+        response.blockers,
+        vec![
+            LifecycleReadinessBlocker::runtime(Some("reborn_lifecycle_facade_unwired".to_string()))
+                .unwrap()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn setup_extension_maps_lifecycle_facade_errors_to_webui_statuses() {
+    let cases = [
+        (
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: "bad request".to_string(),
+            },
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
+        (
+            ProductWorkflowError::UnsupportedActionKind {
+                kind: "extension_configure".to_string(),
+            },
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
+        (
+            ProductWorkflowError::BindingAccessDenied,
+            RebornServicesErrorCode::Forbidden,
+            RebornServicesErrorKind::ParticipantDenied,
+            403,
+            false,
+        ),
+        (
+            ProductWorkflowError::Transient {
+                reason: "lifecycle store unavailable".to_string(),
+            },
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+            true,
+        ),
+        (
+            ProductWorkflowError::BindingResolutionFailed {
+                reason: "store hid details".to_string(),
+            },
+            RebornServicesErrorCode::Internal,
+            RebornServicesErrorKind::Internal,
+            500,
+            false,
+        ),
+    ];
+
+    for (workflow_error, code, kind, status_code, retryable) in cases {
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let coordinator = Arc::new(FakeTurnCoordinator::default());
+        let services = RebornServices::new(threads, coordinator).with_lifecycle_product_facade(
+            Arc::new(FailingSetupLifecycleFacade {
+                error: workflow_error,
+            }),
+        );
+
+        let error = services
+            .setup_extension(
+                caller(),
+                ironclaw_common::ExtensionName::new("github").unwrap(),
+                WebUiSetupExtensionRequest::default(),
+            )
+            .await
+            .expect_err("setup error should map to WebUI status");
+
+        assert_eq!(error.code, code);
+        assert_eq!(error.kind, kind);
+        assert_eq!(error.status_code, status_code);
+        assert_eq!(error.retryable, retryable);
     }
 }
 

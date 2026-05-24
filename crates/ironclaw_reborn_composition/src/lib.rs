@@ -22,6 +22,7 @@ mod auth;
 mod error;
 mod factory;
 mod input;
+mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
 mod local_runtime_profile;

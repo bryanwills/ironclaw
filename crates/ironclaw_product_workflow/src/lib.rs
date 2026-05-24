@@ -37,6 +37,7 @@ mod fakes;
 mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
+mod lifecycle;
 mod policy;
 mod reborn_services;
 mod webui_inbound;
@@ -75,6 +76,12 @@ pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+pub use lifecycle::{
+    LifecycleBlockerRef, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
+    LifecyclePhase, LifecycleProductAction, LifecycleProductCommandService,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, UnsupportedLifecycleProductFacade,
+};
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
@@ -98,8 +105,8 @@ pub use reborn_services::{
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornSetupExtensionStatus, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,

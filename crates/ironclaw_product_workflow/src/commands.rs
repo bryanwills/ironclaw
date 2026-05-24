@@ -4,6 +4,7 @@
 //! command payloads so command parsing does not depend on v1 agent routing or on
 //! the product surface that produced the command.
 
+use crate::lifecycle::{LifecycleProductAction, parse_lifecycle_command_payload};
 use ironclaw_product_adapters::InboundCommandPayload;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,48 @@ struct ProductCommandSpec {
 const COMMAND_SPECS: &[ProductCommandSpec] = &[
     ProductCommandSpec {
         descriptor: ProductCommandDescriptor {
+            name: "extension_search",
+            aliases: &[],
+        },
+        parse: parse_lifecycle_command_payload,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "extension_install",
+            aliases: &[],
+        },
+        parse: parse_lifecycle_command_payload,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "extension_auth",
+            aliases: &[],
+        },
+        parse: parse_lifecycle_command_payload,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "extension_activate",
+            aliases: &[],
+        },
+        parse: parse_lifecycle_command_payload,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "extension_configure",
+            aliases: &[],
+        },
+        parse: parse_lifecycle_command_payload,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "extension_remove",
+            aliases: &[],
+        },
+        parse: parse_lifecycle_command_payload,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
             name: "model",
             aliases: &[],
         },
@@ -35,6 +78,27 @@ const COMMAND_SPECS: &[ProductCommandSpec] = &[
         },
         parse: parse_status_command,
     },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "skill_search",
+            aliases: &[],
+        },
+        parse: parse_lifecycle_command_payload,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "skill_install",
+            aliases: &[],
+        },
+        parse: parse_lifecycle_command_payload,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "skill_remove",
+            aliases: &[],
+        },
+        parse: parse_lifecycle_command_payload,
+    },
 ];
 
 pub fn product_command_descriptors() -> impl Iterator<Item = &'static ProductCommandDescriptor> {
@@ -45,6 +109,7 @@ pub fn product_command_descriptors() -> impl Iterator<Item = &'static ProductCom
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ProductCommand {
+    Lifecycle { action: LifecycleProductAction },
     Model { action: ProductModelCommand },
     Status,
     Unknown { name: String, arguments: String },
@@ -70,6 +135,7 @@ impl ProductCommand {
 
     pub fn name(&self) -> &str {
         match self {
+            Self::Lifecycle { action } => action.command_name(),
             Self::Model { .. } => "model",
             Self::Status => "status",
             Self::Unknown { name, .. } => name.as_str(),

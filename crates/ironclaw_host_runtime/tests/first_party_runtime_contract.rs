@@ -774,7 +774,10 @@ fn http_first_party_services(
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
 
     HostRuntimeServices::new(
-        Arc::new(first_party_registry()),
+        Arc::new(first_party_registry_with_effects(vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+        ])),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),

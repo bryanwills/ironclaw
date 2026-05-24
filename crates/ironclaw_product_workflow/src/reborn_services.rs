@@ -27,10 +27,10 @@ use ironclaw_turns::{
 use uuid::Uuid;
 
 use crate::{
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution,
-    WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    LifecycleProductFacade, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     binding_ref::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
@@ -38,15 +38,16 @@ use crate::{
 };
 
 mod error;
+mod lifecycle_setup;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use types::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornSetupExtensionResponse, RebornSetupExtensionStatus,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornResumeGateResponse, RebornSetupExtensionResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -111,13 +112,10 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError>;
 
-    /// Run a step in a v2-native extension onboarding flow. Today the
-    /// facade returns
-    /// [`RebornSetupExtensionStatus::NotImplemented`](types::RebornSetupExtensionStatus::NotImplemented)
-    /// because the underlying extension lifecycle is still v1-only.
-    /// The route exists so the WebUI v2 entrypoint inventory is
-    /// complete and so future onboarding port work has a fixed surface
-    /// to fill in.
+    /// Run a step in a v2-native extension onboarding flow. The route returns
+    /// a product-safe lifecycle projection. Auth, approval, pairing, policy,
+    /// and credential requirements are represented as blockers that point back
+    /// to their owning services; this facade must not resolve those gates.
     ///
     /// `extension_name` is the validated, typed identifier from the
     /// route path. Per `.claude/rules/types.md`, extension identifiers
@@ -139,6 +137,7 @@ pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
+    lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
 }
@@ -152,6 +151,11 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             event_stream: None,
+            lifecycle_facade: Arc::new(
+                // SAFETY: this literal is a static, non-empty, control-free lifecycle blocker ref.
+                UnsupportedLifecycleProductFacade::new("reborn_lifecycle_facade_unwired")
+                    .expect("static lifecycle facade ref is valid"),
+            ),
             skill_activation_recorder: None,
             skill_activation_clearer: None,
         }
@@ -159,6 +163,14 @@ impl RebornServices {
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_lifecycle_product_facade(
+        mut self,
+        lifecycle_facade: Arc<dyn LifecycleProductFacade>,
+    ) -> Self {
+        self.lifecycle_facade = lifecycle_facade;
         self
     }
 
@@ -688,19 +700,17 @@ impl RebornServicesApi for RebornServices {
 
     async fn setup_extension(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         extension_name: ExtensionName,
-        _request: WebUiSetupExtensionRequest,
+        request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        // Skeleton: v2 native onboarding lifecycle is intentionally
-        // not wired to v1's onboarding controller. Returns a clear
-        // status so v2 callers know the route exists but the
-        // underlying flow is not yet ported.
-        Ok(RebornSetupExtensionResponse {
+        lifecycle_setup::setup_extension(
+            self.lifecycle_facade.as_ref(),
+            caller,
             extension_name,
-            status: RebornSetupExtensionStatus::NotImplemented,
-            payload: None,
-        })
+            request,
+        )
+        .await
     }
 }
 

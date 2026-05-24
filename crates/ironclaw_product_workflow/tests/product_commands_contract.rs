@@ -1,7 +1,10 @@
 //! Contract tests for the Reborn-native product command model.
 
 use ironclaw_product_adapters::{InboundCommandPayload, ProductTriggerReason};
-use ironclaw_product_workflow::{ProductCommand, ProductModelCommand, product_command_descriptors};
+use ironclaw_product_workflow::{
+    LifecyclePackageKind, LifecycleProductAction, ProductCommand, ProductModelCommand,
+    product_command_descriptors,
+};
 
 #[test]
 fn command_payload_maps_to_typed_model_command_without_v1_parser() {
@@ -22,6 +25,33 @@ fn command_payload_maps_to_typed_model_command_without_v1_parser() {
 #[test]
 fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
     let cases = [
+        (
+            "extension_install",
+            "github",
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::ExtensionInstall {
+                    package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        "github",
+                    )
+                    .unwrap(),
+                },
+            },
+            "extension_install",
+            Some("extension_install"),
+        ),
+        (
+            "skill_install",
+            r#"{"name":"review-helper","content":"---\nname: review-helper\n---\nUse review helper."}"#,
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::SkillInstall {
+                    name: Some("review-helper".to_string()),
+                    content: "---\nname: review-helper\n---\nUse review helper.".to_string(),
+                },
+            },
+            "skill_install",
+            Some("skill_install"),
+        ),
         (
             "model",
             "",
@@ -72,10 +102,92 @@ fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
 }
 
 #[test]
+fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
+    let configure_payload = InboundCommandPayload::new(
+        "extension_configure",
+        r#"{"id":"github","payload":{"mode":"dry_run"}}"#,
+        ProductTriggerReason::BotCommand,
+    )
+    .expect("valid command payload");
+
+    assert_eq!(
+        ProductCommand::from_payload(&configure_payload),
+        ProductCommand::Lifecycle {
+            action: LifecycleProductAction::ExtensionConfigure {
+                package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                    LifecyclePackageKind::Extension,
+                    "github",
+                )
+                .unwrap(),
+                payload: Some(serde_json::json!({"mode": "dry_run"})),
+            },
+        }
+    );
+
+    for arguments in [r#"{"id":"review-helper"}"#, r#"{"name":"review-helper"}"#] {
+        let payload =
+            InboundCommandPayload::new("skill_remove", arguments, ProductTriggerReason::BotCommand)
+                .expect("valid command payload");
+        assert_eq!(
+            ProductCommand::from_payload(&payload),
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::SkillRemove {
+                    package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                        LifecyclePackageKind::Skill,
+                        "review-helper",
+                    )
+                    .unwrap(),
+                },
+            }
+        );
+    }
+
+    for (command, arguments) in [
+        ("skill_remove", ""),
+        ("extension_install", r#"{"id":"git\nhub"}"#),
+        (
+            "skill_install",
+            &format!(r#"{{"content":"{}"}}"#, "x".repeat(64 * 1024 + 1)),
+        ),
+    ] {
+        let payload = InboundCommandPayload {
+            command: command.to_string(),
+            arguments: arguments.to_string(),
+            trigger: ProductTriggerReason::BotCommand,
+        };
+        assert!(matches!(
+            ProductCommand::from_payload(&payload),
+            ProductCommand::Unknown { .. }
+        ));
+    }
+}
+
+#[test]
 fn command_registry_declares_model_without_source_policy() {
     let model = product_command_descriptors()
         .find(|descriptor| descriptor.name == "model")
         .expect("model descriptor");
 
     assert!(model.aliases.is_empty());
+}
+
+#[test]
+fn command_registry_declares_canonical_lifecycle_commands() {
+    let names = product_command_descriptors()
+        .map(|descriptor| descriptor.name)
+        .collect::<Vec<_>>();
+
+    for name in [
+        "extension_search",
+        "extension_install",
+        "extension_auth",
+        "extension_activate",
+        "extension_configure",
+        "extension_remove",
+        "skill_search",
+        "skill_install",
+        "skill_remove",
+    ] {
+        assert!(names.contains(&name), "missing lifecycle command {name}");
+    }
 }
