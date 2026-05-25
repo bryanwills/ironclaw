@@ -16,7 +16,9 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
-use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
+use crate::action::{
+    ActionDispatchKind, ActionFingerprintKey, ProductCommandName, SourceBindingKey,
+};
 use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
@@ -337,7 +339,7 @@ async fn dispatch_payload(
                 }
             }
             let ack = command_service.execute(context, command).await?;
-            let dispatch_kind = dispatch_kind_from_command_ack(&ack, envelope.payload())?;
+            let dispatch_kind = dispatch_kind_from_command_ack(&ack)?;
             Ok(DispatchedAction { ack, dispatch_kind })
         }
         ProductInboundPayload::ApprovalResolution(_) => {
@@ -391,18 +393,21 @@ fn dispatch_kind_from_ack(
 
 fn dispatch_kind_from_command_ack(
     ack: &ProductInboundAck,
-    payload: &ProductInboundPayload,
 ) -> Result<ActionDispatchKind, ProductWorkflowError> {
     match ack {
-        ProductInboundAck::Accepted { .. } | ProductInboundAck::DeferredBusy { .. } => {
-            Err(ProductWorkflowError::UnsupportedActionKind {
-                kind: "turn_ack_from_product_command".into(),
-            })
-        }
+        ProductInboundAck::CommandRouted { command } => Ok(ActionDispatchKind::Command {
+            command: ProductCommandName::new(command.as_str())
+                .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+        }),
         ProductInboundAck::Rejected(rejection) => Ok(ActionDispatchKind::Rejected {
             kind: rejection.kind.clone(),
         }),
-        _ => ActionDispatchKind::try_from_payload(payload),
+        ProductInboundAck::Accepted { .. }
+        | ProductInboundAck::DeferredBusy { .. }
+        | ProductInboundAck::Duplicate { .. }
+        | ProductInboundAck::NoOp => Err(ProductWorkflowError::UnsupportedActionKind {
+            kind: "non_command_ack_from_product_command".into(),
+        }),
     }
 }
 
