@@ -11,6 +11,7 @@ mod json;
 mod schemas;
 mod shell;
 mod skill_management;
+mod skill_url_install;
 mod time;
 
 use std::{sync::Arc, time::Instant};
