@@ -461,7 +461,8 @@ async fn fetch_github_contents_bundle_payload(
         .as_deref()
         .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
     let root_path = normalize_archive_path(Path::new(root_subdir))?;
-    let mut directories = VecDeque::from([root_subdir.to_string()]);
+    let root_dir = normalized_archive_path_to_string(&root_path)?;
+    let mut directories = VecDeque::from([root_path.clone()]);
     let mut visited_directories = 0usize;
     let mut seen_files = HashSet::<PathBuf>::new();
     let mut collector = BundleCollector::new(root_path);
@@ -473,8 +474,13 @@ async fn fetch_github_contents_bundle_payload(
                 RuntimeDispatchErrorKind::OutputTooLarge,
             ));
         }
-        let contents_url =
-            build_github_contents_url(&repo.owner, &repo.repo, Some(&directory), &repo.branch)?;
+        let directory_path = normalized_archive_path_to_string(&directory)?;
+        let contents_url = build_github_contents_url(
+            &repo.owner,
+            &repo.repo,
+            Some(&directory_path),
+            &repo.branch,
+        )?;
         let entries: Vec<GitHubContentFile> =
             fetch_github_api_json(request, &contents_url, usage).await?;
         for entry in entries {
@@ -482,16 +488,17 @@ async fn fetch_github_contents_bundle_payload(
                 FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
             })?;
             match entry.entry_type.as_str() {
-                "dir" => directories.push_back(entry_path),
+                "dir" => {
+                    let path = normalize_archive_path(Path::new(&entry_path))?;
+                    collector.relative_path(&path)?;
+                    directories.push_back(path);
+                }
                 "file" => {
                     let path = normalize_archive_path(Path::new(&entry_path))?;
-                    let relative = path.strip_prefix(Path::new(root_subdir)).map_err(|_| {
-                        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
-                    })?;
-                    if relative.as_os_str().is_empty() {
+                    let Some(relative) = collector.relative_path(&path)? else {
                         continue;
-                    }
-                    if !seen_files.insert(relative.to_path_buf()) {
+                    };
+                    if !seen_files.insert(relative) {
                         return Err(FirstPartyCapabilityError::new(
                             RuntimeDispatchErrorKind::InputEncode,
                         ));
@@ -511,9 +518,24 @@ async fn fetch_github_contents_bundle_payload(
     let payload = collector.finish()?;
     tracing::debug!(
         source_url,
-        source_subdir = root_subdir,
+        source_subdir = root_dir,
         bundle_file_count = payload.files.len(),
         "skill URL install fetched GitHub contents bundle"
     );
     Ok(payload)
+}
+
+fn normalized_archive_path_to_string(path: &Path) -> Result<String, FirstPartyCapabilityError> {
+    let mut segments = Vec::new();
+    for segment in path.iter() {
+        segments.push(segment.to_str().ok_or_else(|| {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+        })?);
+    }
+    if segments.is_empty() {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    }
+    Ok(segments.join("/"))
 }

@@ -231,6 +231,49 @@ async fn install_bundle_failure_cleans_up_partial_directory() {
 }
 
 #[tokio::test]
+async fn install_rejects_preexisting_skill_directory_without_deleting_contents() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    filesystem
+        .write_file(
+            &VirtualPath::new("/projects/skills/existing-helper/references/guide.md").unwrap(),
+            b"# Keep\n",
+        )
+        .await
+        .unwrap();
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md("existing-helper", "description", "PROMPT"),
+            files: &[SkillInstallFile {
+                relative_path: "scripts/run.py",
+                contents: b"print('new')\n",
+            }],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind(), SkillManagementErrorKind::Conflict);
+    assert_file_contents(
+        &filesystem,
+        "/projects/skills/existing-helper/references/guide.md",
+        b"# Keep\n",
+    )
+    .await;
+    assert_missing(&filesystem, "/projects/skills/existing-helper/SKILL.md").await;
+    assert_missing(
+        &filesystem,
+        "/projects/skills/existing-helper/scripts/run.py",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn install_metadata_write_failure_cleans_up_partial_directory() {
     let inner = Arc::new(InMemoryBackend::default());
     let filesystem = Arc::new(FailingBundleWriteFilesystem {
@@ -345,6 +388,15 @@ async fn assert_missing(root: &InMemoryBackend, path: &str) {
         Ok(Some(_)) => panic!("{path} should have been cleaned up"),
         Err(error) => panic!("unexpected filesystem error: {error:?}"),
     }
+}
+
+async fn assert_file_contents(root: &InMemoryBackend, path: &str, expected: &[u8]) {
+    let bytes = root
+        .read_file_bounded(&VirtualPath::new(path).unwrap(), 1024)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("{path} should exist"));
+    assert_eq!(bytes, expected);
 }
 
 #[derive(Clone)]

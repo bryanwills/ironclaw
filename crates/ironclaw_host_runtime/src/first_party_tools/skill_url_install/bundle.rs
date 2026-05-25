@@ -52,12 +52,9 @@ impl BundleCollector {
             ));
         }
 
-        let relative = path.strip_prefix(&self.root).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
-        })?;
-        if relative.as_os_str().is_empty() {
+        let Some(relative) = self.relative_path(&path)? else {
             return Ok(());
-        }
+        };
         if relative == Path::new("SKILL.md") {
             if bytes.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
                 return Err(FirstPartyCapabilityError::new(
@@ -79,6 +76,19 @@ impl BundleCollector {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn relative_path(
+        &self,
+        path: &Path,
+    ) -> Result<Option<PathBuf>, FirstPartyCapabilityError> {
+        let relative = path.strip_prefix(&self.root).map_err(|_| {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        })?;
+        if relative.as_os_str().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(relative.to_path_buf()))
     }
 
     pub(super) fn finish(self) -> Result<SkillUrlPayload, FirstPartyCapabilityError> {

@@ -224,7 +224,20 @@ pub async fn install_skill(
     validate_install_bundle_files(request.files)?;
 
     let skill_name = parsed.manifest.name;
+    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, &skill_name)?;
     let skill_path = skill_scoped_path(USER_SKILLS_ROOT, &skill_name, SKILL_FILE_NAME)?;
+
+    log_skill_filesystem_phase("stat_existing_dir", &skill_name, &skill_dir);
+    if stat_optional(context, &skill_dir).await?.is_some() {
+        tracing::debug!(
+            skill_name = %skill_name,
+            scoped_path = %skill_dir,
+            "skill install rejected existing skill directory"
+        );
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::Conflict,
+        ));
+    }
 
     log_skill_filesystem_phase("stat_existing", &skill_name, &skill_path);
     if stat_optional(context, &skill_path).await?.is_some() {
