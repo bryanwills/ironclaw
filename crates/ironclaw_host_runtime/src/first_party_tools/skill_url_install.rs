@@ -15,6 +15,7 @@ const SKILL_URL_RESPONSE_BODY_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
 const SKILL_URL_FETCH_TIMEOUT_MS: u32 = 10_000;
 const MAX_ZIP_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_GITHUB_PATH_SEGMENTS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SkillUrlPayload {
@@ -77,7 +78,16 @@ async fn fetch_url_bytes(
     url: &url::Url,
     usage: &mut ResourceUsage,
 ) -> Result<Vec<u8>, FirstPartyCapabilityError> {
-    let response = fetch_url_response(request, url, usage).await?;
+    fetch_url_bytes_with_headers(request, url, usage, Vec::new()).await
+}
+
+async fn fetch_url_bytes_with_headers(
+    request: &FirstPartyCapabilityRequest,
+    url: &url::Url,
+    usage: &mut ResourceUsage,
+    headers: Vec<(String, String)>,
+) -> Result<Vec<u8>, FirstPartyCapabilityError> {
+    let response = fetch_url_response(request, url, usage, headers).await?;
     if !(200..300).contains(&response.status) {
         return Err(
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
@@ -91,6 +101,7 @@ async fn fetch_url_response(
     request: &FirstPartyCapabilityRequest,
     url: &url::Url,
     usage: &mut ResourceUsage,
+    headers: Vec<(String, String)>,
 ) -> Result<FetchedBytes, FirstPartyCapabilityError> {
     let egress = request
         .services
@@ -104,7 +115,7 @@ async fn fetch_url_response(
         capability_id: request.capability_id.clone(),
         method: NetworkMethod::Get,
         url: url.to_string(),
-        headers: Vec::new(),
+        headers,
         body: Vec::new(),
         network_policy: NetworkPolicy::default(),
         credential_injections: Vec::new(),
@@ -300,12 +311,25 @@ fn build_github_contents_url(
     Ok(url)
 }
 
+fn github_api_headers() -> Vec<(String, String)> {
+    vec![
+        (
+            "User-Agent".to_string(),
+            "ironclaw-skill-install".to_string(),
+        ),
+        (
+            "Accept".to_string(),
+            "application/vnd.github+json".to_string(),
+        ),
+    ]
+}
+
 async fn fetch_github_api_value(
     request: &FirstPartyCapabilityRequest,
     url: &url::Url,
     usage: &mut ResourceUsage,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let bytes = fetch_url_bytes(request, url, usage).await?;
+    let bytes = fetch_url_bytes_with_headers(request, url, usage, github_api_headers()).await?;
     serde_json::from_slice(&bytes).map_err(|_| {
         FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
             .with_usage(usage.clone())
@@ -371,7 +395,7 @@ async fn github_ref_path_exists(
     usage: &mut ResourceUsage,
 ) -> Result<bool, FirstPartyCapabilityError> {
     let contents_url = build_github_contents_url(owner, repo, path, git_ref)?;
-    let response = fetch_url_response(request, &contents_url, usage).await?;
+    let response = fetch_url_response(request, &contents_url, usage, github_api_headers()).await?;
     match response.status {
         200..=299 => Ok(true),
         404 => Ok(false),
@@ -390,7 +414,7 @@ async fn resolve_github_tree_request(
     validate_github_repo_components(&repo.owner, &repo.repo)?;
     let branch = match repo.tree_segments {
         Some(segments) => {
-            if segments.is_empty() {
+            if segments.is_empty() || segments.len() > MAX_GITHUB_PATH_SEGMENTS {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::InputEncode,
                 ));
@@ -438,7 +462,7 @@ async fn resolve_github_blob_download_url(
     usage: &mut ResourceUsage,
 ) -> Result<url::Url, FirstPartyCapabilityError> {
     validate_github_repo_components(&blob.owner, &blob.repo)?;
-    if blob.blob_segments.len() < 2 {
+    if blob.blob_segments.len() < 2 || blob.blob_segments.len() > MAX_GITHUB_PATH_SEGMENTS {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
@@ -452,7 +476,8 @@ async fn resolve_github_blob_download_url(
             Some(&candidate_path),
             &candidate_ref,
         )?;
-        let response = fetch_url_response(request, &contents_url, usage).await?;
+        let response =
+            fetch_url_response(request, &contents_url, usage, github_api_headers()).await?;
         if response.status == 404 {
             continue;
         }
@@ -570,6 +595,7 @@ fn extract_skill_bundle_from_zip(
     }
     let strip_root = strip_common_archive_root(&raw_paths);
     let mut files = Vec::<(PathBuf, Vec<u8>)>::new();
+    let mut seen_paths = std::collections::HashSet::<PathBuf>::new();
     let mut skill_dirs = std::collections::HashSet::<PathBuf>::new();
     let mut total_unzipped_bytes = 0u64;
 
@@ -594,6 +620,11 @@ fn extract_skill_bundle_from_zip(
         }
         if path.as_os_str().is_empty() {
             continue;
+        }
+        if !seen_paths.insert(path.clone()) {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::InputEncode,
+            ));
         }
 
         let mut contents = Vec::new();
