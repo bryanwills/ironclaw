@@ -4136,11 +4136,14 @@ name = "ironclaw_auth"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
+ "hex",
  "ironclaw_host_api",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -4365,8 +4368,10 @@ dependencies = [
 name = "ironclaw_first_party_extensions"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "glob",
+ "ironclaw_auth",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_safety",
@@ -4822,6 +4827,7 @@ dependencies = [
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_first_party_extension_ports",
+ "ironclaw_first_party_extensions",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_llm",
