@@ -12,11 +12,11 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     ActionDispatchKind, DefaultProductWorkflow, FakeConversationBindingService,
-    FakeIdempotencyLedger, FakeInboundTurnService, LifecyclePackageKind, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductCommandService, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductResponse, ProductCommand, ProductCommandAdmission,
-    ProductCommandAdmissionService, ProductCommandContext, ProductCommandService,
-    ProductModelCommand, ProductWorkflowError,
+    FakeIdempotencyLedger, FakeInboundTurnService, LifecyclePackageKind, LifecyclePackageRef,
+    LifecyclePhase, LifecycleProductAction, LifecycleProductCommandService,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse, ProductCommand,
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandService, ProductModelCommand, ProductWorkflowError,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -125,6 +125,18 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
             vec![],
         ))
     }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Ok(LifecycleProductResponse::projection(
+            Some(package_ref),
+            LifecyclePhase::UnsupportedOrLegacy,
+            vec![],
+        ))
+    }
 }
 
 struct FailingLifecycleProductFacade {
@@ -137,6 +149,14 @@ impl LifecycleProductFacade for FailingLifecycleProductFacade {
         &self,
         _context: LifecycleProductContext,
         _action: LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(self.error.clone())
+    }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        _package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Err(self.error.clone())
     }

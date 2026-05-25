@@ -59,7 +59,8 @@ pub use command_dispatch::{
     ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
 };
 pub use commands::{
-    ProductCommand, ProductCommandDescriptor, ProductModelCommand, product_command_descriptors,
+    LifecycleProductCommandService, ProductCommand, ProductCommandDescriptor, ProductModelCommand,
+    product_command_descriptors,
 };
 pub use conversation_binding::{
     ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
@@ -78,9 +79,9 @@ pub use inbound_turn::{
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
     LifecycleBlockerRef, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
-    LifecyclePhase, LifecycleProductAction, LifecycleProductCommandService,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, UnsupportedLifecycleProductFacade,
+    LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductResponse, LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
+    UnsupportedLifecycleProductFacade,
 };
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,

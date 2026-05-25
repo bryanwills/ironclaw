@@ -5,19 +5,16 @@
 //! dedicated services; lifecycle projections may only carry redacted refs to
 //! the owning interaction.
 
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_product_adapters::{
-    InboundCommandPayload, ProductInboundAck, ProductRejection, ProductRejectionKind,
-};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
-use crate::{ProductCommand, ProductCommandContext, ProductCommandService, ProductWorkflowError};
+use crate::{ProductCommandContext, ProductWorkflowError};
 
-const LIFECYCLE_ID_MAX_BYTES: usize = 256;
+pub(crate) const LIFECYCLE_ID_MAX_BYTES: usize = 256;
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;
 
 macro_rules! bounded_lifecycle_string {
@@ -283,48 +280,9 @@ pub trait LifecycleProductFacade: Send + Sync {
 
     async fn project_package(
         &self,
-        _context: LifecycleProductContext,
+        context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        Err(ProductWorkflowError::UnsupportedActionKind {
-            kind: format!("lifecycle_project_package:{:?}", package_ref.kind),
-        })
-    }
-}
-
-pub struct LifecycleProductCommandService {
-    facade: Arc<dyn LifecycleProductFacade>,
-}
-
-impl LifecycleProductCommandService {
-    pub fn new(facade: Arc<dyn LifecycleProductFacade>) -> Self {
-        Self { facade }
-    }
-}
-
-#[async_trait]
-impl ProductCommandService for LifecycleProductCommandService {
-    async fn execute(
-        &self,
-        context: ProductCommandContext,
-        command: ProductCommand,
-    ) -> Result<ProductInboundAck, ProductWorkflowError> {
-        let ProductCommand::Lifecycle { action } = command else {
-            return Ok(ProductInboundAck::Rejected(ProductRejection::permanent(
-                ProductRejectionKind::PolicyDenied,
-                format!("command routing unavailable: {}", command.name()),
-            )));
-        };
-        // Lifecycle commands are admitted and executed by the facade;
-        // the structured response (phase, blockers, payload) belongs to
-        // the lifecycle projection stream, not the command ack channel.
-        // TODO: once the product surface surfaces lifecycle projections
-        // to the caller, wire the response into the projection stream.
-        self.facade
-            .execute(LifecycleProductContext::Command(context), action)
-            .await?;
-        Ok(ProductInboundAck::NoOp)
-    }
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError>;
 }
 
 #[derive(Debug, Clone)]
@@ -376,150 +334,9 @@ impl LifecycleProductFacade for UnsupportedLifecycleProductFacade {
     }
 }
 
-pub fn parse_lifecycle_command_payload(payload: &InboundCommandPayload) -> ProductCommand {
-    match payload.command.as_str() {
-        "extension_search" => ProductCommand::Lifecycle {
-            action: LifecycleProductAction::ExtensionSearch {
-                query: payload.arguments.trim().to_string(),
-            },
-        },
-        "extension_install" => extension_package_command(payload, |package_ref| {
-            LifecycleProductAction::ExtensionInstall { package_ref }
-        }),
-        "extension_auth" => extension_package_command(payload, |package_ref| {
-            LifecycleProductAction::ExtensionAuth { package_ref }
-        }),
-        "extension_activate" => extension_package_command(payload, |package_ref| {
-            LifecycleProductAction::ExtensionActivate { package_ref }
-        }),
-        "extension_configure" => parse_extension_configure_command(payload),
-        "extension_remove" => extension_package_command(payload, |package_ref| {
-            LifecycleProductAction::ExtensionRemove { package_ref }
-        }),
-        "skill_search" => ProductCommand::Lifecycle {
-            action: LifecycleProductAction::SkillSearch {
-                query: payload.arguments.trim().to_string(),
-            },
-        },
-        "skill_install" => parse_skill_install_command(payload),
-        "skill_remove" => parse_skill_remove_command(payload),
-        _ => unknown_lifecycle_command(payload),
-    }
-}
-
-fn parse_extension_configure_command(payload: &InboundCommandPayload) -> ProductCommand {
-    let args = payload.arguments.trim();
-    let (id, config_payload) = match serde_json::from_str::<Value>(args) {
-        Ok(json) => {
-            let id = json
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            (id, json.get("payload").cloned())
-        }
-        Err(_) => (first_argument(args).to_string(), None),
-    };
-    match lifecycle_package_ref(LifecyclePackageKind::Extension, id) {
-        Ok(package_ref) => ProductCommand::Lifecycle {
-            action: LifecycleProductAction::ExtensionConfigure {
-                package_ref,
-                payload: config_payload,
-            },
-        },
-        Err(_) => unknown_lifecycle_command(payload),
-    }
-}
-
-fn parse_skill_install_command(payload: &InboundCommandPayload) -> ProductCommand {
-    let args = payload.arguments.trim();
-    let Ok(json) = serde_json::from_str::<Value>(args) else {
-        return unknown_lifecycle_command(payload);
-    };
-    let content = match json.get("content").and_then(Value::as_str) {
-        Some(content) => content,
-        None => return unknown_lifecycle_command(payload),
-    };
-    let content = match validate_lifecycle_text(content.to_string(), "skill content", 64 * 1024) {
-        Ok(content) => content,
-        Err(_) => return unknown_lifecycle_command(payload),
-    };
-    let name = match json.get("name").and_then(Value::as_str) {
-        Some(name) => {
-            match validate_lifecycle_string(name.to_string(), "skill name", LIFECYCLE_ID_MAX_BYTES)
-            {
-                Ok(name) => Some(name),
-                Err(_) => return unknown_lifecycle_command(payload),
-            }
-        }
-        None => None,
-    };
-    ProductCommand::Lifecycle {
-        action: LifecycleProductAction::SkillInstall { name, content },
-    }
-}
-
-fn parse_skill_remove_command(payload: &InboundCommandPayload) -> ProductCommand {
-    let args = payload.arguments.trim();
-    let id = serde_json::from_str::<Value>(args)
-        .ok()
-        .and_then(|json| {
-            json.get("id")
-                .or_else(|| json.get("name"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| first_argument(args).to_string());
-    match lifecycle_package_ref(LifecyclePackageKind::Skill, id) {
-        Ok(package_ref) => ProductCommand::Lifecycle {
-            action: LifecycleProductAction::SkillRemove { package_ref },
-        },
-        Err(_) => unknown_lifecycle_command(payload),
-    }
-}
-
-fn extension_package_command(
-    payload: &InboundCommandPayload,
-    build: fn(LifecyclePackageRef) -> LifecycleProductAction,
-) -> ProductCommand {
-    let id = lifecycle_ref_argument(payload);
-    match lifecycle_package_ref(LifecyclePackageKind::Extension, id) {
-        Ok(package_ref) => ProductCommand::Lifecycle {
-            action: build(package_ref),
-        },
-        Err(_) => unknown_lifecycle_command(payload),
-    }
-}
-
-fn lifecycle_ref_argument(payload: &InboundCommandPayload) -> String {
-    let args = payload.arguments.trim();
-    serde_json::from_str::<Value>(args)
-        .ok()
-        .and_then(|json| json.get("id").and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_else(|| first_argument(args).to_string())
-}
-
-fn first_argument(args: &str) -> &str {
-    args.split_whitespace().next().unwrap_or("")
-}
-
-fn unknown_lifecycle_command(payload: &InboundCommandPayload) -> ProductCommand {
-    ProductCommand::Unknown {
-        name: payload.command.clone(),
-        arguments: payload.arguments.clone(),
-    }
-}
-
-pub fn lifecycle_package_ref(
-    kind: LifecyclePackageKind,
-    id: impl Into<String>,
-) -> Result<LifecyclePackageRef, ProductWorkflowError> {
-    LifecyclePackageRef::new(kind, id)
-}
-
 /// Validates a lifecycle string: non-empty, within byte limit, with optional
 /// control-character filtering.
-pub fn validate_lifecycle_string(
+pub(crate) fn validate_lifecycle_string(
     value: String,
     label: &'static str,
     max_bytes: usize,
@@ -529,7 +346,7 @@ pub fn validate_lifecycle_string(
 
 /// Validates free-form lifecycle text that may contain control characters
 /// (e.g. newlines in skill markdown) but still blocks NUL.
-pub fn validate_lifecycle_text(
+pub(crate) fn validate_lifecycle_text(
     value: String,
     label: &'static str,
     max_bytes: usize,

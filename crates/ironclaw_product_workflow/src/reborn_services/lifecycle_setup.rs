@@ -1,7 +1,7 @@
 use ironclaw_common::ExtensionName;
 
 use crate::{
-    LifecyclePackageKind, LifecycleProductContext, LifecycleProductFacade,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductResponse, LifecycleProductSurfaceContext, ProductWorkflowError,
     RebornServicesError, RebornServicesErrorCode, RebornSetupExtensionResponse,
     WebUiAuthenticatedCaller, WebUiSetupExtensionRequest,
@@ -21,11 +21,8 @@ pub(super) async fn setup_extension(
                 agent_id: caller.agent_id,
                 project_id: caller.project_id,
             }),
-            crate::lifecycle::lifecycle_package_ref(
-                LifecyclePackageKind::Extension,
-                extension_name.as_str(),
-            )
-            .map_err(map_lifecycle_error)?,
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_name.as_str())
+                .map_err(map_lifecycle_error)?,
         )
         .await
         .map_err(map_lifecycle_error)?;
