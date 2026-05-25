@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
@@ -30,7 +30,7 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
-    TurnEventProjectionSource, TurnRunId, TurnScope,
+    TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::CapabilityInputRef,
 };
 
 mod turn_events;
@@ -72,9 +72,20 @@ impl CapabilityDisplayPreviewSource for NoopCapabilityDisplayPreviewSource {
 
 #[derive(Default)]
 pub(crate) struct CapabilityDisplayPreviewStore {
-    pending_inputs: Mutex<HashMap<String, VecDeque<CapabilityDisplayInputPreview>>>,
-    completed: Mutex<HashMap<String, CapabilityDisplayPreviewRecord>>,
-    completed_by_run: Mutex<HashMap<String, Vec<String>>>,
+    pending: Mutex<CapabilityDisplayPendingInputs>,
+    completed: Mutex<CapabilityDisplayCompletedPreviews>,
+}
+
+#[derive(Default)]
+struct CapabilityDisplayPendingInputs {
+    by_ref: HashMap<String, CapabilityDisplayInputPreview>,
+    refs_by_run: HashMap<String, Vec<String>>,
+}
+
+#[derive(Default)]
+struct CapabilityDisplayCompletedPreviews {
+    by_invocation: HashMap<String, CapabilityDisplayPreviewRecord>,
+    invocations_by_run: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,10 +109,21 @@ pub(crate) struct CapabilityDisplayPreviewRecord {
     pub(crate) truncated: bool,
 }
 
+pub(crate) struct CapabilityDisplayPreviewResult<'a> {
+    pub(crate) run_id: &'a str,
+    pub(crate) input_ref: &'a CapabilityInputRef,
+    pub(crate) invocation_id: InvocationId,
+    pub(crate) capability_id: &'a CapabilityId,
+    pub(crate) result_ref: &'a str,
+    pub(crate) output: &'a serde_json::Value,
+    pub(crate) output_bytes: u64,
+}
+
 impl CapabilityDisplayPreviewStore {
     pub(crate) fn record_input(
         &self,
         run_id: &str,
+        input_ref: &CapabilityInputRef,
         tool_name: &str,
         arguments: &serde_json::Value,
     ) {
@@ -114,33 +136,28 @@ impl CapabilityDisplayPreviewStore {
                 .is_some_and(|summary| summary.truncated),
             input_summary: input_summary.map(|summary| summary.text),
         };
-        if let Ok(mut pending) = self.pending_inputs.lock() {
+        if let Ok(mut pending) = self.pending.lock() {
+            let input_ref = input_ref.as_str().to_string();
+            pending.by_ref.insert(input_ref.clone(), input);
             pending
+                .refs_by_run
                 .entry(run_id.to_string())
                 .or_default()
-                .push_back(input);
+                .push(input_ref);
         }
     }
 
-    pub(crate) fn record_result(
-        &self,
-        run_id: &str,
-        invocation_id: InvocationId,
-        capability_id: &CapabilityId,
-        result_ref: &str,
-        output: &serde_json::Value,
-        output_bytes: u64,
-    ) {
+    pub(crate) fn record_result(&self, result: CapabilityDisplayPreviewResult<'_>) {
         let input = self
-            .pending_inputs
+            .pending
             .lock()
             .ok()
-            .and_then(|mut pending| pending.get_mut(run_id).and_then(VecDeque::pop_front));
+            .and_then(|mut pending| pending.by_ref.remove(result.input_ref.as_str()));
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
-            .unwrap_or_else(|| safe_capability_title(capability_id.as_str()).to_string());
-        let output = output_preview(output);
+            .unwrap_or_else(|| safe_capability_title(result.capability_id.as_str()).to_string());
+        let output = output_preview(result.output);
         let record = CapabilityDisplayPreviewRecord {
             title,
             subtitle: input.as_ref().and_then(|input| input.subtitle.clone()),
@@ -148,36 +165,36 @@ impl CapabilityDisplayPreviewStore {
             output_summary: output.summary,
             output_preview: output.preview,
             output_kind: Some(output.kind),
-            output_bytes: Some(output_bytes),
-            result_ref: Some(result_ref.to_string()),
+            output_bytes: Some(result.output_bytes),
+            result_ref: Some(result.result_ref.to_string()),
             truncated: input.as_ref().is_some_and(|input| input.truncated) || output.truncated,
         };
         if let Ok(mut completed) = self.completed.lock() {
-            let invocation_id = invocation_id.to_string();
-            completed.insert(invocation_id.clone(), record);
-            if let Ok(mut completed_by_run) = self.completed_by_run.lock() {
-                completed_by_run
-                    .entry(run_id.to_string())
-                    .or_default()
-                    .push(invocation_id);
-            }
+            let invocation_id = result.invocation_id.to_string();
+            completed
+                .by_invocation
+                .insert(invocation_id.clone(), record);
+            completed
+                .invocations_by_run
+                .entry(result.run_id.to_string())
+                .or_default()
+                .push(invocation_id);
         }
     }
 
     pub(crate) fn prune_run(&self, run_id: &str) {
-        if let Ok(mut pending) = self.pending_inputs.lock() {
-            pending.remove(run_id);
+        if let Ok(mut pending) = self.pending.lock()
+            && let Some(input_refs) = pending.refs_by_run.remove(run_id)
+        {
+            for input_ref in input_refs {
+                pending.by_ref.remove(&input_ref);
+            }
         }
-        let completed_invocations = self
-            .completed_by_run
-            .lock()
-            .ok()
-            .and_then(|mut completed_by_run| completed_by_run.remove(run_id));
-        if let Ok(mut completed) = self.completed.lock() {
-            if let Some(invocation_ids) = completed_invocations {
-                for invocation_id in invocation_ids {
-                    completed.remove(&invocation_id);
-                }
+        if let Ok(mut completed) = self.completed.lock()
+            && let Some(invocation_ids) = completed.invocations_by_run.remove(run_id)
+        {
+            for invocation_id in invocation_ids {
+                completed.by_invocation.remove(&invocation_id);
             }
         }
     }
@@ -186,10 +203,12 @@ impl CapabilityDisplayPreviewStore {
         &self,
         invocation_id: InvocationId,
     ) -> Option<CapabilityDisplayPreviewRecord> {
-        self.completed
-            .lock()
-            .ok()
-            .and_then(|completed| completed.get(&invocation_id.to_string()).cloned())
+        self.completed.lock().ok().and_then(|completed| {
+            completed
+                .by_invocation
+                .get(&invocation_id.to_string())
+                .cloned()
+        })
     }
 }
 
@@ -911,20 +930,21 @@ struct OutputPreview {
 }
 
 fn output_preview(value: &serde_json::Value) -> OutputPreview {
-    let (kind, text) = if let Some(text) = value.as_str() {
-        ("text", text.to_string())
+    let (kind, text, json_truncated) = if let Some(text) = value.as_str() {
+        ("text", text.to_string(), false)
     } else if let Some(text) = value
         .get("content")
         .or_else(|| value.get("text"))
         .or_else(|| value.get("stdout"))
         .and_then(serde_json::Value::as_str)
     {
-        ("text", text.to_string())
+        ("text", text.to_string(), false)
     } else {
-        let safe_value = sanitize_json_value(value);
+        let safe_value = sanitize_json_value_with_truncation(value);
         (
             "json",
-            serde_json::to_string_pretty(&safe_value).unwrap_or_else(|_| "{}".to_string()),
+            serde_json::to_string_pretty(&safe_value.value).unwrap_or_else(|_| "{}".to_string()),
+            safe_value.truncated,
         )
     };
     let preview = bounded_preview_text(&text);
@@ -939,7 +959,7 @@ fn output_preview(value: &serde_json::Value) -> OutputPreview {
         summary: non_empty(summary.text),
         preview: non_empty(preview.text),
         kind: kind.to_string(),
-        truncated: summary.truncated || preview.truncated,
+        truncated: summary.truncated || preview.truncated || json_truncated,
     }
 }
 
@@ -950,22 +970,25 @@ struct DisplayText {
 }
 
 fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<DisplayText> {
-    if capability_id == "read_file"
+    if (capability_id == "read_file"
         || capability_id == "builtin.read_file"
-        || capability_id.ends_with(".read_file")
+        || capability_id.ends_with(".read_file"))
+        && let Some(path) = safe_path_subtitle(value)
     {
-        if let Some(path) = safe_path_subtitle(value) {
-            let mut summary = format!("path: {path}");
-            if let Some(max_bytes) = value.get("max_bytes").and_then(serde_json::Value::as_u64) {
-                summary.push_str(&format!("\nmax_bytes: {max_bytes}"));
-            }
-            return Some(bounded_display_text(&summary, 2048));
+        let mut summary = format!("path: {path}");
+        if let Some(max_bytes) = value.get("max_bytes").and_then(serde_json::Value::as_u64) {
+            summary.push_str(&format!("\nmax_bytes: {max_bytes}"));
         }
+        return Some(bounded_display_text(&summary, 2048));
     }
-    let safe_value = sanitize_json_value(value);
-    serde_json::to_string_pretty(&safe_value)
+    let safe_value = sanitize_json_value_with_truncation(value);
+    serde_json::to_string_pretty(&safe_value.value)
         .ok()
-        .map(|text| bounded_display_text(&text, 2048))
+        .map(|text| {
+            let mut summary = bounded_display_text(&text, 2048);
+            summary.truncated |= safe_value.truncated;
+            summary
+        })
 }
 
 fn safe_capability_title(capability_id: &str) -> &str {
@@ -997,43 +1020,79 @@ fn safe_display_path(path: &str) -> Option<String> {
     Some(bounded_display_text(path, 2048).text)
 }
 
+#[derive(Debug, Clone)]
+struct SanitizedJson {
+    value: serde_json::Value,
+    truncated: bool,
+}
+
+#[cfg(test)]
 fn sanitize_json_value(value: &serde_json::Value) -> serde_json::Value {
+    sanitize_json_value_with_truncation(value).value
+}
+
+fn sanitize_json_value_with_truncation(value: &serde_json::Value) -> SanitizedJson {
     sanitize_json_value_at_depth(value, SANITIZE_JSON_MAX_DEPTH)
 }
 
 fn sanitize_json_value_at_depth(
     value: &serde_json::Value,
     remaining_depth: usize,
-) -> serde_json::Value {
+) -> SanitizedJson {
     if remaining_depth == 0 {
-        return serde_json::Value::String("[truncated]".to_string());
+        return SanitizedJson {
+            value: serde_json::Value::String("[truncated]".to_string()),
+            truncated: true,
+        };
     }
     match value {
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.iter()
-                .map(|(key, value)| {
-                    let sanitized = if is_sensitive_key(key) {
-                        serde_json::Value::String("[redacted]".to_string())
-                    } else {
-                        sanitize_json_value_at_depth(value, remaining_depth - 1)
-                    };
-                    (key.clone(), sanitized)
-                })
-                .collect(),
-        ),
-        serde_json::Value::Array(values) => serde_json::Value::Array(
-            values
-                .iter()
-                .map(|value| sanitize_json_value_at_depth(value, remaining_depth - 1))
-                .collect(),
-        ),
-        serde_json::Value::String(value) => serde_json::Value::String(sanitize_text(value)),
-        other => other.clone(),
+        serde_json::Value::Object(map) => {
+            let mut truncated = false;
+            let value = serde_json::Value::Object(
+                map.iter()
+                    .map(|(key, value)| {
+                        let sanitized = if is_sensitive_key(key) {
+                            serde_json::Value::String("[redacted]".to_string())
+                        } else {
+                            let sanitized =
+                                sanitize_json_value_at_depth(value, remaining_depth - 1);
+                            truncated |= sanitized.truncated;
+                            sanitized.value
+                        };
+                        (key.clone(), sanitized)
+                    })
+                    .collect(),
+            );
+            SanitizedJson { value, truncated }
+        }
+        serde_json::Value::Array(values) => {
+            let mut truncated = false;
+            let value = serde_json::Value::Array(
+                values
+                    .iter()
+                    .map(|value| {
+                        let sanitized = sanitize_json_value_at_depth(value, remaining_depth - 1);
+                        truncated |= sanitized.truncated;
+                        sanitized.value
+                    })
+                    .collect(),
+            );
+            SanitizedJson { value, truncated }
+        }
+        serde_json::Value::String(value) => SanitizedJson {
+            value: serde_json::Value::String(sanitize_text(value)),
+            truncated: false,
+        },
+        other => SanitizedJson {
+            value: other.clone(),
+            truncated: false,
+        },
     }
 }
 
 fn is_sensitive_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
+    // Display previews bias toward over-redaction; benign counters like max_tokens can be hidden.
     key.contains("secret")
         || key.contains("password")
         || key.contains("token")
@@ -1052,6 +1111,7 @@ fn bounded_preview_text(text: &str) -> DisplayText {
     let mut truncated = false;
     let mut line_count = 0usize;
     let mut end = sanitized.len();
+    // Keep in sync with ironclaw_product_adapters display-preview validator limits.
     for (index, _) in sanitized.match_indices('\n') {
         line_count += 1;
         if line_count >= 120 {
@@ -1131,17 +1191,26 @@ fn is_secret_like(token: &str) -> bool {
 
 fn is_unsafe_path_like(token: &str) -> bool {
     let token = token.trim_matches(token_boundary_punctuation);
-    token.starts_with("/Users/")
-        || token.contains("/Users/")
-        || token.starts_with("/home/")
-        || token.contains("/home/")
-        || token.starts_with("/private/")
-        || token.contains("/private/")
-        || token.starts_with("/var/folders/")
-        || token.contains("/var/folders/")
-        || token.starts_with("/tmp/")
-        || token.contains("/tmp/")
+    token_contains_absolute_posix_path(token)
+        || token.starts_with("\\\\")
+        || token.contains("\\\\")
         || token.get(1..3) == Some(":\\")
+}
+
+fn token_contains_absolute_posix_path(token: &str) -> bool {
+    let mut previous = None;
+    let mut characters = token.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '/'
+            && previous.is_none_or(token_boundary_punctuation)
+            && !matches!(previous, Some('/'))
+            && !matches!(characters.peek(), Some('/'))
+        {
+            return true;
+        }
+        previous = Some(character);
+    }
+    false
 }
 
 fn token_boundary_punctuation(character: char) -> bool {

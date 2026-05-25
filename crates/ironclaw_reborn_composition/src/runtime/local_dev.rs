@@ -37,7 +37,10 @@ use ironclaw_turns::{
     },
 };
 
-use crate::{RebornServices, projection::CapabilityDisplayPreviewStore};
+use crate::{
+    RebornServices,
+    projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
+};
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -296,6 +299,7 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
             .insert_without_eviction(input_ref.as_str().to_string(), tool_call.arguments.clone())?;
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
+            &input_ref,
             &tool_call.name,
             &tool_call.arguments,
         );
@@ -308,6 +312,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
         invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         output: serde_json::Value,
@@ -323,14 +328,16 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         let output_bytes = staged_value_bytes(&output)?.try_into().unwrap_or(u64::MAX);
         let mut results = self.results.lock().map_err(|_| capability_io_error())?;
         results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
-        self.display_previews.record_result(
-            &run_context.run_id.to_string(),
-            invocation_id,
-            _capability_id,
-            result_ref.as_str(),
-            &output,
-            output_bytes,
-        );
+        self.display_previews
+            .record_result(CapabilityDisplayPreviewResult {
+                run_id: &run_context.run_id.to_string(),
+                input_ref,
+                invocation_id,
+                capability_id: _capability_id,
+                result_ref: result_ref.as_str(),
+                output: &output,
+                output_bytes,
+            });
         Ok(result_ref)
     }
 }

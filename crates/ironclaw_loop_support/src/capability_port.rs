@@ -134,6 +134,7 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
         output: serde_json::Value,
@@ -246,6 +247,15 @@ enum RuntimeTerminalMilestone {
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
     },
+}
+
+struct RuntimeOutcomeCompletion<'a> {
+    input_ref: &'a CapabilityInputRef,
+    invocation_id: InvocationId,
+    requested_capability_id: &'a CapabilityId,
+    provider: ExtensionId,
+    runtime: RuntimeKind,
+    outcome: RuntimeCapabilityOutcome,
 }
 
 #[derive(Default)]
@@ -634,38 +644,39 @@ impl HostRuntimeLoopCapabilityPort {
     async fn finish_runtime_outcome(
         &self,
         key: &IdempotencyKey,
-        invocation_id: InvocationId,
-        requested_capability_id: &CapabilityId,
-        provider: ExtensionId,
-        runtime: RuntimeKind,
-        outcome: RuntimeCapabilityOutcome,
+        completion: RuntimeOutcomeCompletion<'_>,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let result = runtime_outcome_to_loop(
             &self.run_context,
             self.result_writer.as_ref(),
-            invocation_id,
-            requested_capability_id,
-            outcome.clone(),
+            completion.input_ref,
+            completion.invocation_id,
+            completion.requested_capability_id,
+            completion.outcome.clone(),
         )
         .await;
-        if should_retry_result_write(&outcome, &result) {
+        if should_retry_result_write(&completion.outcome, &result) {
             self.record_runtime_completed(
                 key,
-                invocation_id,
-                requested_capability_id.clone(),
-                outcome,
+                completion.invocation_id,
+                completion.requested_capability_id.clone(),
+                completion.outcome,
             )?;
             return result;
         }
-        let terminal_milestone =
-            match runtime_terminal_milestone(invocation_id, provider, runtime, &outcome) {
-                Ok(milestone) => milestone,
-                Err(error) => {
-                    let result = Err(error);
-                    self.record_loop_completed(key, result.clone())?;
-                    return result;
-                }
-            };
+        let terminal_milestone = match runtime_terminal_milestone(
+            completion.invocation_id,
+            completion.provider,
+            completion.runtime,
+            &completion.outcome,
+        ) {
+            Ok(milestone) => milestone,
+            Err(error) => {
+                let result = Err(error);
+                self.record_loop_completed(key, result.clone())?;
+                return result;
+            }
+        };
         self.complete_terminal_milestone(key, result, terminal_milestone)
             .await
     }
@@ -676,11 +687,11 @@ impl HostRuntimeLoopCapabilityPort {
         result: Result<CapabilityOutcome, AgentLoopHostError>,
         terminal_milestone: Option<RuntimeTerminalMilestone>,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        if let Some(milestone) = terminal_milestone {
-            if let Err(error) = self.emit_terminal_milestone(&milestone).await {
-                self.record_terminal_milestone_pending(key, result.clone(), milestone)?;
-                return Err(error);
-            }
+        if let Some(milestone) = terminal_milestone
+            && let Err(error) = self.emit_terminal_milestone(&milestone).await
+        {
+            self.record_terminal_milestone_pending(key, result.clone(), milestone)?;
+            return Err(error);
         }
         self.record_loop_completed(key, result.clone())?;
         result
@@ -770,6 +781,7 @@ impl HostRuntimeLoopCapabilityPort {
             .result_writer
             .write_capability_result(
                 &self.run_context,
+                &request.input_ref,
                 InvocationId::new(),
                 &request.capability_id,
                 output,
@@ -975,17 +987,21 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         return self
                             .finish_runtime_outcome(
                                 &idempotency_key,
-                                invocation_id,
-                                &requested_capability_id,
-                                capability.provider.clone(),
-                                capability.runtime,
-                                outcome,
+                                RuntimeOutcomeCompletion {
+                                    input_ref: &request.input_ref,
+                                    invocation_id,
+                                    requested_capability_id: &requested_capability_id,
+                                    provider: capability.provider.clone(),
+                                    runtime: capability.runtime,
+                                    outcome,
+                                },
                             )
                             .await;
                     }
                     let result = runtime_outcome_to_loop(
                         &self.run_context,
                         self.result_writer.as_ref(),
+                        &request.input_ref,
                         invocation_id,
                         &requested_capability_id,
                         outcome,
@@ -1090,11 +1106,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         guard.commit();
         self.finish_runtime_outcome(
             &idempotency_key,
-            invocation_id,
-            &requested_capability_id,
-            provider,
-            runtime,
-            outcome,
+            RuntimeOutcomeCompletion {
+                input_ref: &request.input_ref,
+                invocation_id,
+                requested_capability_id: &requested_capability_id,
+                provider,
+                runtime,
+                outcome,
+            },
         )
         .await
     }
@@ -1642,6 +1661,7 @@ fn loop_surface_version(
 async fn runtime_outcome_to_loop(
     run_context: &LoopRunContext,
     result_writer: &(dyn LoopCapabilityResultWriter + Send + Sync),
+    input_ref: &CapabilityInputRef,
     invocation_id: InvocationId,
     requested_capability_id: &CapabilityId,
     outcome: RuntimeCapabilityOutcome,
@@ -1652,6 +1672,7 @@ async fn runtime_outcome_to_loop(
             let result_ref = result_writer
                 .write_capability_result(
                     run_context,
+                    input_ref,
                     invocation_id,
                     &completed.capability_id,
                     completed.output.clone(),
@@ -3741,6 +3762,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
             _invocation_id: InvocationId,
             _capability_id: &CapabilityId,
             _output: serde_json::Value,
@@ -3770,6 +3792,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
             _invocation_id: InvocationId,
             _capability_id: &CapabilityId,
             _output: serde_json::Value,
@@ -3805,6 +3828,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
             _invocation_id: InvocationId,
             capability_id: &CapabilityId,
             output: serde_json::Value,
@@ -3884,6 +3908,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
             _invocation_id: InvocationId,
             _capability_id: &CapabilityId,
             _output: serde_json::Value,

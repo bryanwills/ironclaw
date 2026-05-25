@@ -43,7 +43,10 @@ use ironclaw_turns::{
     },
 };
 
-use crate::{RebornServices, projection::CapabilityDisplayPreviewStore};
+use crate::{
+    RebornServices,
+    projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
+};
 
 #[derive(Debug, Error)]
 pub enum ProductLivePlannedRuntimeAdapterError {
@@ -214,6 +217,7 @@ impl LoopCapabilityInputResolver for ProductLiveCapabilityIo {
         let input_ref = self.stage_input(run_context, tool_call.arguments.clone())?;
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
+            &input_ref,
             &tool_call.name,
             &tool_call.arguments,
         );
@@ -226,6 +230,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
         invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         output: serde_json::Value,
@@ -257,14 +262,16 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
                 byte_len,
             },
         );
-        self.display_previews.record_result(
-            &run_context.run_id.to_string(),
-            invocation_id,
-            _capability_id,
-            result_ref.as_str(),
-            &output,
-            byte_len.try_into().unwrap_or(u64::MAX),
-        );
+        self.display_previews
+            .record_result(CapabilityDisplayPreviewResult {
+                run_id: &run_context.run_id.to_string(),
+                input_ref,
+                invocation_id,
+                capability_id: _capability_id,
+                result_ref: result_ref.as_str(),
+                output: &output,
+                output_bytes: byte_len.try_into().unwrap_or(u64::MAX),
+            });
         Ok(result_ref)
     }
 }
@@ -760,12 +767,14 @@ mod tests {
             reasoning: None,
             signature: None,
         };
-        io.register_provider_tool_call_input(&run_context, &tool_call)
+        let input_ref = io
+            .register_provider_tool_call_input(&run_context, &tool_call)
             .await
             .expect("input staged");
         let invocation_id = InvocationId::new();
         io.write_capability_result(
             &run_context,
+            &input_ref,
             invocation_id,
             &CapabilityId::new("builtin.read_file").unwrap(),
             serde_json::json!({"content": "fn main() {}"}),
@@ -795,9 +804,13 @@ mod tests {
     async fn capability_io_prunes_display_preview_with_run() {
         let io = ProductLiveCapabilityIo::default();
         let run_context = loop_run_context().await;
+        let input_ref = io
+            .stage_input(&run_context, serde_json::json!({"text": "ok"}))
+            .expect("input staged");
         let invocation_id = InvocationId::new();
         io.write_capability_result(
             &run_context,
+            &input_ref,
             invocation_id,
             &CapabilityId::new("demo.echo").unwrap(),
             serde_json::json!({"reply": "ok"}),

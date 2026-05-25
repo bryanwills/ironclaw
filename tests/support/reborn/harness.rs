@@ -1846,13 +1846,20 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
         output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         let result_ref = self
             .inner
-            .write_capability_result(run_context, invocation_id, capability_id, output.clone())
+            .write_capability_result(
+                run_context,
+                input_ref,
+                invocation_id,
+                capability_id,
+                output.clone(),
+            )
             .await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
             capability_id: capability_id.clone(),

@@ -5482,6 +5482,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
         _invocation_id: InvocationId,
         capability_id: &CapabilityId,
         output: Value,
