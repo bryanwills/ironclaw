@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ironclaw_host_api::runtime_policy::{EffectiveRuntimePolicy, FilesystemBackendKind};
+use ironclaw_host_api::runtime_policy::{
+    EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
+};
 use ironclaw_host_runtime::SchedulerTurnRunWakeNotifier;
 use ironclaw_trust::HostTrustPolicy;
 
@@ -111,6 +113,14 @@ impl RebornBuildInput {
     pub fn requires_local_dev_confirmed_host_home_root(&self) -> bool {
         self.runtime_policy.as_ref().is_some_and(|policy| {
             policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+        })
+    }
+
+    pub fn grants_trusted_laptop_access(&self) -> bool {
+        self.runtime_policy.as_ref().is_some_and(|policy| {
+            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+                || policy.network_mode == NetworkMode::Direct
+                || policy.secret_mode == SecretMode::InheritedEnv
         })
     }
 

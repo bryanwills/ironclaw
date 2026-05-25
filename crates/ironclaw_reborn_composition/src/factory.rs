@@ -163,10 +163,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
     });
     let host_home_root = match (include_host_home, host_home_root) {
-        (true, Some(path)) => Some(canonicalize_local_dev_existing_dir(
-            &path,
-            "host home root",
-        )?),
+        (true, Some(path)) => Some(canonicalize_local_dev_host_home_root(&path)?),
         (true, None) => {
             return Err(RebornBuildError::InvalidConfig {
                 reason: "local-dev-yolo host home access requires a confirmed host home root"
@@ -313,6 +310,16 @@ fn canonicalize_local_dev_existing_dir(
             reason: format!("local-dev {label} must be an existing directory"),
         })
     }
+}
+
+fn canonicalize_local_dev_host_home_root(path: &Path) -> Result<PathBuf, RebornBuildError> {
+    let path = canonicalize_local_dev_existing_dir(path, "host home root")?;
+    if path.parent().is_none() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "local-dev host home root must not be a filesystem root".to_string(),
+        });
+    }
+    Ok(path)
 }
 
 fn validate_local_dev_workspace_skill_isolation(

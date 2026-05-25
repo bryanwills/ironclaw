@@ -313,7 +313,7 @@ fn reject_non_loopback_privileged_local_runtime(
     host: IpAddr,
     runtime_input: &RebornRuntimeInput,
 ) -> anyhow::Result<()> {
-    if host.is_loopback() || !runtime_exposes_trusted_laptop_access(runtime_input) {
+    if host.is_loopback() || !runtime_input.grants_trusted_laptop_access() {
         return Ok(());
     }
 
@@ -323,20 +323,6 @@ fn reject_non_loopback_privileged_local_runtime(
          process, direct network, inherited environment). Bind to a loopback host such as \
          127.0.0.1 or ::1, or choose a less privileged profile."
     );
-}
-
-fn runtime_exposes_trusted_laptop_access(runtime_input: &RebornRuntimeInput) -> bool {
-    let Some(policy) = runtime_input
-        .services
-        .as_ref()
-        .and_then(|services| services.runtime_policy())
-    else {
-        return false;
-    };
-
-    policy.filesystem_backend.as_str() == "host_workspace_and_home"
-        || policy.network_mode.as_str() == "direct"
-        || policy.secret_mode.as_str() == "inherited_env"
 }
 
 fn resolve_webui_default_agent(

@@ -1,8 +1,4 @@
 use ironclaw_host_api::MountPermissions;
-use ironclaw_host_api::runtime_policy::{
-    ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
-    ProcessBackendKind, RuntimeProfile, SecretMode,
-};
 
 use super::*;
 
@@ -90,30 +86,57 @@ async fn confirmed_host_home_root_is_rejected_without_matching_policy() {
     assert!(format!("{error}").contains("does not allow host home access"));
 }
 
+#[tokio::test]
+async fn local_yolo_policy_rejects_confirmed_host_home_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host_home_file = dir.path().join("home-file");
+    std::fs::write(&host_home_file, "not a directory").expect("host home file");
+
+    let error = build_reborn_services(
+        RebornBuildInput::local_dev_with_profile(
+            RebornCompositionProfile::LocalDevYolo,
+            "local-dev-yolo-host-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_yolo_policy())
+        .with_local_dev_confirmed_host_home_root(host_home_file),
+    )
+    .await
+    .expect_err("host home root must be a directory");
+
+    assert!(format!("{error}").contains("must be an existing directory"));
+}
+
+#[tokio::test]
+async fn local_yolo_policy_rejects_confirmed_host_home_filesystem_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let error = build_reborn_services(
+        RebornBuildInput::local_dev_with_profile(
+            RebornCompositionProfile::LocalDevYolo,
+            "local-dev-yolo-host-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_yolo_policy())
+        .with_local_dev_confirmed_host_home_root(filesystem_root()),
+    )
+    .await
+    .expect_err("host home root must not be a filesystem root");
+
+    assert!(format!("{error}").contains("must not be a filesystem root"));
+}
+
 fn local_yolo_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
-    ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
-        deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalYolo,
-        resolved_profile: RuntimeProfile::LocalYolo,
-        filesystem_backend: FilesystemBackendKind::HostWorkspaceAndHome,
-        process_backend: ProcessBackendKind::LocalHost,
-        network_mode: NetworkMode::Direct,
-        secret_mode: SecretMode::InheritedEnv,
-        approval_policy: ApprovalPolicy::Minimal,
-        audit_mode: AuditMode::LocalMinimal,
-    }
+    crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves")
 }
 
 fn local_dev_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
-    ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
-        deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
-        filesystem_backend: FilesystemBackendKind::HostWorkspace,
-        process_backend: ProcessBackendKind::LocalHost,
-        network_mode: NetworkMode::DirectLogged,
-        secret_mode: SecretMode::ScrubbedEnv,
-        approval_policy: ApprovalPolicy::AskDestructive,
-        audit_mode: AuditMode::LocalMinimal,
+    crate::local_dev_runtime_policy().expect("local-dev policy resolves")
+}
+
+fn filesystem_root() -> std::path::PathBuf {
+    let mut path = std::env::current_dir().expect("current dir");
+    while let Some(parent) = path.parent() {
+        path = parent.to_path_buf();
     }
+    path
 }

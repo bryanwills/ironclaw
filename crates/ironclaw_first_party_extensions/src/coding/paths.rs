@@ -115,13 +115,14 @@ pub(super) async fn stat_optional(
     }
 }
 
-pub(super) async fn create_parent_dir(
+pub(super) async fn create_parent_dir_unless_sensitive(
     request: &CodingCapabilityRequest<'_>,
     path: &VirtualPath,
 ) -> Result<(), CodingCapabilityError> {
     let Some(parent) = virtual_parent(path)? else {
         return Ok(());
     };
+    deny_nearest_sensitive_existing_parent(request, parent.clone()).await?;
     request
         .filesystem
         .create_dir_all(&parent)
@@ -129,24 +130,29 @@ pub(super) async fn create_parent_dir(
         .map_err(filesystem_error)
 }
 
-pub(super) async fn deny_sensitive_parent_dir(
+async fn deny_nearest_sensitive_existing_parent(
     request: &CodingCapabilityRequest<'_>,
-    path: &VirtualPath,
+    mut candidate: VirtualPath,
 ) -> Result<(), CodingCapabilityError> {
-    let Some(parent) = virtual_parent(path)? else {
-        return Ok(());
-    };
-    let stat = request
-        .filesystem
-        .stat(&parent)
-        .await
-        .map_err(filesystem_error)?;
-    if stat.sensitive {
-        return Err(CodingCapabilityError::new(
-            RuntimeDispatchErrorKind::FilesystemDenied,
-        ));
+    loop {
+        match request.filesystem.stat(&candidate).await {
+            Ok(stat) => {
+                if stat.sensitive {
+                    return Err(CodingCapabilityError::new(
+                        RuntimeDispatchErrorKind::FilesystemDenied,
+                    ));
+                }
+                return Ok(());
+            }
+            Err(FilesystemError::NotFound { .. }) => {
+                let Some(parent) = virtual_parent(&candidate)? else {
+                    return Ok(());
+                };
+                candidate = parent;
+            }
+            Err(error) => return Err(filesystem_error(error)),
+        }
     }
-    Ok(())
 }
 
 fn virtual_parent(path: &VirtualPath) -> Result<Option<VirtualPath>, CodingCapabilityError> {

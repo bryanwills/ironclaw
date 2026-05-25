@@ -17,7 +17,7 @@ use super::{
     guest_error, input_error,
     inputs::{optional_usize, required_str},
     paths::{
-        create_parent_dir, deny_sensitive_parent_dir, filesystem_error, is_excluded_name,
+        create_parent_dir_unless_sensitive, filesystem_error, is_excluded_name,
         is_sensitive_scoped_path, is_workspace_path, operation_allowed, resolve_optional_path,
         resolve_required_path, scoped_child_path, stat_optional, virtual_to_relative,
     },
@@ -116,8 +116,7 @@ pub(super) async fn write_file(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    create_parent_dir(request, &resolved.virtual_path).await?;
-    deny_sensitive_parent_dir(request, &resolved.virtual_path).await?;
+    create_parent_dir_unless_sensitive(request, &resolved.virtual_path).await?;
     request
         .filesystem
         .write_file(&resolved.virtual_path, content.as_bytes())

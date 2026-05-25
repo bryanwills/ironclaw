@@ -531,6 +531,7 @@ default_owner = "custom-owner"
             },
         )
         .expect("runtime input");
+        assert!(runtime_input.grants_trusted_laptop_access());
         let services = runtime_input.services.expect("services input");
         let policy = services.runtime_policy().expect("runtime policy");
 
