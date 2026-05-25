@@ -440,6 +440,7 @@ fn scoped_path_accepts_raw_host_path_only_when_mount_alias_matches() {
     );
 
     assert!(view.scoped_path("/Users/bob/project/README.md").is_err());
+    assert!(view.scoped_path("/Users/alice2/private.txt").is_err()); // safety: test-only assertion.
     assert!(view.scoped_path("/etc/passwd").is_err());
 }
 

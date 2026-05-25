@@ -694,7 +694,10 @@ mod tests {
     use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::InMemoryRunProfileResolver,
+        run_profile::{
+            CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
+            InMemoryRunProfileResolver, VisibleCapabilityRequest,
+        },
     };
 
     async fn run_context(label: &str) -> LoopRunContext {
@@ -835,7 +838,7 @@ mod tests {
         );
 
         let workspace_mounts =
-            crate::local_dev_mounts::workspace_mount_view(MountPermissions::read_write(), None)
+            crate::local_dev_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
                 .expect("workspace mounts build");
         let skill_mounts =
             crate::local_dev_mounts::skill_management_mount_view().expect("skill mounts build");
@@ -905,6 +908,84 @@ mod tests {
         assert_eq!(
             skill_install_grant.constraints.network,
             NetworkPolicy::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_yolo_capability_port_reads_confirmed_host_mount() {
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
+        let storage_root = dir.path().join("local-dev");
+        let host_home = dir.path().join("home");
+        std::fs::create_dir_all(&host_home).expect("host home"); // safety: test-only setup in #[cfg(test)] module.
+        std::fs::write(host_home.join("safe.txt"), "safe host file\n").expect("host file"); // safety: test-only setup in #[cfg(test)] module.
+
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "local-dev-yolo-host-owner",
+                storage_root,
+            )
+            .with_runtime_policy(
+                crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
+            )
+            .with_local_dev_confirmed_host_home_root(host_home),
+        )
+        .await
+        .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
+            .workspace_mounts
+            .clone();
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory::new(
+            runtime,
+            UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            workspace_mounts,
+            input_resolver,
+            result_writer,
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+        let run_context = run_context("host-mount-read").await;
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port"); // safety: test-only assertion in #[cfg(test)] module.
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface"); // safety: test-only assertion in #[cfg(test)] module.
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"path": "/host/safe.txt"})),
+            )
+            .await
+            .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
+                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                input_ref,
+            })
+            .await
+            .expect("read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+        let CapabilityOutcome::Completed(completed) = outcome else {
+            panic!("expected completed read_file invocation");
+        };
+        let output = capability_io
+            .result_output(completed.result_ref.as_str())
+            .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
+            .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
+        assert_eq!(
+            output["content"],
+            serde_json::json!("     1│ safe host file")
         );
     }
 

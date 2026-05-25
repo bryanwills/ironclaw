@@ -17,9 +17,10 @@ use super::{
     guest_error, input_error,
     inputs::{optional_usize, required_str},
     paths::{
-        create_parent_dir_unless_sensitive, filesystem_error, is_excluded_name,
-        is_sensitive_scoped_path, is_workspace_path, operation_allowed, resolve_optional_path,
-        resolve_required_path, scoped_child_path, stat_optional, virtual_to_relative,
+        create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
+        is_excluded_name, is_sensitive_scoped_path, is_workspace_path, operation_allowed,
+        resolve_optional_path, resolve_required_path, scoped_child_path, stat_optional,
+        virtual_to_relative,
     },
     state::{SharedCodingEditLocks, SharedCodingReadState, content_hash, read_scope_key},
     text::{count_matches, decode_text, encode_text, reject_binary_probe, replace_content},
@@ -141,6 +142,7 @@ pub(super) async fn list_dir(
     request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
+    deny_sensitive_existing_path(request, &resolved.virtual_path).await?;
     let recursive = request
         .input
         .get("recursive")
@@ -186,20 +188,23 @@ async fn collect_list_entries(
             let is_dir = entry.file_type == FileType::Directory;
             let scoped_path = scoped_child_path(&root.scoped_path, &relative);
             let is_sensitive = is_sensitive_scoped_path(&scoped_path);
+            // silent-ok: list_dir is best-effort for entries that disappear or fail stat.
+            let Ok(stat) = request.filesystem.stat(&entry.path).await else {
+                tracing::debug!(
+                    path = entry.path.as_str(),
+                    "skipping list_dir entry after stat failed"
+                );
+                continue;
+            };
+            let is_sensitive = is_sensitive || stat.sensitive;
             let display = if is_dir && recursive && is_sensitive {
                 format!("{relative} [sensitive - access blocked]")
+            } else if is_dir && is_sensitive {
+                continue;
             } else if is_dir {
                 format!("{relative}/")
             } else {
-                // silent-ok: list_dir is best-effort for entries that disappear or fail stat.
-                let Ok(stat) = request.filesystem.stat(&entry.path).await else {
-                    tracing::debug!(
-                        path = entry.path.as_str(),
-                        "skipping list_dir entry after stat failed"
-                    );
-                    continue;
-                };
-                if is_sensitive || stat.sensitive {
+                if is_sensitive {
                     continue;
                 }
                 format!("{} ({})", relative, format_size(stat.len))

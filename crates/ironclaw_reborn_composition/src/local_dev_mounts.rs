@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use ironclaw_host_api::{
     HostApiError, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
@@ -11,23 +11,30 @@ const HOST_TARGET: &str = "/projects/host";
 
 pub(crate) fn workspace_mount_view(
     permissions: MountPermissions,
-    host_home_alias: Option<&Path>,
+    host_home_aliases: &[&Path],
 ) -> Result<MountView, HostApiError> {
     let mut mounts = vec![grant(
         WORKSPACE_ALIAS,
         WORKSPACE_TARGET,
         permissions.clone(),
     )?];
-    if let Some(host_home_alias) = host_home_alias {
+    if !host_home_aliases.is_empty() {
         mounts.push(grant(HOST_ALIAS, HOST_TARGET, permissions.clone())?);
-        if let Some(host_home_alias) = host_home_alias.to_str()
-            && let Ok(raw_host_home_alias) = MountAlias::new(host_home_alias)
-        {
-            mounts.push(MountGrant::new(
-                raw_host_home_alias,
-                VirtualPath::new(HOST_TARGET)?,
-                permissions,
-            ));
+        let mut seen_aliases = HashSet::new();
+        for host_home_alias in host_home_aliases {
+            let Some(host_home_alias) = host_home_alias.to_str() else {
+                continue;
+            };
+            if !seen_aliases.insert(host_home_alias.to_string()) {
+                continue;
+            }
+            if let Ok(raw_host_home_alias) = MountAlias::new(host_home_alias.to_string()) {
+                mounts.push(MountGrant::new(
+                    raw_host_home_alias,
+                    VirtualPath::new(HOST_TARGET)?,
+                    permissions.clone(),
+                ));
+            }
         }
     }
     MountView::new(mounts)
@@ -84,7 +91,7 @@ mod tests {
     fn workspace_mount_keeps_host_alias_when_raw_alias_is_not_mount_shaped() {
         let mounts = workspace_mount_view(
             MountPermissions::read_write(),
-            Some(Path::new(r"C:\Users\alice")),
+            &[Path::new(r"C:\Users\alice")],
         )
         .expect("mount view builds");
 
@@ -99,6 +106,24 @@ mod tests {
                 .mounts
                 .iter()
                 .all(|mount| mount.alias.as_str() != r"C:\Users\alice")
+        );
+    }
+
+    #[test]
+    fn workspace_mount_deduplicates_host_home_aliases() {
+        let mounts = workspace_mount_view(
+            MountPermissions::read_write(),
+            &[Path::new("/Users/alice"), Path::new("/Users/alice")],
+        )
+        .expect("mount view builds");
+
+        assert_eq!(
+            mounts
+                .mounts
+                .iter()
+                .filter(|mount| mount.alias.as_str() == "/Users/alice")
+                .count(),
+            1
         );
     }
 }

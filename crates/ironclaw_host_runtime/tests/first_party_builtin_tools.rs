@@ -1455,6 +1455,33 @@ async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
             !temp.path().join(".ssh/generated").exists(),
             "write must not create intermediate directories under sensitive canonical parents"
         );
+
+        let error = invoke_with_context(
+            &runtime,
+            LIST_DIR_CAPABILITY_ID,
+            json!({"path": "/host/dotssh", "recursive": true}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization);
+
+        let listed = invoke_with_context(
+            &runtime,
+            LIST_DIR_CAPABILITY_ID,
+            json!({"path": "/host", "recursive": true}),
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        let entries = listed["entries"].as_array().unwrap();
+        assert!(
+            /* safety: test-only assertion. */
+            entries
+                .iter()
+                .all(|entry| !entry.as_str().unwrap_or_default().contains("id_rsa")),
+            "recursive list_dir must not traverse sensitive symlink targets: {entries:?}"
+        );
     }
 
     let read = invoke_with_context(

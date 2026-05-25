@@ -52,6 +52,51 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn local_yolo_policy_keeps_symlinked_host_home_raw_alias() {
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
+    let storage_root = dir.path().join("local-dev");
+    let host_home = dir.path().join("home");
+    let host_home_link = dir.path().join("home-link");
+    std::fs::create_dir_all(&host_home).expect("host home root"); // safety: test-only setup in #[cfg(test)] module.
+    std::os::unix::fs::symlink(&host_home, &host_home_link).expect("host home symlink"); // safety: test-only setup in #[cfg(test)] module.
+
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev_with_profile(
+            RebornCompositionProfile::LocalDevYolo,
+            "local-dev-yolo-host-owner",
+            storage_root,
+        )
+        .with_runtime_policy(local_yolo_policy())
+        .with_local_dev_confirmed_host_home_root(host_home_link.clone()),
+    )
+    .await
+    .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+
+    let raw_aliases = local_runtime
+        .workspace_mounts
+        .mounts
+        .iter()
+        .map(|mount| mount.alias.as_str())
+        .collect::<Vec<_>>();
+    let raw_alias_includes_original =
+        raw_aliases.contains(&host_home_link.to_str().expect("utf-8 link path")); // safety: temp paths are test-owned.
+    assert!(raw_alias_includes_original); // safety: test-only assertion in #[cfg(test)] module.
+    let canonical_host_home = host_home
+        .canonicalize()
+        .expect("canonical home") // safety: test setup created this path.
+        .to_str()
+        .expect("utf-8 canonical path") // safety: temp paths are test-owned.
+        .to_string();
+    let raw_alias_includes_canonical = raw_aliases.contains(&canonical_host_home.as_str());
+    assert!(raw_alias_includes_canonical); // safety: test-only assertion in #[cfg(test)] module.
+}
+
 #[tokio::test]
 async fn local_yolo_policy_requires_confirmed_host_home_root() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -163,7 +163,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
     });
     let host_home_root = match (include_host_home, host_home_root) {
-        (true, Some(path)) => Some(canonicalize_local_dev_host_home_root(&path)?),
+        (true, Some(path)) => Some(LocalDevHostHomeRoot {
+            canonical_root: canonicalize_local_dev_host_home_root(&path)?,
+            raw_alias: path,
+        }),
         (true, None) => {
             return Err(RebornBuildError::InvalidConfig {
                 reason: "local-dev-yolo host home access requires a confirmed host home root"
@@ -207,17 +210,28 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     if let Some(host_home_root) = host_home_root.as_ref() {
         filesystem.mount_local(
             host_virtual_root,
-            ironclaw_host_api::HostPath::from_path_buf(host_home_root.clone()),
+            ironclaw_host_api::HostPath::from_path_buf(host_home_root.canonical_root.clone()),
         )?;
     }
 
     let filesystem = Arc::new(filesystem);
-    let setup_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), None)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
+    let setup_workspace_mounts =
+        workspace_mount_view(MountPermissions::read_only(), &[]).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
         })?;
+    let host_home_aliases = host_home_root
+        .as_ref()
+        .map(|host_home_root| {
+            vec![
+                host_home_root.raw_alias.as_path(),
+                host_home_root.canonical_root.as_path(),
+            ]
+        })
+        .unwrap_or_default();
     let runtime_workspace_mounts =
-        workspace_mount_view(MountPermissions::read_write(), host_home_root.as_deref()).map_err(
+        workspace_mount_view(MountPermissions::read_write(), &host_home_aliases).map_err(
             |error| RebornBuildError::InvalidConfig {
                 reason: error.to_string(),
             },
@@ -296,6 +310,11 @@ fn canonicalize_local_dev_path(path: &Path, label: &str) -> Result<PathBuf, Rebo
     std::fs::canonicalize(path).map_err(|_| RebornBuildError::InvalidConfig {
         reason: format!("local-dev {label} could not be resolved"),
     })
+}
+
+struct LocalDevHostHomeRoot {
+    canonical_root: PathBuf,
+    raw_alias: PathBuf,
 }
 
 fn canonicalize_local_dev_existing_dir(

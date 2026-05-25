@@ -1601,6 +1601,29 @@ fn run_confirm_host_access_flag_gates_local_dev_yolo() {
 }
 
 #[test]
+fn run_confirm_host_access_requires_home_or_userprofile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "--confirm-host-access", "-m", "ping"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+
+    assert!(!output.status.success(), "missing host home must fail"); // safety: test-only assertion.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        /* safety: test-only assertion. */
+        stderr.contains("HOME or USERPROFILE must be set"),
+        "stderr should require a host home root; got: {stderr}"
+    );
+}
+
+#[test]
 fn repl_confirm_host_access_flag_gates_local_dev_yolo() {
     let temp = tempfile::tempdir().expect("tempdir");
     let missing = local_yolo_command(&temp, &["repl"])

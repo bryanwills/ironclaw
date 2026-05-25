@@ -130,6 +130,23 @@ pub(super) async fn create_parent_dir_unless_sensitive(
         .map_err(filesystem_denied_if_not_found)
 }
 
+pub(super) async fn deny_sensitive_existing_path(
+    request: &CodingCapabilityRequest<'_>,
+    path: &VirtualPath,
+) -> Result<(), CodingCapabilityError> {
+    let stat = request
+        .filesystem
+        .stat(path)
+        .await
+        .map_err(filesystem_error)?;
+    if stat.sensitive {
+        return Err(CodingCapabilityError::new(
+            RuntimeDispatchErrorKind::FilesystemDenied,
+        ));
+    }
+    Ok(())
+}
+
 async fn deny_nearest_sensitive_existing_parent(
     request: &CodingCapabilityRequest<'_>,
     mut candidate: VirtualPath,
