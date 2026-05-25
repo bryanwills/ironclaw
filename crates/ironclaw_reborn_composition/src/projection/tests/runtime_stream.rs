@@ -308,7 +308,7 @@ fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping() {
         truncated: false,
     };
 
-    let (_, _, payloads, total, _) = snapshot_payloads(
+    let item = snapshot_payloads(
         &scope,
         snapshot,
         cursor.clone(),
@@ -319,19 +319,16 @@ fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping() {
     .unwrap()
     .unwrap();
 
-    assert_eq!(total, WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
-    assert_eq!(payloads.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
+    assert_eq!(item.total, WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
+    assert_eq!(item.payloads.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
     assert!(matches!(
-        &payloads[0].payload,
+        &item.payloads[0],
         ProductOutboundPayload::ProjectionSnapshot { state } if state.items.len() == 1
     ));
     assert_eq!(
-        payloads
+        item.payloads
             .iter()
-            .filter(|payload| matches!(
-                payload.payload,
-                ProductOutboundPayload::CapabilityActivity(_)
-            ))
+            .filter(|payload| matches!(payload, ProductOutboundPayload::CapabilityActivity(_)))
             .count(),
         WEBUI_PROJECTION_PAGE_LIMIT
     );

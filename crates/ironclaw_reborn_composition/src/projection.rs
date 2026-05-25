@@ -209,7 +209,7 @@ impl WebuiProjectionBatch {
         &mut self,
         final_cursor: EventProjectionCursor,
         item_cursor: EventProjectionCursor,
-        payloads: Vec<RuntimePayload>,
+        payloads: Vec<ProductOutboundPayload>,
         total: usize,
         already_delivered: usize,
     ) -> Result<bool, ProductAdapterError> {
@@ -230,7 +230,7 @@ impl WebuiProjectionBatch {
             return Ok(false);
         }
 
-        for (index, runtime_payload) in payloads.into_iter().take(remaining_capacity).enumerate() {
+        for (index, payload) in payloads.into_iter().take(remaining_capacity).enumerate() {
             let delivered = already_delivered + index + 1;
             self.runtime_payloads_pushed += 1;
             if delivered == total {
@@ -244,7 +244,7 @@ impl WebuiProjectionBatch {
                 self.cursor.runtime_item = Some(item_cursor.runtime);
                 self.cursor.runtime_payloads_delivered = delivered;
             }
-            self.push(runtime_payload.payload);
+            self.push(payload);
         }
         Ok(self.cursor.runtime_payloads_delivered == 0)
     }
@@ -257,21 +257,19 @@ impl WebuiProjectionBatch {
         let already_delivered = self.cursor.runtime_payloads_delivered;
         let remaining_capacity =
             WEBUI_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(self.runtime_payloads_pushed);
-        if let Some((final_cursor, item_cursor, payloads, total, already_delivered)) =
-            item_to_payloads(
-                item,
-                scope,
-                self.cursor.runtime_item,
-                already_delivered,
-                remaining_capacity,
-            )?
-        {
+        if let Some(runtime_item) = item_to_payloads(
+            item,
+            scope,
+            self.cursor.runtime_item,
+            already_delivered,
+            remaining_capacity,
+        )? {
             return self.push_runtime_payloads(
-                final_cursor,
-                item_cursor,
-                payloads,
-                total,
-                already_delivered,
+                runtime_item.final_cursor,
+                runtime_item.item_cursor,
+                runtime_item.payloads,
+                runtime_item.total,
+                runtime_item.already_delivered,
             );
         }
         Ok(true)
@@ -449,7 +447,7 @@ fn snapshot_payloads(
     capacity: usize,
 ) -> RuntimePayloadItemResult {
     let item_cursor = snapshot_item_cursor(&snapshot, &cursor);
-    let candidates = snapshot_payload_candidates(snapshot, cursor.scope.clone());
+    let candidates = snapshot_payload_candidates(snapshot);
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -469,13 +467,13 @@ fn snapshot_payloads(
         already_delivered,
         capacity,
     )?;
-    Ok(Some((
-        cursor,
+    Ok(Some(RuntimePayloadItem {
+        final_cursor: cursor,
         item_cursor,
         payloads,
         total,
         already_delivered,
-    )))
+    }))
 }
 
 fn replay_payloads(
@@ -487,7 +485,7 @@ fn replay_payloads(
     capacity: usize,
 ) -> RuntimePayloadItemResult {
     let item_cursor = replay_item_cursor(replay, &cursor);
-    let candidates = replay_payload_candidates(replay, cursor.scope.clone());
+    let candidates = replay_payload_candidates(replay);
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -507,27 +505,24 @@ fn replay_payloads(
         already_delivered,
         capacity,
     )?;
-    Ok(Some((
-        cursor,
+    Ok(Some(RuntimePayloadItem {
+        final_cursor: cursor,
         item_cursor,
         payloads,
         total,
         already_delivered,
-    )))
+    }))
 }
 
 #[derive(Debug)]
-struct RuntimePayload {
-    payload: ProductOutboundPayload,
+struct RuntimePayloadItem {
+    final_cursor: EventProjectionCursor,
+    item_cursor: EventProjectionCursor,
+    payloads: Vec<ProductOutboundPayload>,
+    total: usize,
+    already_delivered: usize,
 }
 
-type RuntimePayloadItem = (
-    EventProjectionCursor,
-    EventProjectionCursor,
-    Vec<RuntimePayload>,
-    usize,
-    usize,
-);
 type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
 
 enum RuntimePayloadCandidate {
@@ -541,10 +536,7 @@ enum StatePayloadKind {
     Update,
 }
 
-fn snapshot_payload_candidates(
-    snapshot: ProjectionSnapshot,
-    _scope: EventProjectionScope,
-) -> Vec<RuntimePayloadCandidate> {
+fn snapshot_payload_candidates(snapshot: ProjectionSnapshot) -> Vec<RuntimePayloadCandidate> {
     runtime_payload_candidates(
         snapshot.runs,
         snapshot.capability_activities,
@@ -552,10 +544,7 @@ fn snapshot_payload_candidates(
     )
 }
 
-fn replay_payload_candidates(
-    replay: &ProjectionReplay,
-    _scope: EventProjectionScope,
-) -> Vec<RuntimePayloadCandidate> {
+fn replay_payload_candidates(replay: &ProjectionReplay) -> Vec<RuntimePayloadCandidate> {
     runtime_payload_candidates(
         replay.runs.clone(),
         replay.capability_activities.clone(),
@@ -591,7 +580,7 @@ fn runtime_payloads_from_candidates(
     state_kind: StatePayloadKind,
     already_delivered: usize,
     capacity: usize,
-) -> Result<Vec<RuntimePayload>, ProductAdapterError> {
+) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
     candidates
         .into_iter()
         .skip(already_delivered)
@@ -604,7 +593,7 @@ fn runtime_payload_from_candidate(
     scope: &TurnScope,
     candidate: RuntimePayloadCandidate,
     state_kind: StatePayloadKind,
-) -> Result<RuntimePayload, ProductAdapterError> {
+) -> Result<ProductOutboundPayload, ProductAdapterError> {
     match candidate {
         RuntimePayloadCandidate::State { runs, .. } => {
             let state = run_status_projection_state(scope, runs)?
@@ -613,7 +602,7 @@ fn runtime_payload_from_candidate(
                 StatePayloadKind::Snapshot => ProductOutboundPayload::ProjectionSnapshot { state },
                 StatePayloadKind::Update => ProductOutboundPayload::ProjectionUpdate { state },
             };
-            Ok(RuntimePayload { payload })
+            Ok(payload)
         }
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
             CapabilityActivityView::new(CapabilityActivityViewInput {
@@ -629,7 +618,6 @@ fn runtime_payload_from_candidate(
                 updated_at: activity.updated_at,
             })
             .map(ProductOutboundPayload::CapabilityActivity)
-            .map(|payload| RuntimePayload { payload })
         }
     }
 }
