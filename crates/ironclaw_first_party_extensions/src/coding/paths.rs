@@ -127,7 +127,7 @@ pub(super) async fn create_parent_dir_unless_sensitive(
         .filesystem
         .create_dir_all(&parent)
         .await
-        .map_err(filesystem_error)
+        .map_err(filesystem_denied_if_not_found)
 }
 
 async fn deny_nearest_sensitive_existing_parent(
@@ -152,6 +152,15 @@ async fn deny_nearest_sensitive_existing_parent(
             }
             Err(error) => return Err(filesystem_error(error)),
         }
+    }
+}
+
+fn filesystem_denied_if_not_found(error: FilesystemError) -> CodingCapabilityError {
+    match error {
+        FilesystemError::NotFound { .. } => {
+            CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
+        }
+        error => filesystem_error(error),
     }
 }
 

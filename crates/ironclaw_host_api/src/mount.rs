@@ -129,12 +129,10 @@ impl MountView {
     /// that case the alias itself is the authority boundary, so parsing needs
     /// the mount view.
     pub fn scoped_path(&self, value: impl Into<String>) -> Result<ScopedPath, HostApiError> {
-        let aliases = self
-            .mounts
-            .iter()
-            .map(|mount| mount.alias.as_str())
-            .collect::<Vec<_>>();
-        ScopedPath::new_with_allowed_raw_host_aliases(value.into(), &aliases)
+        ScopedPath::new_with_allowed_raw_host_aliases(
+            value.into(),
+            self.mounts.iter().map(|mount| mount.alias.as_str()),
+        )
     }
 
     pub fn resolve_with_grant(

@@ -16,7 +16,7 @@ pub enum RebornLocalRuntimeProfileError {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RebornLocalRuntimeProfileOptions {
-    pub yolo_disclosure_acknowledged: bool,
+    pub confirm_host_access: bool,
 }
 
 /// Build the local runtime substrate input and its matching runtime policy from
@@ -34,6 +34,8 @@ pub fn local_runtime_build_input(
     )
 }
 
+/// Build the local runtime substrate input while applying local-only operator
+/// confirmations such as trusted host access.
 pub fn local_runtime_build_input_with_options(
     profile: RebornCompositionProfile,
     owner_id: impl Into<String>,
@@ -64,12 +66,12 @@ pub fn local_dev_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError>
 /// Resolved policy for trusted single-user local development with inherited
 /// host environment access.
 pub fn local_dev_yolo_runtime_policy(
-    yolo_disclosure_acknowledged: bool,
+    confirm_host_access: bool,
 ) -> Result<ResolvedRuntimePolicy, ResolveError> {
     local_runtime_policy(
         RebornCompositionProfile::LocalDevYolo,
         RebornLocalRuntimeProfileOptions {
-            yolo_disclosure_acknowledged,
+            confirm_host_access,
         },
     )
     .map_err(|error| match error {
@@ -94,7 +96,7 @@ fn local_runtime_policy(
         }
     };
     let request = ironclaw_runtime_policy::ResolveRequest {
-        yolo_disclosure_acknowledged: options.yolo_disclosure_acknowledged,
+        yolo_disclosure_acknowledged: options.confirm_host_access,
         ..ironclaw_runtime_policy::ResolveRequest::new(
             DeploymentMode::LocalSingleUser,
             runtime_profile,

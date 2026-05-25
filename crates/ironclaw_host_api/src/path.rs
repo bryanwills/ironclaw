@@ -198,12 +198,12 @@ impl VirtualPath {
 
 impl ScopedPath {
     pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
-        Self::new_with_allowed_raw_host_aliases(value.into(), &[])
+        Self::new_with_allowed_raw_host_aliases(value.into(), std::iter::empty())
     }
 
-    pub(crate) fn new_with_allowed_raw_host_aliases(
+    pub(crate) fn new_with_allowed_raw_host_aliases<'a>(
         raw: String,
-        raw_host_aliases: &[&str],
+        raw_host_aliases: impl IntoIterator<Item = &'a str>,
     ) -> Result<Self, HostApiError> {
         if looks_like_url(&raw) {
             return Err(HostApiError::invalid_path(
@@ -221,7 +221,7 @@ impl ScopedPath {
             .iter()
             .any(|prefix| raw.starts_with(prefix))
             && !raw_host_aliases
-                .iter()
+                .into_iter()
                 .any(|alias| path_matches_alias(alias, &raw))
         {
             return Err(HostApiError::invalid_path(

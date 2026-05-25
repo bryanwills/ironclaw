@@ -126,15 +126,15 @@ async fn local_yolo_policy_rejects_confirmed_host_home_filesystem_root() {
 }
 
 fn local_yolo_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
-    crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves")
+    crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves") // safety: test-only helper in #[cfg(test)] module.
 }
 
 fn local_dev_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
-    crate::local_dev_runtime_policy().expect("local-dev policy resolves")
+    crate::local_dev_runtime_policy().expect("local-dev policy resolves") // safety: test-only helper in #[cfg(test)] module.
 }
 
 fn filesystem_root() -> std::path::PathBuf {
-    let mut path = std::env::current_dir().expect("current dir");
+    let mut path = std::env::current_dir().expect("current dir"); // safety: test-only helper in #[cfg(test)] module.
     while let Some(parent) = path.parent() {
         path = parent.to_path_buf();
     }

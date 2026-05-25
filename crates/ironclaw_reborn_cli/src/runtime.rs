@@ -248,7 +248,7 @@ pub(crate) fn build_runtime_input_with_options(
         owner_id,
         local_dev_root,
         RebornLocalRuntimeProfileOptions {
-            yolo_disclosure_acknowledged: options.confirm_host_access,
+            confirm_host_access: options.confirm_host_access,
         },
     )
     .with_context(|| {
@@ -300,9 +300,7 @@ pub(crate) fn build_runtime_input_with_options(
 }
 
 fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<PathBuf> {
-    if !options.confirm_host_access {
-        anyhow::bail!("requires --confirm-host-access");
-    }
+    debug_assert!(options.confirm_host_access);
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)

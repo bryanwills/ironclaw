@@ -303,7 +303,10 @@ fn canonicalize_local_dev_existing_dir(
     label: &str,
 ) -> Result<PathBuf, RebornBuildError> {
     let path = canonicalize_local_dev_path(path, label)?;
-    if path.is_dir() {
+    let metadata = std::fs::metadata(&path).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev {label} could not be inspected"),
+    })?;
+    if metadata.is_dir() {
         Ok(path)
     } else {
         Err(RebornBuildError::InvalidConfig {
