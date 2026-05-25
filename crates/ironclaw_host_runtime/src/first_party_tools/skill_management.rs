@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
@@ -22,6 +22,7 @@ use super::{first_party_capability_manifest, resource_profile};
 
 pub const SKILL_LIST_CAPABILITY_ID: &str = "builtin.skill_list";
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
+pub const SKILL_INSTALL_URL_CAPABILITY_ID: &str = "builtin.skill_install_url";
 pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
 
 const SKILL_URL_RESPONSE_BODY_LIMIT_BYTES: u64 = 64 * 1024;
@@ -38,7 +39,14 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             SKILL_INSTALL_CAPABILITY_ID,
-            "Install a SKILL.md document or HTTPS URL into the current user's Reborn skill root",
+            "Install a SKILL.md document into the current user's Reborn skill root",
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            "Fetch and install an HTTPS SKILL.md URL into the current user's Reborn skill root",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -69,6 +77,10 @@ pub(super) fn insert_handlers(
         CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
         handler.clone(),
     );
+    registry.insert_handler(
+        CapabilityId::new(SKILL_INSTALL_URL_CAPABILITY_ID)?,
+        handler.clone(),
+    );
     registry.insert_handler(CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?, handler);
     Ok(())
 }
@@ -81,9 +93,12 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        let started = Instant::now();
         let kind = match request.capability_id.as_str() {
             SKILL_LIST_CAPABILITY_ID => SkillManagementCapabilityKind::List,
-            SKILL_INSTALL_CAPABILITY_ID => SkillManagementCapabilityKind::Install,
+            SKILL_INSTALL_CAPABILITY_ID | SKILL_INSTALL_URL_CAPABILITY_ID => {
+                SkillManagementCapabilityKind::Install
+            }
             SKILL_REMOVE_CAPABILITY_ID => SkillManagementCapabilityKind::Remove,
             _ => {
                 return Err(FirstPartyCapabilityError::new(
@@ -93,7 +108,9 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
         };
         let mut usage = ResourceUsage::default();
         let input = if kind == SkillManagementCapabilityKind::Install {
-            skill_install_input(&request, &mut usage).await?
+            skill_install_input(&request, &mut usage)
+                .await
+                .map_err(|error| error.with_usage(usage_with_elapsed(&usage, started)))?
         } else {
             request.input.clone()
         };
@@ -104,10 +121,13 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
             Arc::clone(&request.services.filesystem),
             &input,
         );
-        let output = dispatch(&skill_request)
-            .await
-            .map_err(|error| skill_management_error(error).with_usage(usage.clone()))?;
-        Ok(FirstPartyCapabilityResult::new(output, usage))
+        let output = dispatch(&skill_request).await.map_err(|error| {
+            skill_management_error(error).with_usage(usage_with_elapsed(&usage, started))
+        })?;
+        Ok(FirstPartyCapabilityResult::new(
+            output,
+            usage_with_elapsed(&usage, started),
+        ))
     }
 }
 
@@ -125,9 +145,9 @@ async fn skill_install_input(
         .get("url")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
-    match (has_content, url) {
-        (true, None) => Ok(request.input.clone()),
-        (false, Some(url)) => {
+    match (request.capability_id.as_str(), has_content, url) {
+        (SKILL_INSTALL_CAPABILITY_ID, true, None) => Ok(request.input.clone()),
+        (SKILL_INSTALL_URL_CAPABILITY_ID, false, Some(url)) => {
             let content = fetch_skill_url(request, url, usage).await?;
             let mut rewritten = object.clone();
             rewritten.remove("url");
@@ -222,6 +242,12 @@ fn skill_url_fetch_error(
         }
     };
     FirstPartyCapabilityError::new(kind).with_usage(usage.clone())
+}
+
+fn usage_with_elapsed(usage: &ResourceUsage, started: Instant) -> ResourceUsage {
+    let mut usage = usage.clone();
+    usage.wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    usage
 }
 
 fn skill_management_error(error: SkillManagementCapabilityError) -> FirstPartyCapabilityError {

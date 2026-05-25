@@ -354,7 +354,8 @@ registry internals.
 Expected creation paths:
 
 - user imports or uploads a skill bundle;
-- a user or agent provides an HTTPS `SKILL.md` URL, fetched through
+- a user or agent provides an HTTPS `SKILL.md` URL to the networked
+  `builtin.skill_install_url` capability, fetched through
   host-mediated network egress before writing to scoped skill storage;
 - an agent/LLM creates or patches a learned skill under scoped `/skills`;
 - a hub, tap, or repository install normalizes into the same bundle layout;

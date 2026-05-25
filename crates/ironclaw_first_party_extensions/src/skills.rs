@@ -216,3 +216,34 @@ fn capability_error(error: SkillManagementError) -> SkillManagementCapabilityErr
     );
     SkillManagementCapabilityError::new(kind)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{InvocationId, MountView, ResourceScope, UserId};
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn install_rejects_unresolved_url_input() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let mounts = MountView::default();
+        let input = json!({"url": "https://example.test/SKILL.md"});
+        let request = SkillManagementCapabilityRequest::new(
+            SkillManagementCapabilityKind::Install,
+            &scope,
+            Some(&mounts),
+            Arc::new(InMemoryBackend::new()),
+            &input,
+        );
+
+        let error = dispatch(&request).await.unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+}

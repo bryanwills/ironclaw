@@ -25,10 +25,11 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
     LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
-    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_INSTALL_URL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
+    TIME_CAPABILITY_ID, TenantSandboxProcessPort, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -59,6 +60,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             HTTP_CAPABILITY_ID
             | SHELL_CAPABILITY_ID
             | SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_INSTALL_URL_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID => PermissionMode::Ask,
             _ => PermissionMode::Allow,
         };
@@ -79,6 +81,15 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         .expect("skill_install manifest");
     assert_eq!(
         skill_install.effects,
+        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem]
+    );
+    let skill_install_url = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SKILL_INSTALL_URL_CAPABILITY_ID)
+        .expect("skill_install_url manifest");
+    assert_eq!(
+        skill_install_url.effects,
         vec![
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
@@ -651,7 +662,37 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
 }
 
 #[tokio::test]
-async fn builtin_skill_install_fetches_url_through_host_runtime_egress() {
+async fn builtin_skill_install_accepts_content_when_network_is_denied() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem_and_policy(filesystem, local_network_denied_policy());
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({"content": "---\nname: offline-helper\n---\nOffline prompt.\n"}),
+        execution_context_with_mounts([SKILL_INSTALL_CAPABILITY_ID], mounts.clone()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["installed"], json!(true));
+    assert_eq!(installed["name"], json!("offline-helper"));
+
+    let listed = invoke_with_context(
+        &runtime,
+        SKILL_LIST_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_mounts([SKILL_LIST_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["count"], json!(1));
+    assert_eq!(listed["skills"][0]["name"], json!("offline-helper"));
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_fetches_through_host_runtime_egress() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
@@ -659,14 +700,14 @@ async fn builtin_skill_install_fetches_url_through_host_runtime_egress() {
     ));
     let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
     let context = execution_context_with_mounts_and_network(
-        [SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID],
+        [SKILL_INSTALL_URL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID],
         mounts,
         http_test_policy(),
     );
 
     let installed = invoke_with_context(
         &runtime,
-        SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
         json!({"url": "https://api.example.test/skills/fetched-helper/SKILL.md"}),
         context.clone(),
     )
@@ -682,7 +723,7 @@ async fn builtin_skill_install_fetches_url_through_host_runtime_egress() {
     assert_eq!(requests[0].runtime, RuntimeKind::FirstParty);
     assert_eq!(
         requests[0].capability_id,
-        capability_id(SKILL_INSTALL_CAPABILITY_ID)
+        capability_id(SKILL_INSTALL_URL_CAPABILITY_ID)
     );
     assert_eq!(requests[0].method, NetworkMethod::Get);
     assert_eq!(
@@ -700,7 +741,7 @@ async fn builtin_skill_install_fetches_url_through_host_runtime_egress() {
 }
 
 #[tokio::test]
-async fn builtin_skill_install_rejects_ambiguous_content_and_url_before_fetch() {
+async fn builtin_skill_install_url_rejects_ambiguous_content_and_url_before_fetch() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
@@ -710,13 +751,13 @@ async fn builtin_skill_install_rejects_ambiguous_content_and_url_before_fetch() 
 
     let error = invoke_with_context(
         &runtime,
-        SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
         json!({
             "url": "https://api.example.test/skills/fetched-helper/SKILL.md",
             "content": "---\nname: pasted-helper\n---\nPasted prompt.\n"
         }),
         execution_context_with_mounts_and_network(
-            [SKILL_INSTALL_CAPABILITY_ID],
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
             mounts,
             http_test_policy(),
         ),
@@ -729,7 +770,7 @@ async fn builtin_skill_install_rejects_ambiguous_content_and_url_before_fetch() 
 }
 
 #[tokio::test]
-async fn builtin_skill_install_rejects_non_https_url_before_fetch() {
+async fn builtin_skill_install_url_rejects_non_https_url_before_fetch() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
@@ -739,10 +780,10 @@ async fn builtin_skill_install_rejects_non_https_url_before_fetch() {
 
     let error = invoke_with_context(
         &runtime,
-        SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
         json!({"url": "http://api.example.test/skills/fetched-helper/SKILL.md"}),
         execution_context_with_mounts_and_network(
-            [SKILL_INSTALL_CAPABILITY_ID],
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
             mounts,
             http_test_policy(),
         ),
@@ -752,6 +793,183 @@ async fn builtin_skill_install_rejects_non_https_url_before_fetch() {
 
     assert_eq!(error, RuntimeFailureKind::InvalidInput);
     assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_fails_closed_when_runtime_egress_is_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem_without_http_egress(filesystem);
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/skills/fetched-helper/SKILL.md"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Network);
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_rejects_non_success_url_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_status_and_body(
+        404,
+        b"not found".to_vec(),
+    ));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+    let context = execution_context_with_mounts_and_network(
+        [SKILL_INSTALL_URL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID],
+        mounts,
+        http_test_policy(),
+    );
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/skills/missing/SKILL.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::OperationFailed);
+    assert_eq!(egress.requests().len(), 1);
+
+    let listed = invoke_with_context(&runtime, SKILL_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .unwrap();
+    assert_eq!(listed["count"], json!(0));
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_rejects_invalid_utf8_url_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xff, 0xfe]));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/skills/binary/SKILL.md"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::OperationFailed);
+    assert_eq!(egress.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_maps_runtime_egress_errors_by_reason() {
+    let cases = [
+        (
+            RuntimeHttpEgressError::Request {
+                reason: "sensitive_header_denied:authorization".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+            RuntimeFailureKind::InvalidInput,
+        ),
+        (
+            RuntimeHttpEgressError::Network {
+                reason: "policy_denied".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+            RuntimeFailureKind::Authorization,
+        ),
+        (
+            RuntimeHttpEgressError::Network {
+                reason: "network_unreachable".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+            RuntimeFailureKind::Network,
+        ),
+        (
+            RuntimeHttpEgressError::Response {
+                reason: "response_decode_failed".to_string(),
+                request_bytes: 4,
+                response_bytes: 1024,
+            },
+            RuntimeFailureKind::OperationFailed,
+        ),
+        (
+            RuntimeHttpEgressError::Response {
+                reason: "response_body_limit_exceeded".to_string(),
+                request_bytes: 4,
+                response_bytes: 1024,
+            },
+            RuntimeFailureKind::OutputTooLarge,
+        ),
+    ];
+
+    for (error, expected) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let runtime = runtime_with_filesystem_and_http_egress(
+            filesystem,
+            Arc::new(RecordingRuntimeHttpEgress::with_error(error)),
+        );
+        let actual = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            json!({"url": "https://api.example.test/skills/fetched-helper/SKILL.md"}),
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_URL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_accounts_wall_clock_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(SleepingRuntimeHttpEgress {
+        delay: Duration::from_millis(20),
+        body: b"---\nname: slow-helper\n---\nSlow prompt.\n".to_vec(),
+    });
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, egress);
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_URL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+            capability_id(SKILL_INSTALL_URL_CAPABILITY_ID),
+            ResourceEstimate::default(),
+            json!({"url": "https://api.example.test/skills/slow-helper/SKILL.md"}),
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected completed skill URL install, got {outcome:?}");
+    };
+    assert!(completed.usage.wall_clock_ms >= 10);
 }
 
 #[tokio::test]
@@ -1203,6 +1421,7 @@ async fn builtin_http_returns_redirects_without_following_private_location() {
 async fn builtin_http_runs_blocking_egress_off_tokio_worker() {
     let egress = Arc::new(SleepingRuntimeHttpEgress {
         delay: Duration::from_millis(100),
+        body: Vec::new(),
     });
     let runtime = runtime_with_http_egress(egress);
     let invocation = invoke_with_context(
@@ -2309,6 +2528,24 @@ where
     .host_runtime_for_local_testing()
 }
 
+fn runtime_with_filesystem_without_http_egress<F>(filesystem: F) -> impl HostRuntime
+where
+    F: RootFilesystem + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_policy(local_dev_policy())
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_filesystem_and_http_egress<F, T>(filesystem: F, egress: Arc<T>) -> impl HostRuntime
 where
     F: RootFilesystem + 'static,
@@ -2520,7 +2757,7 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 14] {
+fn all_builtin_capability_ids() -> [&'static str; 15] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
@@ -2535,6 +2772,7 @@ fn all_builtin_capability_ids() -> [&'static str; 14] {
         APPLY_PATCH_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
     ]
 }
@@ -2618,6 +2856,7 @@ impl SandboxCommandTransport for RecordingSandboxTransport {
 #[derive(Debug, Clone, Default)]
 struct RecordingRuntimeHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>>,
+    status: u16,
     body: Vec<u8>,
     error: Option<RuntimeHttpEgressError>,
 }
@@ -2626,6 +2865,16 @@ impl RecordingRuntimeHttpEgress {
     fn with_body(body: Vec<u8>) -> Self {
         Self {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            status: 200,
+            body,
+            error: None,
+        }
+    }
+
+    fn with_status_and_body(status: u16, body: Vec<u8>) -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            status,
             body,
             error: None,
         }
@@ -2634,6 +2883,7 @@ impl RecordingRuntimeHttpEgress {
     fn with_error(error: RuntimeHttpEgressError) -> Self {
         Self {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            status: 200,
             body: Vec::new(),
             error: Some(error),
         }
@@ -2654,7 +2904,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             return Err(error.clone());
         }
         Ok(RuntimeHttpEgressResponse {
-            status: 200,
+            status: if self.status == 0 { 200 } else { self.status },
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: self.body.clone(),
             request_bytes: request.body.len() as u64,
@@ -2667,6 +2917,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
 #[derive(Debug, Clone)]
 struct SleepingRuntimeHttpEgress {
     delay: Duration,
+    body: Vec<u8>,
 }
 
 impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
@@ -2675,12 +2926,17 @@ impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         thread::sleep(self.delay);
+        let body = if self.body.is_empty() {
+            b"ok".to_vec()
+        } else {
+            self.body.clone()
+        };
         Ok(RuntimeHttpEgressResponse {
             status: 200,
             headers: Vec::new(),
-            body: b"ok".to_vec(),
+            response_bytes: body.len() as u64,
+            body,
             request_bytes: request.body.len() as u64,
-            response_bytes: 2,
             redaction_applied: false,
         })
     }
@@ -2847,6 +3103,13 @@ fn network_denied_policy() -> EffectiveRuntimePolicy {
         secret_mode: SecretMode::BrokeredHandles,
         approval_policy: ApprovalPolicy::AskAlways,
         audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn local_network_denied_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        network_mode: NetworkMode::Deny,
+        ..local_dev_policy()
     }
 }
 
