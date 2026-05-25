@@ -177,17 +177,24 @@ pub async fn execute_tool_audited(
     // `sensitive_params`; when it does NOT (a hallucinated/renamed call) we have
     // no metadata, so redact *every* top-level field — an unresolved tool call
     // must never persist raw arguments, which can carry secrets (e.g. API keys).
-    let redacted_input = match tools.get(tool_name).await {
-        Some(tool) => {
+    //
+    // Resolve via `get_resolved` (alias/hyphen-normalizing) so the audit row
+    // records the *canonical* tool name, matching `ToolDispatcher::dispatch`
+    // (which records `resolved_name`). Otherwise an aliased/hyphenated call
+    // would persist a non-canonical name and diverge from the dispatch audit
+    // trail.
+    let (audit_name, redacted_input) = match tools.get_resolved(tool_name).await {
+        Some((resolved_name, tool)) => {
             let normalized = prepare_tool_params(tool.as_ref(), &params);
-            redact_params(&normalized, tool.sensitive_params())
+            let redacted = redact_params(&normalized, tool.sensitive_params());
+            (resolved_name, redacted)
         }
         None => {
             let all_keys: Vec<&str> = params
                 .as_object()
                 .map(|m| m.keys().map(String::as_str).collect())
                 .unwrap_or_default();
-            redact_params(&params, &all_keys)
+            (tool_name.to_string(), redact_params(&params, &all_keys))
         }
     };
 
@@ -211,7 +218,7 @@ pub async fn execute_tool_audited(
     let result = execute_tool_with_safety(tools, safety, tool_name, params, base_ctx).await;
     let elapsed = start.elapsed();
 
-    let action = ActionRecord::new(0, tool_name, redacted_input);
+    let action = ActionRecord::new(0, &audit_name, redacted_input);
     let action = match &result {
         Ok(output) => {
             // `output` is the pretty-printed tool result string. Sanitize it for
@@ -814,6 +821,46 @@ mod audited_integration_tests {
         assert!(
             action.output_sanitized.is_some(),
             "sanitized output must be populated"
+        );
+    }
+
+    #[tokio::test]
+    async fn audited_action_record_uses_canonical_resolved_tool_name() {
+        // A hyphenated/aliased call must persist the *canonical* registered tool
+        // name in the audit row, matching `ToolDispatcher::dispatch` (which
+        // records `resolved_name`). The tool registers as `ctx_echo`; calling it
+        // as `ctx-echo` must still record `ctx_echo`.
+        let (db, backend, _dir) = test_store().await;
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let registry = registry_with(Arc::new(ContextEchoTool {
+            seen_user: Arc::clone(&seen),
+        }))
+        .await;
+        let safety = safety();
+        let store_opt: Option<&Arc<dyn Database>> = Some(&db);
+        let job_ctx = JobContext::with_user("chatter", "chat", "interactive");
+
+        execute_tool_audited(
+            &registry,
+            &safety,
+            store_opt,
+            "ctx-echo",
+            serde_json::json!({ "message": "hi" }),
+            &job_ctx,
+            DispatchSource::Channel("web".into()),
+        )
+        .await
+        .expect("audited execution should succeed for hyphenated alias");
+
+        let actions = fetch_system_actions(&backend, &db, "chatter").await;
+        assert!(
+            actions.iter().any(|a| a.tool_name == "ctx_echo"),
+            "audit row must record the canonical tool name `ctx_echo`, got: {:?}",
+            actions.iter().map(|a| &a.tool_name).collect::<Vec<_>>()
+        );
+        assert!(
+            !actions.iter().any(|a| a.tool_name == "ctx-echo"),
+            "audit row must not record the non-canonical hyphenated name"
         );
     }
 
