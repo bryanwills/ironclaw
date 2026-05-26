@@ -26,6 +26,7 @@ use crate::decoded_tx::{
     DecodedTransaction, NearAccessKeyPermission, NearAction, NearPublicKey, SolanaMessageVersion,
     hex_lower,
 };
+use crate::error::AttestationError;
 use crate::wire::{near_transaction_bytes, solana_message_bytes};
 
 /// One signing-relevant field, projected into a stable wire form.
@@ -78,7 +79,7 @@ impl Field {
 
 /// Project a decoded transaction into the ordered, signing-relevant field list
 /// shared by the renderer and the canonical encoder.
-pub(crate) fn project(tx: &DecodedTransaction) -> Vec<Field> {
+pub(crate) fn project(tx: &DecodedTransaction) -> Result<Vec<Field>, AttestationError> {
     match tx {
         DecodedTransaction::Evm(evm) => {
             let mut fields = vec![
@@ -140,7 +141,7 @@ pub(crate) fn project(tx: &DecodedTransaction) -> Vec<Field> {
                     &hash.0,
                 ));
             }
-            fields
+            Ok(fields)
         }
         DecodedTransaction::Solana(sol) => {
             let version_label = match sol.version {
@@ -228,14 +229,16 @@ pub(crate) fn project(tx: &DecodedTransaction) -> Vec<Field> {
                 ));
             }
             // Bind the EXACT signed message bytes so two distinct messages can
-            // never collapse to the same projection.
+            // never collapse to the same projection. Serialize ONCE and reuse
+            // for both the human value and the canonical commitment.
+            let message_bytes = solana_message_bytes(sol)?;
             fields.push(Field {
                 tag: "solana.message_bytes",
                 label: "Signed Message Bytes",
-                value: format!("0x{}", hex_lower(&solana_message_bytes(sol))),
-                canonical_bytes: solana_message_bytes(sol),
+                value: format!("0x{}", hex_lower(&message_bytes)),
+                canonical_bytes: message_bytes,
             });
-            fields
+            Ok(fields)
         }
         DecodedTransaction::Near(near) => {
             let mut fields = vec![
@@ -255,14 +258,16 @@ pub(crate) fn project(tx: &DecodedTransaction) -> Vec<Field> {
                 ));
                 project_near_action(&mut fields, action);
             }
-            // Bind the EXACT borsh-signed transaction bytes.
+            // Bind the EXACT borsh-signed transaction bytes. Serialize ONCE and
+            // reuse for both the human value and the canonical commitment.
+            let transaction_bytes = near_transaction_bytes(near)?;
             fields.push(Field {
                 tag: "near.transaction_bytes",
                 label: "Signed Transaction Bytes",
-                value: format!("0x{}", hex_lower(&near_transaction_bytes(near))),
-                canonical_bytes: near_transaction_bytes(near),
+                value: format!("0x{}", hex_lower(&transaction_bytes)),
+                canonical_bytes: transaction_bytes,
             });
-            fields
+            Ok(fields)
         }
     }
 }
