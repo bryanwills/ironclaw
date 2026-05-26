@@ -814,6 +814,249 @@ async fn near_signs_over_canonical_bytes() {
         .expect("signature must verify over sha256(canonical_signing_bytes)");
 }
 
+/// A secure-custody KMS backend that can sign secp256k1 but NOT ed25519 —
+/// modeling AWS KMS (secp256k1-only). It reports `is_secure_custody() == true`
+/// (so the ship-gate accepts it for mainnet) but `supports_alg(Ed25519) ==
+/// false`, so the curve-capability gate must refuse Solana/NEAR mainnet signing
+/// before any digest crosses the boundary — never falling back to a hot key.
+struct Secp256k1OnlyKms;
+impl ironclaw_chain_signing::KmsSigner for Secp256k1OnlyKms {
+    fn backend_id(&self) -> &str {
+        "secp256k1-only-kms"
+    }
+    fn is_secure_custody(&self) -> bool {
+        true
+    }
+    fn supports_alg(&self, alg: SignatureAlg) -> bool {
+        match alg {
+            SignatureAlg::Secp256k1 => true,
+            SignatureAlg::Ed25519 => false,
+        }
+    }
+    fn sign_digest(
+        &self,
+        _key_ref: &str,
+        _digest: &[u8; 32],
+        _alg: SignatureAlg,
+    ) -> Result<Vec<u8>, ChainSigningError> {
+        // Must never be reached on the ed25519 mainnet path: the curve-capability
+        // gate fails closed before any sign attempt.
+        panic!("sign_digest must not be called when the curve is unsupported");
+    }
+}
+
+/// Curve-capability fail-closed: a secp256k1-only secure KMS refuses Solana
+/// mainnet (ed25519) signing at the ship-gate's curve check — not via a runtime
+/// sign error, and never via a hot-key fallback.
+#[tokio::test]
+async fn solana_mainnet_refused_when_kms_lacks_ed25519() {
+    use ed25519_dalek::SigningKey as EdKey;
+    use ironclaw_attestation::{Bytes32, SolanaInstruction, SolanaTransaction};
+
+    let chain = "solana:mainnet"; // not a known testnet => Mainnet
+    let ed = EdKey::from_bytes(&[0x42u8; 32]);
+    let pubkey = ed.verifying_key().to_bytes();
+
+    let sol = SolanaTransaction {
+        cluster: "mainnet".into(),
+        account_keys: vec![Bytes32(pubkey), Bytes32([9u8; 32])],
+        recent_blockhash: Bytes32([2u8; 32]),
+        instructions: vec![SolanaInstruction {
+            program_id: Bytes32([9u8; 32]),
+            accounts: vec![Bytes32(pubkey)],
+            data: vec![1, 2, 3],
+        }],
+        compute_unit_limit: Some(200_000),
+        compute_unit_price: Some(5),
+    };
+    let decoded = DecodedTransaction::Solana(sol);
+    let approved = recompute_approved_hash(&decoded, SCHEMA);
+
+    let keystore = Arc::new(SecretsKeyStore::new(crypto()));
+    keystore
+        .bind(
+            &host_scope(),
+            // Bind a KMS key_ref so the missing-key_ref guard passes and we reach
+            // the curve-capability check.
+            binding(chain, hex::encode(pubkey), Some("kms-sol".to_string())),
+            ed.to_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    let ledger = Arc::new(InMemorySigningLedger::new());
+    let context = ctx(chain);
+    ledger.create(&context.gate_ref).await.unwrap();
+    grants
+        .seal(AttestedSigningGrant::seal(
+            GrantKey::from_context(&context, approved),
+            0,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let kms: Arc<dyn ironclaw_chain_signing::KmsSigner> = Arc::new(Secp256k1OnlyKms);
+    let signer = CustodialSigner::with_kms(
+        keystore,
+        grants,
+        Arc::clone(&ledger),
+        ShipGate::new(true, Some(kms.as_ref())),
+        kms,
+        Arc::new(DenyFirstCustodyPolicy),
+    );
+    let req = CustodialSignRequest {
+        context,
+        scope: host_scope(),
+        chain: ChainKeyId::new(chain),
+        decoded,
+        approved_tx_hash: approved,
+        schema_version: SCHEMA,
+    };
+    let err = signer.sign_solana(&req).await.unwrap_err();
+    assert!(
+        matches!(err, ChainSigningError::ShipGateRefused { .. }),
+        "Solana mainnet must fail closed when KMS cannot sign ed25519, got {err:?}"
+    );
+}
+
+/// Curve-capability fail-closed for NEAR mainnet (ed25519) with a secp256k1-only
+/// secure KMS.
+#[tokio::test]
+async fn near_mainnet_refused_when_kms_lacks_ed25519() {
+    use ed25519_dalek::SigningKey as EdKey;
+    use ironclaw_attestation::{Bytes32, NearAction, NearTransaction};
+
+    let chain = "near:mainnet"; // not a known testnet => Mainnet
+    let ed = EdKey::from_bytes(&[0x55u8; 32]);
+    let pubkey = ed.verifying_key().to_bytes();
+
+    let near = NearTransaction {
+        network: "mainnet".into(),
+        signer_id: "alice.near".into(),
+        receiver_id: "bob.near".into(),
+        nonce: 11,
+        block_hash: Bytes32([3u8; 32]),
+        actions: vec![NearAction {
+            kind: "Transfer".into(),
+            method_name: String::new(),
+            args: vec![],
+            deposit: vec![1, 2],
+            gas: 0,
+        }],
+    };
+    let decoded = DecodedTransaction::Near(near);
+    let approved = recompute_approved_hash(&decoded, SCHEMA);
+
+    let keystore = Arc::new(SecretsKeyStore::new(crypto()));
+    keystore
+        .bind(
+            &host_scope(),
+            binding(chain, hex::encode(pubkey), Some("kms-near".to_string())),
+            ed.to_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    let ledger = Arc::new(InMemorySigningLedger::new());
+    let context = ctx(chain);
+    ledger.create(&context.gate_ref).await.unwrap();
+    grants
+        .seal(AttestedSigningGrant::seal(
+            GrantKey::from_context(&context, approved),
+            0,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let kms: Arc<dyn ironclaw_chain_signing::KmsSigner> = Arc::new(Secp256k1OnlyKms);
+    let signer = CustodialSigner::with_kms(
+        keystore,
+        grants,
+        Arc::clone(&ledger),
+        ShipGate::new(true, Some(kms.as_ref())),
+        kms,
+        Arc::new(DenyFirstCustodyPolicy),
+    );
+    let req = CustodialSignRequest {
+        context,
+        scope: host_scope(),
+        chain: ChainKeyId::new(chain),
+        decoded,
+        approved_tx_hash: approved,
+        schema_version: SCHEMA,
+    };
+    let err = signer.sign_near(&req).await.unwrap_err();
+    assert!(
+        matches!(err, ChainSigningError::ShipGateRefused { .. }),
+        "NEAR mainnet must fail closed when KMS cannot sign ed25519, got {err:?}"
+    );
+}
+
+/// Positive: a secp256k1-capable secure KMS still signs EVM mainnet (secp256k1)
+/// — the curve-capability gate passes for the supported curve.
+#[tokio::test]
+async fn evm_mainnet_signs_when_kms_supports_secp256k1() {
+    let chain = MAINNET_CHAIN;
+    let tx = sample_tx(1);
+    let key = signing_key();
+    let bound = evm::address_of(&key);
+
+    let kms_backend = LocalKmsSigner::new("secure-kms");
+    kms_backend
+        .import_key("kms-evm", SignatureAlg::Secp256k1, key.to_bytes().to_vec())
+        .unwrap();
+    let kms: Arc<dyn ironclaw_chain_signing::KmsSigner> = Arc::new(kms_backend);
+
+    let keystore = Arc::new(SecretsKeyStore::new(crypto()));
+    keystore
+        .bind(
+            &host_scope(),
+            binding(
+                chain,
+                hex::encode(bound.as_slice()),
+                Some("kms-evm".to_string()),
+            ),
+            vec![0u8; 32],
+        )
+        .await
+        .unwrap();
+    let decoded = evm::decode_eip1559(&tx);
+    let approved = recompute_approved_hash(&decoded, SCHEMA);
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    let ledger = Arc::new(InMemorySigningLedger::new());
+    let context = ctx(chain);
+    ledger.create(&context.gate_ref).await.unwrap();
+    grants
+        .seal(AttestedSigningGrant::seal(
+            GrantKey::from_context(&context, approved),
+            0,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let signer = CustodialSigner::with_kms(
+        keystore,
+        grants,
+        Arc::clone(&ledger),
+        ShipGate::new(true, Some(kms.as_ref())),
+        kms,
+        Arc::new(DenyFirstCustodyPolicy),
+    );
+    let req = CustodialSignRequest {
+        context,
+        scope: host_scope(),
+        chain: ChainKeyId::new(chain),
+        decoded,
+        approved_tx_hash: approved,
+        schema_version: SCHEMA,
+    };
+    let out = signer.sign_evm(&req).await.expect("evm kms sign");
+    assert_eq!(out.signer, format!("0x{}", hex::encode(bound.as_slice())));
+}
+
 #[test]
 fn untrusted_metadata_rejected_by_policy() {
     let tx = sample_tx(11155111);
