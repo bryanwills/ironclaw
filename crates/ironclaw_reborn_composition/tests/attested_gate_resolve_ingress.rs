@@ -39,7 +39,7 @@ use ironclaw_product_workflow::{
     WebUiResolveGateRequest,
 };
 use ironclaw_reborn_composition::{
-    RebornAttestedComposition, RebornAttestedContinuation, RegisterAttestedGateError,
+    LocalDevAttestedComposition, RebornAttestedContinuation, RegisterAttestedGateError,
 };
 use ironclaw_secrets::SecretsCrypto;
 use ironclaw_signing_provider::{
@@ -147,7 +147,9 @@ fn lower_hex(bytes: &[u8]) -> String {
 
 /// Build the local-dev attested composition (the same wiring the reborn runtime
 /// assembles), exposed here so the test can register a gate and read the driver.
-fn build_composition(bindings: Arc<InMemoryAttestedGateBindingStore>) -> RebornAttestedComposition {
+fn build_composition(
+    bindings: Arc<InMemoryAttestedGateBindingStore>,
+) -> LocalDevAttestedComposition {
     use ironclaw_attestation::InMemorySealedGrantStore;
     use ironclaw_attested_runtime::{CustodialMainnetShipGate, ProviderRegistry};
     use ironclaw_wallet_external::InjectedSigningProvider;
@@ -159,12 +161,12 @@ fn build_composition(bindings: Arc<InMemoryAttestedGateBindingStore>) -> RebornA
     let keystore = Arc::new(SecretsKeyStore::new(crypto));
     let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
     let grants = Arc::new(InMemorySealedGrantStore::new());
-    RebornAttestedComposition::new(bindings, keystore, ship_gate, grants, |grants| {
+    let providers =
         ProviderRegistry::new()
             .with_provider(Arc::new(InjectedSigningProvider::new(
-                Arc::clone(grants) as Arc<dyn ironclaw_attestation::SealedGrantStore>
-            )))
-    })
+                Arc::clone(&grants) as Arc<dyn ironclaw_attestation::SealedGrantStore>
+            )));
+    LocalDevAttestedComposition::new_in_memory(bindings, keystore, ship_gate, grants, providers)
 }
 
 /// Submit a turn and block it `BlockedAttested` on `GATE`.
@@ -297,7 +299,7 @@ async fn resolve_gate_attested_drives_resume_and_continuation() {
     let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
     let resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
     let port: Arc<dyn AttestedResumePort> = Arc::new(RuntimeAttestedResumePort::new(
-        Arc::clone(&bindings),
+        Arc::clone(&bindings) as Arc<dyn ironclaw_attested_runtime::SyncBindingRead>,
         Arc::clone(&resume_guard),
     ));
     let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));
@@ -373,7 +375,7 @@ async fn resolve_gate_attested_without_continuation_port_fails_closed() {
     let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
     let resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
     let port: Arc<dyn AttestedResumePort> = Arc::new(RuntimeAttestedResumePort::new(
-        Arc::clone(&bindings),
+        Arc::clone(&bindings) as Arc<dyn ironclaw_attested_runtime::SyncBindingRead>,
         Arc::clone(&resume_guard),
     ));
     let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));
@@ -475,7 +477,7 @@ async fn wired_services_with_counting(
     let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
     let resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
     let port: Arc<dyn AttestedResumePort> = Arc::new(RuntimeAttestedResumePort::new(
-        Arc::clone(&bindings),
+        Arc::clone(&bindings) as Arc<dyn ironclaw_attested_runtime::SyncBindingRead>,
         Arc::clone(&resume_guard),
     ));
     let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));
@@ -634,7 +636,7 @@ async fn resolve_gate_attested_with_no_binding_fails_closed() {
     let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
     let resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
     let port: Arc<dyn AttestedResumePort> = Arc::new(RuntimeAttestedResumePort::new(
-        Arc::clone(&bindings),
+        Arc::clone(&bindings) as Arc<dyn ironclaw_attested_runtime::SyncBindingRead>,
         Arc::clone(&resume_guard),
     ));
     let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));

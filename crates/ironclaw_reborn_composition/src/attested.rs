@@ -80,9 +80,16 @@ pub(crate) type ComposedCustodialSigner<G, L> = CustodialSigner<SecretsKeyStore,
 pub(crate) type ComposedContinuationDriver<B, G, L> =
     AttestedSignerContinuationDriver<B, L, ComposedCustodialSigner<G, L>>;
 
+/// The local-dev / test monomorphization of [`ComposedContinuationDriver`]
+/// (in-memory stores + no-op broadcaster). This is the concrete driver type the
+/// composition-layer continuation port ([`crate::RebornAttestedContinuation`])
+/// holds, matching the [`LocalDevAttestedComposition`] the runtime assembles.
+pub(crate) type LocalDevContinuationDriver =
+    ComposedContinuationDriver<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
+
 /// The local-dev / test monomorphization of [`RebornAttestedComposition`] the
 /// `RebornRuntime` holds (in-memory stores + no-op broadcaster).
-pub(crate) type LocalDevAttestedComposition =
+pub type LocalDevAttestedComposition =
     RebornAttestedComposition<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
 
 /// A dry-run broadcaster that records intent but performs NO network I/O and,
@@ -128,6 +135,7 @@ where
     L: SigningLedger + 'static,
 {
     bindings: Arc<dyn AttestedGateBindingStore>,
+    grants: Arc<G>,
     driver: Arc<ComposedContinuationDriver<B, G, L>>,
 }
 
@@ -158,7 +166,7 @@ where
     ) -> Self {
         let custodial_signer = Arc::new(CustodialSigner::new(
             keystore,
-            grants,
+            Arc::clone(&grants),
             Arc::clone(&ledger),
             ship_gate,
             Arc::new(DenyFirstCustodyPolicy),
@@ -170,7 +178,11 @@ where
             ledger,
             broadcaster,
         ));
-        Self { bindings, driver }
+        Self {
+            bindings,
+            grants,
+            driver,
+        }
     }
 
     /// Register an attested gate: seal its one-shot grant and persist its

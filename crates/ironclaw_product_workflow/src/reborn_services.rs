@@ -1360,6 +1360,17 @@ fn map_attested_continuation_rejection(
             RebornServicesErrorKind::ServiceUnavailable,
             503,
         ),
+        // A chain-signing / broadcast backend failure is an infrastructure
+        // health failure, so it must surface as 503 (not a 400 proof rejection
+        // that would mislead the client and suppress the backend-health
+        // signal). It stays non-retryable like every other category here: the
+        // resume guard already consumed the one-shot, so a client retry would
+        // be rejected at the CAS rather than re-driving the sign/broadcast.
+        AttestedContinuationRejection::BackendUnavailable => (
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+        ),
     };
     RebornServicesError::from_status_kind(code, kind, status, false)
 }
@@ -1586,6 +1597,73 @@ fn generated_thread_id(
             debug_assert!(false, "generated UUID thread id should be valid: {error}");
             // Fallback remains valid under ThreadId validation rules.
             ThreadId::new("generated-thread-fallback").unwrap_or_else(|_| unreachable!())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every sanitized attested-continuation rejection must map to a stable
+    /// (code, kind, status) triple. This is the boundary that translates the
+    /// crypto-free continuation taxonomy into the WebUI HTTP surface, so a
+    /// missing/incorrect arm would silently mislabel a failure (e.g. a 503
+    /// backend outage surfacing as a 400 client error).
+    #[test]
+    fn map_attested_continuation_rejection_all_variants() {
+        let cases = [
+            (
+                AttestedContinuationRejection::MissingBinding,
+                RebornServicesErrorCode::NotFound,
+                RebornServicesErrorKind::NotFound,
+                404u16,
+            ),
+            (
+                AttestedContinuationRejection::ProviderMismatch,
+                RebornServicesErrorCode::InvalidRequest,
+                RebornServicesErrorKind::Validation,
+                400,
+            ),
+            (
+                AttestedContinuationRejection::ProofRejected,
+                RebornServicesErrorCode::InvalidRequest,
+                RebornServicesErrorKind::Validation,
+                400,
+            ),
+            (
+                AttestedContinuationRejection::MalformedProof,
+                RebornServicesErrorCode::InvalidRequest,
+                RebornServicesErrorKind::Validation,
+                400,
+            ),
+            (
+                AttestedContinuationRejection::LedgerGuard,
+                RebornServicesErrorCode::Conflict,
+                RebornServicesErrorKind::Conflict,
+                409,
+            ),
+            (
+                AttestedContinuationRejection::Unavailable,
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ServiceUnavailable,
+                503,
+            ),
+            (
+                AttestedContinuationRejection::BackendUnavailable,
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ServiceUnavailable,
+                503,
+            ),
+        ];
+
+        for (rejection, code, kind, status) in cases {
+            let err = map_attested_continuation_rejection(rejection.clone());
+            assert_eq!(err.code, code, "code mismatch for {rejection:?}");
+            assert_eq!(err.kind, kind, "kind mismatch for {rejection:?}");
+            assert_eq!(err.status_code, status, "status mismatch for {rejection:?}");
+            // Continuation runs after the one-shot is consumed: never retryable.
+            assert!(!err.retryable, "{rejection:?} must be non-retryable");
         }
     }
 }

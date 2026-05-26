@@ -245,9 +245,12 @@ fn local_dev_attested_turn_state() -> (
 ) {
     let attested_gate_bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
     let attested_resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
-    let attested_resume_port: Arc<dyn AttestedResumePort> = Arc::new(
-        RuntimeAttestedResumePort::new(Arc::clone(&attested_gate_bindings), attested_resume_guard),
-    );
+    let attested_resume_port: Arc<dyn AttestedResumePort> =
+        Arc::new(RuntimeAttestedResumePort::new(
+            Arc::clone(&attested_gate_bindings)
+                as Arc<dyn ironclaw_attested_runtime::SyncBindingRead>,
+            attested_resume_guard,
+        ));
     let turn_state =
         Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(attested_resume_port));
     (attested_gate_bindings, turn_state)
