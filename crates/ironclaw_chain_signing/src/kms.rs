@@ -530,6 +530,7 @@ mod tests {
     #[test]
     fn curve_limited_backend_reports_unsupported_alg() {
         struct Secp256k1Only;
+        #[async_trait]
         impl KmsSigner for Secp256k1Only {
             fn backend_id(&self) -> &str {
                 "secp256k1-only"
@@ -543,7 +544,7 @@ mod tests {
                     SignatureAlg::Ed25519 => false,
                 }
             }
-            fn sign_digest(
+            async fn sign_digest(
                 &self,
                 _key_ref: &str,
                 _digest: &[u8; 32],

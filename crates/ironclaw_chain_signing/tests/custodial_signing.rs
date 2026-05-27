@@ -820,6 +820,7 @@ async fn near_signs_over_canonical_bytes() {
 /// false`, so the curve-capability gate must refuse Solana/NEAR mainnet signing
 /// before any digest crosses the boundary — never falling back to a hot key.
 struct Secp256k1OnlyKms;
+#[async_trait::async_trait]
 impl ironclaw_chain_signing::KmsSigner for Secp256k1OnlyKms {
     fn backend_id(&self) -> &str {
         "secp256k1-only-kms"
@@ -833,7 +834,7 @@ impl ironclaw_chain_signing::KmsSigner for Secp256k1OnlyKms {
             SignatureAlg::Ed25519 => false,
         }
     }
-    fn sign_digest(
+    async fn sign_digest(
         &self,
         _key_ref: &str,
         _digest: &[u8; 32],
@@ -851,7 +852,10 @@ impl ironclaw_chain_signing::KmsSigner for Secp256k1OnlyKms {
 #[tokio::test]
 async fn solana_mainnet_refused_when_kms_lacks_ed25519() {
     use ed25519_dalek::SigningKey as EdKey;
-    use ironclaw_attestation::{Bytes32, SolanaInstruction, SolanaTransaction};
+    use ironclaw_attestation::{
+        Bytes32, SolanaCompiledInstruction, SolanaMessageHeader, SolanaMessageVersion,
+        SolanaTransaction,
+    };
 
     let chain = "solana:mainnet"; // not a known testnet => Mainnet
     let ed = EdKey::from_bytes(&[0x42u8; 32]);
@@ -859,18 +863,23 @@ async fn solana_mainnet_refused_when_kms_lacks_ed25519() {
 
     let sol = SolanaTransaction {
         cluster: "mainnet".into(),
-        account_keys: vec![Bytes32(pubkey), Bytes32([9u8; 32])],
+        version: SolanaMessageVersion::Legacy,
+        header: SolanaMessageHeader {
+            num_required_signatures: 1,
+            num_readonly_signed_accounts: 0,
+            num_readonly_unsigned_accounts: 1,
+        },
+        static_account_keys: vec![Bytes32(pubkey), Bytes32([9u8; 32])],
         recent_blockhash: Bytes32([2u8; 32]),
-        instructions: vec![SolanaInstruction {
-            program_id: Bytes32([9u8; 32]),
-            accounts: vec![Bytes32(pubkey)],
+        instructions: vec![SolanaCompiledInstruction {
+            program_id_index: 1,
+            account_indices: vec![0],
             data: vec![1, 2, 3],
         }],
-        compute_unit_limit: Some(200_000),
-        compute_unit_price: Some(5),
+        address_table_lookups: vec![],
     };
     let decoded = DecodedTransaction::Solana(sol);
-    let approved = recompute_approved_hash(&decoded, SCHEMA);
+    let approved = recompute_approved_hash(&decoded, "custodial", SCHEMA).unwrap();
 
     let keystore = Arc::new(SecretsKeyStore::new(crypto()));
     keystore
@@ -908,7 +917,7 @@ async fn solana_mainnet_refused_when_kms_lacks_ed25519() {
     let req = CustodialSignRequest {
         context,
         scope: host_scope(),
-        chain: ChainKeyId::new(chain),
+        chain: ChainKeyId::new(chain).expect("valid chain id in test"),
         decoded,
         approved_tx_hash: approved,
         schema_version: SCHEMA,
@@ -925,7 +934,7 @@ async fn solana_mainnet_refused_when_kms_lacks_ed25519() {
 #[tokio::test]
 async fn near_mainnet_refused_when_kms_lacks_ed25519() {
     use ed25519_dalek::SigningKey as EdKey;
-    use ironclaw_attestation::{Bytes32, NearAction, NearTransaction};
+    use ironclaw_attestation::{Bytes32, NearAction, NearPublicKey, NearTransaction};
 
     let chain = "near:mainnet"; // not a known testnet => Mainnet
     let ed = EdKey::from_bytes(&[0x55u8; 32]);
@@ -934,19 +943,19 @@ async fn near_mainnet_refused_when_kms_lacks_ed25519() {
     let near = NearTransaction {
         network: "mainnet".into(),
         signer_id: "alice.near".into(),
+        public_key: NearPublicKey {
+            key_type: 0,
+            data: pubkey.to_vec(),
+        },
         receiver_id: "bob.near".into(),
         nonce: 11,
         block_hash: Bytes32([3u8; 32]),
-        actions: vec![NearAction {
-            kind: "Transfer".into(),
-            method_name: String::new(),
-            args: vec![],
+        actions: vec![NearAction::Transfer {
             deposit: vec![1, 2],
-            gas: 0,
         }],
     };
     let decoded = DecodedTransaction::Near(near);
-    let approved = recompute_approved_hash(&decoded, SCHEMA);
+    let approved = recompute_approved_hash(&decoded, "custodial", SCHEMA).unwrap();
 
     let keystore = Arc::new(SecretsKeyStore::new(crypto()));
     keystore
@@ -982,7 +991,7 @@ async fn near_mainnet_refused_when_kms_lacks_ed25519() {
     let req = CustodialSignRequest {
         context,
         scope: host_scope(),
-        chain: ChainKeyId::new(chain),
+        chain: ChainKeyId::new(chain).expect("valid chain id in test"),
         decoded,
         approved_tx_hash: approved,
         schema_version: SCHEMA,
@@ -1023,7 +1032,7 @@ async fn evm_mainnet_signs_when_kms_supports_secp256k1() {
         .await
         .unwrap();
     let decoded = evm::decode_eip1559(&tx);
-    let approved = recompute_approved_hash(&decoded, SCHEMA);
+    let approved = recompute_approved_hash(&decoded, "custodial", SCHEMA).unwrap();
     let grants = Arc::new(InMemorySealedGrantStore::new());
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(chain);
@@ -1048,7 +1057,7 @@ async fn evm_mainnet_signs_when_kms_supports_secp256k1() {
     let req = CustodialSignRequest {
         context,
         scope: host_scope(),
-        chain: ChainKeyId::new(chain),
+        chain: ChainKeyId::new(chain).expect("valid chain id in test"),
         decoded,
         approved_tx_hash: approved,
         schema_version: SCHEMA,
