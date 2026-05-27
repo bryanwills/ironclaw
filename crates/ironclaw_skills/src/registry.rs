@@ -104,12 +104,42 @@ fn assemble_skill_md(yaml: &str, prompt_content: &str) -> String {
     rendered
 }
 
+fn starts_with_frontmatter_delimiter(content: &str) -> bool {
+    let stripped = content.strip_prefix('\u{feff}').unwrap_or(content);
+    stripped.trim_start_matches(['\n', '\r']).starts_with("---")
+}
+
+fn synthesize_install_frontmatter(
+    normalized_content: &str,
+    requested_identifier: Option<&str>,
+) -> Result<(String, String), SkillRegistryError> {
+    let skill_name = requested_identifier
+        .and_then(normalize_skill_identifier)
+        .ok_or_else(|| SkillRegistryError::ParseError {
+            name: "(install)".to_string(),
+            reason:
+                "Missing YAML frontmatter delimiters and no valid requested skill name was provided"
+                    .to_string(),
+        })?;
+
+    let yaml = format!("name: {skill_name}\n");
+    let rendered = assemble_skill_md(&yaml, normalized_content);
+    parse_skill_md(&rendered)
+        .map(|parsed| (parsed.manifest.name, rendered))
+        .map_err(|e| parse_error_for_install(&skill_name, e))
+}
+
 fn normalize_install_content(
     normalized_content: &str,
     requested_identifier: Option<&str>,
 ) -> Result<(String, String), SkillRegistryError> {
     match parse_skill_md(normalized_content) {
         Ok(parsed) => Ok((parsed.manifest.name, normalized_content.to_string())),
+        Err(SkillParseError::MissingFrontmatter)
+            if !starts_with_frontmatter_delimiter(normalized_content) =>
+        {
+            synthesize_install_frontmatter(normalized_content, requested_identifier)
+        }
         Err(SkillParseError::InvalidName { .. }) => {
             // Re-parse the typed manifest only to recover the original name and
             // confirm structural validity; the actual rewrite operates on raw
@@ -1301,6 +1331,45 @@ mod tests {
 
         assert_eq!(name, "mortgage-calculator");
         assert!(rewritten.contains("name: mortgage-calculator"));
+    }
+
+    #[test]
+    fn test_resolve_install_content_synthesizes_frontmatter_for_named_markdown() {
+        let content = "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n";
+
+        let (name, rewritten) =
+            SkillRegistry::resolve_install_content(content, Some("qa-smoke-skill")).unwrap();
+
+        assert_eq!(name, "qa-smoke-skill");
+        assert!(rewritten.starts_with("---\nname: qa-smoke-skill\n---\n\n"));
+        assert!(rewritten.contains("Say \"qa skill loaded\""));
+    }
+
+    #[test]
+    fn test_resolve_install_content_rejects_plain_markdown_without_name() {
+        let content = "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n";
+
+        let err = SkillRegistry::resolve_install_content(content, None).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("no valid requested skill name was provided"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_install_content_does_not_recover_malformed_frontmatter_as_markdown() {
+        let content = "---\nname: qa-smoke-skill\n\nMissing closing delimiter.\n";
+
+        let err =
+            SkillRegistry::resolve_install_content(content, Some("qa-smoke-skill")).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Missing YAML frontmatter delimiters"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

@@ -931,6 +931,9 @@ impl Tool for SkillInstallTool {
 
         let install_payload = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
             // Direct content provided
+            if requested_identifier.is_none() {
+                requested_identifier = Some(name.to_string());
+            }
             SkillInstallPayload {
                 skill_md: raw.to_string(),
                 ..SkillInstallPayload::default()
@@ -2087,6 +2090,36 @@ mod tests {
         assert!(schema["properties"].get("slug").is_some());
         assert!(schema["properties"].get("url").is_some());
         assert!(schema["properties"].get("content").is_some());
+    }
+
+    #[tokio::test]
+    async fn skill_install_execute_accepts_plain_markdown_when_name_is_provided() {
+        let registry = test_registry();
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "qa-smoke-skill",
+                    "content": "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n",
+                }),
+                &JobContext::default(),
+            )
+            .await
+            .expect("plain markdown content with a requested name should install");
+
+        assert_eq!(output.result["status"], "installed");
+        assert_eq!(output.result["name"], "qa-smoke-skill");
+
+        let install_dir = {
+            let guard = registry.read().unwrap();
+            assert!(guard.has("qa-smoke-skill"));
+            guard.install_target_dir().to_path_buf()
+        };
+        let written =
+            std::fs::read_to_string(install_dir.join("qa-smoke-skill").join("SKILL.md")).unwrap();
+        assert!(written.starts_with("---\nname: qa-smoke-skill\n---\n\n"));
+        assert!(written.contains("Say \"qa skill loaded\""));
     }
 
     /// Regression: when a persona bundle is already loaded (via bundled
