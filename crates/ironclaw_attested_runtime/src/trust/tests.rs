@@ -28,11 +28,11 @@ impl SeqNonce {
     }
 }
 impl NonceSource for SeqNonce {
-    fn next_nonce_hex(&self) -> String {
+    fn next_nonce_hex(&self) -> Result<String, TrustError> {
         let n = self
             .counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        format!("{n:032x}")
+        Ok(format!("{n:032x}"))
     }
 }
 
@@ -882,8 +882,8 @@ async fn solana_invalid_account_fails_closed() {
 #[test]
 fn csprng_nonce_source_is_fresh_and_well_formed() {
     let src = CsprngNonceSource::new();
-    let a = src.next_nonce_hex();
-    let b = src.next_nonce_hex();
+    let a = src.next_nonce_hex().expect("OS CSPRNG available in tests");
+    let b = src.next_nonce_hex().expect("OS CSPRNG available in tests");
     assert_eq!(a.len(), 64, "32 bytes → 64 hex chars");
     assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
     assert_ne!(a, b, "distinct draws");

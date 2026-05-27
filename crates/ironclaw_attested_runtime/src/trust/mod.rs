@@ -64,7 +64,10 @@ pub use verifier::{NearAccessKeyVerifier, VerifiedControl};
 pub trait NonceSource: Send + Sync {
     /// Return a fresh nonce as lowercase hex. Must be unpredictable in
     /// production (replay/forgery defense).
-    fn next_nonce_hex(&self) -> String;
+    ///
+    /// Returns [`TrustError::NonceUnavailable`] if the entropy source is
+    /// unavailable: the ceremony fails closed rather than minting a weak nonce.
+    fn next_nonce_hex(&self) -> Result<String, TrustError>;
 }
 
 /// Production [`NonceSource`] backed by the operating system CSPRNG.
@@ -88,15 +91,16 @@ impl CsprngNonceSource {
 }
 
 impl NonceSource for CsprngNonceSource {
-    fn next_nonce_hex(&self) -> String {
+    fn next_nonce_hex(&self) -> Result<String, TrustError> {
         let mut bytes = [0u8; 32];
         // `getrandom` only errors if the OS entropy source is unavailable — a
         // catastrophic platform failure, not a normal runtime condition. We
-        // cannot mint an unpredictable challenge without it, so fail loudly
-        // rather than silently emitting a weak/zero nonce.
+        // cannot mint an unpredictable challenge without it, so fail closed
+        // (propagating to the caller's `Result`) rather than silently emitting
+        // a weak/zero nonce or panicking.
         getrandom::getrandom(&mut bytes)
-            .expect("OS CSPRNG (getrandom) unavailable; cannot mint a secure challenge nonce");
-        hex_encode(&bytes)
+            .map_err(|e| TrustError::NonceUnavailable(e.to_string()))?;
+        Ok(hex_encode(&bytes))
     }
 }
 
@@ -123,6 +127,10 @@ pub enum TrustError {
     /// The chain id could not be mapped to a supported chain family.
     #[error("unsupported chain for trust registration: {0}")]
     UnsupportedChain(String),
+    /// The OS CSPRNG was unavailable, so no secure challenge nonce could be
+    /// minted. A catastrophic platform failure, surfaced fail-closed.
+    #[error("secure challenge nonce unavailable: {0}")]
+    NonceUnavailable(String),
     /// Control-of-account verification failed.
     #[error(transparent)]
     Verification(#[from] SigningProviderError),
@@ -236,7 +244,7 @@ impl<S: TrustStore, N: NearAccessKeyVerifier> TrustRegistrar<S, N> {
             now_unix_ms,
         );
 
-        let nonce_hex = self.nonce_source.next_nonce_hex();
+        let nonce_hex = self.nonce_source.next_nonce_hex()?;
         let expires_at_unix_ms = now_unix_ms + self.challenge_ttl_ms;
         let challenge = build_challenge(&enrollment, nonce_hex.clone(), expires_at_unix_ms);
         let challenge_hash = hex_encode(&challenge.digest());
