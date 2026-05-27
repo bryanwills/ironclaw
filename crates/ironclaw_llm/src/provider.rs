@@ -195,6 +195,31 @@ impl ChatMessage {
     }
 }
 
+/// Move every system message into one leading system message.
+///
+/// Some strict chat-completion providers reject system messages after the first
+/// message. This preserves the non-system transcript order while combining all
+/// system content at the provider boundary.
+pub fn normalize_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut system_content = Vec::new();
+    let mut transcript = Vec::with_capacity(messages.len());
+    for message in messages {
+        if message.role == Role::System {
+            system_content.push(message.content);
+        } else {
+            transcript.push(message);
+        }
+    }
+    if system_content.is_empty() {
+        return transcript;
+    }
+
+    let mut normalized = Vec::with_capacity(transcript.len() + 1);
+    normalized.push(ChatMessage::system(system_content.join("\n\n")));
+    normalized.extend(transcript);
+    normalized
+}
+
 /// Request for a chat completion.
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {

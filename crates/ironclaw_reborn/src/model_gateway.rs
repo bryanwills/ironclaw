@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    normalize_system_messages_at_start,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -1088,27 +1089,7 @@ fn convert_messages(
         }
         index += 1;
     }
-    Ok(coalesce_system_messages_at_start(converted))
-}
-
-fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    let mut system_content = Vec::new();
-    let mut transcript = Vec::with_capacity(messages.len());
-    for message in messages {
-        if message.role == Role::System {
-            system_content.push(message.content);
-        } else {
-            transcript.push(message);
-        }
-    }
-    if system_content.is_empty() {
-        return transcript;
-    }
-
-    let mut normalized = Vec::with_capacity(transcript.len() + 1);
-    normalized.push(ChatMessage::system(system_content.join("\n\n")));
-    normalized.extend(transcript);
-    normalized
+    Ok(normalize_system_messages_at_start(converted))
 }
 
 fn tool_summary_message(summary: String) -> String {

@@ -21,7 +21,7 @@ use crate::config::NearAiConfig;
 use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ToolCompletionRequest, ToolCompletionResponse, normalize_system_messages_at_start,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use crate::{costs, session::SessionManager};
@@ -524,17 +524,7 @@ impl LlmProvider for NearAiChatProvider {
         let model = req
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
-        let mut raw_messages = req.messages;
-        crate::provider::sanitize_tool_messages(&mut raw_messages);
-        let raw: Vec<ChatCompletionMessage> = raw_messages.into_iter().map(|m| m.into()).collect();
-
-        // NEAR AI rejects `role:"tool"` messages even on text-only completion paths.
-        // Apply the same flattening used by complete_with_tools().
-        let messages = if self.flatten_tool_messages {
-            flatten_tool_messages(raw)
-        } else {
-            raw
-        };
+        let messages = prepare_messages_for_nearai(req.messages, self.flatten_tool_messages);
 
         let request = ChatCompletionRequest {
             model,
@@ -599,18 +589,7 @@ impl LlmProvider for NearAiChatProvider {
         let model = req
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
-        let mut raw_messages = req.messages;
-        crate::provider::sanitize_tool_messages(&mut raw_messages);
-        let messages: Vec<ChatCompletionMessage> =
-            raw_messages.into_iter().map(|m| m.into()).collect();
-
-        // Some OpenAI-compatible providers reject `role:"tool"` messages.
-        // When enabled, rewrite tool-call / tool-result pairs into plain text.
-        let messages = if self.flatten_tool_messages {
-            flatten_tool_messages(messages)
-        } else {
-            messages
-        };
+        let messages = prepare_messages_for_nearai(req.messages, self.flatten_tool_messages);
 
         let request = build_chat_completion_request(
             model,
@@ -978,6 +957,23 @@ async fn fetch_pricing(
 ///   - Tool result messages (`role: "tool"`) → user messages with the result
 ///
 /// Non-tool messages pass through unchanged.
+fn prepare_messages_for_nearai(
+    mut messages: Vec<ChatMessage>,
+    flatten_tool_messages_enabled: bool,
+) -> Vec<ChatCompletionMessage> {
+    crate::provider::sanitize_tool_messages(&mut messages);
+    let messages = normalize_system_messages_at_start(messages);
+    let messages = messages
+        .into_iter()
+        .map(ChatCompletionMessage::from)
+        .collect();
+    if flatten_tool_messages_enabled {
+        flatten_tool_messages(messages)
+    } else {
+        messages
+    }
+}
+
 fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatCompletionMessage> {
     let has_tool_msgs = messages.iter().any(|m| m.role == "tool");
     if !has_tool_msgs {
@@ -1262,6 +1258,91 @@ mod tests {
         Arc::new(SessionManager::new(SessionConfig::default()))
     }
 
+    mod chat_completion_test_server {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        pub(super) async fn spawn() -> (String, tokio::sync::oneshot::Receiver<String>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let mut tx = Some(tx);
+                loop {
+                    let (mut stream, _) = listener.accept().await.expect("accept request");
+                    let request = read_http_request(&mut stream).await;
+                    let is_chat = request.starts_with("POST /v1/chat/completions ");
+                    let body = request
+                        .split_once("\r\n\r\n")
+                        .map(|(_, body)| body.to_string())
+                        .unwrap_or_default();
+                    let response = if is_chat {
+                        if let Some(sender) = tx.take() {
+                            let _ = sender.send(body);
+                        }
+                        r#"{"id":"chatcmpl-test","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                    } else {
+                        r#"{"data":[]}"#
+                    };
+                    write_response(&mut stream, response).await;
+                    if is_chat {
+                        break;
+                    }
+                }
+            });
+            (base_url, rx)
+        }
+
+        async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {
+            let mut data = Vec::new();
+            let mut buf = [0_u8; 1024];
+            let header_end = loop {
+                let read = stream.read(&mut buf).await.expect("read request");
+                assert_ne!(read, 0, "connection closed before headers");
+                data.extend_from_slice(&buf[..read]);
+                if let Some(header_end) = find_header_end(&data) {
+                    break header_end;
+                }
+            };
+            let content_length = content_length(&data[..header_end]);
+            let total_len = header_end + 4 + content_length;
+            while data.len() < total_len {
+                let read = stream.read(&mut buf).await.expect("read body");
+                assert_ne!(read, 0, "connection closed before body");
+                data.extend_from_slice(&buf[..read]);
+            }
+            String::from_utf8(data).expect("utf8 request")
+        }
+
+        fn content_length(headers: &[u8]) -> usize {
+            String::from_utf8_lossy(headers)
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().expect("content length"))
+                })
+                .unwrap_or(0)
+        }
+
+        fn find_header_end(data: &[u8]) -> Option<usize> {
+            data.windows(4).position(|window| window == b"\r\n\r\n")
+        }
+
+        async fn write_response(stream: &mut tokio::net::TcpStream, body: &str) {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        }
+    }
+
     #[test]
     fn test_api_url_with_base_without_v1() {
         let mut cfg = test_nearai_config("http://127.0.0.1:8318");
@@ -1517,6 +1598,76 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].role, "system");
         assert_eq!(result[1].role, "user");
+    }
+
+    #[test]
+    fn test_normalize_system_messages_moves_late_systems_to_front() {
+        let messages = vec![
+            ChatMessage::system("base instructions"),
+            ChatMessage::user("hello"),
+            ChatMessage::system("host summary"),
+            ChatMessage::assistant("hi"),
+        ];
+
+        let result = normalize_system_messages_at_start(messages);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].role, Role::System);
+        assert_eq!(result[0].content, "base instructions\n\nhost summary");
+        assert_eq!(result[1].role, Role::User);
+        assert_eq!(result[1].content, "hello");
+        assert_eq!(result[2].role, Role::Assistant);
+        assert_eq!(result[2].content, "hi");
+    }
+
+    #[tokio::test]
+    async fn test_complete_sends_system_messages_at_beginning() {
+        let (base_url, body_rx) = chat_completion_test_server::spawn().await;
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let request = CompletionRequest::new(vec![
+            ChatMessage::user("hello"),
+            ChatMessage::system("late system"),
+        ]);
+
+        provider.complete(request).await.expect("completion");
+
+        let body = body_rx.await.expect("captured chat body");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        let messages = json["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "late system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "hello");
+    }
+
+    #[tokio::test]
+    async fn test_complete_with_tools_sends_system_messages_at_beginning() {
+        let (base_url, body_rx) = chat_completion_test_server::spawn().await;
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let request = ToolCompletionRequest::new(
+            vec![
+                ChatMessage::user("hello"),
+                ChatMessage::system("late system"),
+            ],
+            Vec::new(),
+        );
+
+        provider
+            .complete_with_tools(request)
+            .await
+            .expect("tool completion");
+
+        let body = body_rx.await.expect("captured chat body");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        let messages = json["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "late system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "hello");
     }
 
     #[test]
