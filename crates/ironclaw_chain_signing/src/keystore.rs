@@ -235,6 +235,35 @@ impl SecretsKeyStore {
             reason: e.to_string(),
         })
     }
+
+    /// Test-only: copy the stored ciphertext bound under `from`'s scope verbatim
+    /// into the slot `to`'s scope + the same `chain` would read, modelling an
+    /// attacker (or buggy backend) with raw storage access who *moves* one
+    /// tenant's sealed row into another tenant's slot. Returns `true` if a row
+    /// existed under `from` and was copied. Keeping this here lets the
+    /// cross-tenant ciphertext-injection test exercise the real `consume` path
+    /// without reaching into the private `keys` map or the private `StoredKey` /
+    /// `KeyStoreKey` representations, so the test survives internal-layout
+    /// changes (review L1).
+    #[cfg(test)]
+    fn inject_stored_for_test(
+        &self,
+        from: &ResourceScope,
+        to: &ResourceScope,
+        chain: &ChainKeyId,
+    ) -> bool {
+        let mut keys = self.keys.lock().expect("keystore lock in test");
+        let Some(stored) = keys.get(&KeyStoreKey::new(from, chain)) else {
+            return false;
+        };
+        let smuggled = StoredKey {
+            binding: stored.binding.clone(),
+            encrypted: stored.encrypted.clone(),
+            salt: stored.salt.clone(),
+        };
+        keys.insert(KeyStoreKey::new(to, chain), smuggled);
+        true
+    }
 }
 
 #[async_trait]
@@ -514,19 +543,14 @@ mod tests {
 
         let tenant_b = scope_t("tenant-b", "alice");
         // Copy tenant A's stored ciphertext verbatim into tenant B's slot,
-        // modelling an attacker with raw store access.
-        {
-            let mut keys = store.keys.lock().unwrap();
-            let a_key = KeyStoreKey::new(&tenant_a, &chain);
-            let stored = keys.get(&a_key).expect("tenant-A key present");
-            let smuggled = StoredKey {
-                binding: stored.binding.clone(),
-                encrypted: stored.encrypted.clone(),
-                salt: stored.salt.clone(),
-            };
-            let b_key = KeyStoreKey::new(&tenant_b, &chain);
-            keys.insert(b_key, smuggled);
-        }
+        // modelling an attacker with raw store access. Done through the
+        // test-only `inject_stored_for_test` helper rather than reaching into
+        // the private `keys` map, so this test is robust to internal-layout
+        // changes (review L1).
+        assert!(
+            store.inject_stored_for_test(&tenant_a, &tenant_b, &chain),
+            "tenant-A key must be present to smuggle"
+        );
 
         // Tenant B now "finds" a row, but consume decrypts under tenant B's AAD
         // and the tag check fails — fail-closed, no key material leaked.
