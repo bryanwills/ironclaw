@@ -583,6 +583,7 @@ fn near_distinct_actions_hash_differently() {
         NearAction::Delegate {
             sender_id: "s.near".to_string(),
             receiver_id: "r.near".to_string(),
+            inner_actions: vec![],
             nonce: 2,
             max_block_height: 100,
             public_key: ed25519_pk(0x44),
@@ -922,6 +923,7 @@ fn near_delegate_action_serializes_empty_inner_actions_vector() {
     near.actions = vec![NearAction::Delegate {
         sender_id: "s.near".to_string(),
         receiver_id: "r.near".to_string(),
+        inner_actions: vec![],
         nonce: 0x0102_0304_0506_0708,
         max_block_height: 100,
         public_key: ed25519_pk(0x44),
@@ -949,6 +951,7 @@ fn near_delegate_action_serializes_empty_inner_actions_vector() {
     other.actions = vec![NearAction::Delegate {
         sender_id: "s.near".to_string(),
         receiver_id: "r.near".to_string(),
+        inner_actions: vec![],
         nonce: 0x0102_0304_0506_0709, // differs by one
         max_block_height: 100,
         public_key: ed25519_pk(0x44),
@@ -956,5 +959,65 @@ fn near_delegate_action_serializes_empty_inner_actions_vector() {
     assert_ne!(
         hash_of(&tx, SV),
         hash_of(&DecodedTransaction::Near(other), SV)
+    );
+}
+
+#[test]
+fn near_delegate_inner_actions_are_bound_into_canonical_bytes() {
+    // WYSIWYS regression: a NEP-366 DelegateAction with non-empty inner actions
+    // must commit those inner actions into the canonical bytes (and therefore
+    // the ApprovedTxHash). A previous implementation hardcoded an empty
+    // `Vec<Action>` regardless of the signed payload, so a real delegate of
+    // `Transfer { 1 NEAR }` would produce the SAME hash as an empty delegate —
+    // an approve-empty / sign-transfer mismatch. These two must hash distinctly.
+    let inner = NearAction::Transfer {
+        deposit: vec![0x0d, 0xe0, 0xb6, 0xb3, 0xa7, 0x64, 0x00, 0x00], // 1e18 yocto
+    };
+    let delegate_with_inner = |actions: Vec<NearAction>| {
+        let mut near = sample_near();
+        near.actions = vec![NearAction::Delegate {
+            sender_id: "s.near".to_string(),
+            receiver_id: "r.near".to_string(),
+            inner_actions: actions,
+            nonce: 7,
+            max_block_height: 100,
+            public_key: ed25519_pk(0x44),
+        }];
+        DecodedTransaction::Near(near)
+    };
+
+    let empty = delegate_with_inner(vec![]);
+    let with_transfer = delegate_with_inner(vec![inner.clone()]);
+
+    // The inner action must change the canonical bytes and the bound hash.
+    assert_ne!(
+        canon(&empty, SV),
+        canon(&with_transfer, SV),
+        "non-empty inner actions must change the canonical bytes"
+    );
+    assert_ne!(
+        hash_of(&empty, SV),
+        hash_of(&with_transfer, SV),
+        "non-empty inner actions must change the ApprovedTxHash (WYSIWYS)"
+    );
+
+    // The inner action's bytes must actually appear inside the canonical bytes:
+    // discriminant(3 = Transfer) ∥ deposit(u128 le) for 1e18 yocto.
+    let bytes = canon(&with_transfer, SV);
+    let mut expected = vec![3u8];
+    expected.extend_from_slice(&1_000_000_000_000_000_000u128.to_le_bytes());
+    assert!(
+        bytes.windows(expected.len()).any(|w| w == expected),
+        "the inner Transfer action must be serialized into the delegate's canonical bytes"
+    );
+
+    // And the inner action must surface in the human render too.
+    let render = render_ok(&with_transfer, SV);
+    assert!(
+        render
+            .fields
+            .iter()
+            .any(|f| f.label == "Delegate Inner Action"),
+        "the human render must surface the delegated inner action"
     );
 }

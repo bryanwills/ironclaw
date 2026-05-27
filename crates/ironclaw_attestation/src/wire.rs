@@ -290,6 +290,7 @@ fn push_near_action(out: &mut Vec<u8>, action: &NearAction) -> Result<(), Attest
         NearAction::Delegate {
             sender_id,
             receiver_id,
+            inner_actions,
             nonce,
             max_block_height,
             public_key,
@@ -297,14 +298,21 @@ fn push_near_action(out: &mut Vec<u8>, action: &NearAction) -> Result<(), Attest
             out.push(8);
             // NEP-366 DelegateAction borsh layout:
             // `sender_id ∥ receiver_id ∥ Vec<Action> ∥ nonce(u64 le) ∥
-            //  max_block_height(u64 le) ∥ public_key`. The decoded model does
-            // not carry the inner delegated actions, so we serialize an
-            // explicit empty `Vec<Action>` (borsh `0u32`) in the correct
-            // position — omitting it entirely (as before) made deserializers
-            // read `nonce` as the actions-vector length, corrupting the parse.
+            //  max_block_height(u64 le) ∥ public_key`. The inner delegated
+            // actions are serialized recursively in the correct position so the
+            // canonical bytes reproduce the exact signed `DelegateAction` — a
+            // hardcoded empty vec would commit to a different byte string than a
+            // real meta-transaction with non-empty inner actions and break the
+            // WYSIWYS binding.
             push_borsh_string(out, sender_id)?;
             push_borsh_string(out, receiver_id)?;
-            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&borsh_len_le(
+                inner_actions.len(),
+                "delegate.inner_actions",
+            )?);
+            for inner in inner_actions {
+                push_near_action(out, inner)?;
+            }
             out.extend_from_slice(&nonce.to_le_bytes());
             out.extend_from_slice(&max_block_height.to_le_bytes());
             push_near_public_key(out, public_key);

@@ -84,7 +84,7 @@ pub enum GrantStatus {
 
 /// A sealed authorization for a single signing operation.
 ///
-/// Construct via [`AttestedSigningGrant::seal`], hand to
+/// Construct via [`AttestedSigningGrant::new`], hand to
 /// [`SealedGrantStore::seal`], and consume exactly once via
 /// [`SealedGrantStore::claim`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,14 +103,39 @@ pub struct AttestedSigningGrant {
 }
 
 impl AttestedSigningGrant {
-    /// Seal a fresh grant in [`GrantStatus::Sealed`].
-    pub fn seal(key: GrantKey, created_at_ms: i64, expiry_ms: Option<i64>) -> Self {
-        Self {
+    /// Construct a fresh grant in [`GrantStatus::Sealed`].
+    ///
+    /// Named `new` (not `seal`) so it does not collide with the store-level verb
+    /// [`SealedGrantStore::seal`]: `store.seal(AttestedSigningGrant::new(..))`
+    /// reads as construct-then-persist rather than nesting two `seal` calls.
+    ///
+    /// Validates the timestamps fail-closed: `created_at_ms` must be
+    /// non-negative (a negative/pre-epoch timestamp is rejected so downstream
+    /// TTL math cannot under/overflow), and any `expiry_ms` must be strictly
+    /// after `created_at_ms` (an expiry at or before creation is already-expired
+    /// and never claimable).
+    pub fn new(
+        key: GrantKey,
+        created_at_ms: i64,
+        expiry_ms: Option<i64>,
+    ) -> Result<Self, GrantError> {
+        if created_at_ms < 0 {
+            return Err(GrantError::InvalidTimestamp { created_at_ms });
+        }
+        if let Some(exp) = expiry_ms
+            && exp <= created_at_ms
+        {
+            return Err(GrantError::InvalidExpiry {
+                created_at_ms,
+                expiry_ms: exp,
+            });
+        }
+        Ok(Self {
             key,
             status: GrantStatus::Sealed,
             created_at_ms,
             expiry_ms,
-        }
+        })
     }
 }
 
@@ -124,6 +149,10 @@ pub struct ClaimedGrant {
     pub key: GrantKey,
     /// Creation timestamp carried over from the sealed grant.
     pub created_at_ms: i64,
+    /// Optional expiry (unix millis) carried over from the sealed grant, so the
+    /// downstream signing layer can independently re-check the time window as
+    /// defence-in-depth even before durable backends enforce expiry on claim.
+    pub expiry_ms: Option<i64>,
 }
 
 /// Errors a [`SealedGrantStore`] can surface.
@@ -142,6 +171,23 @@ pub enum GrantError {
     #[error("grant already claimed (one-shot)")]
     AlreadyClaimed,
 
+    /// `new` was given a negative (pre-epoch) `created_at_ms`.
+    #[error("grant created_at_ms must be non-negative, got {created_at_ms}")]
+    InvalidTimestamp {
+        /// The offending creation timestamp.
+        created_at_ms: i64,
+    },
+
+    /// `new` was given an `expiry_ms` at or before `created_at_ms` — the grant
+    /// would be born already-expired.
+    #[error("grant expiry_ms {expiry_ms} must be after created_at_ms {created_at_ms}")]
+    InvalidExpiry {
+        /// Creation timestamp.
+        created_at_ms: i64,
+        /// The offending expiry timestamp.
+        expiry_ms: i64,
+    },
+
     /// A backend-internal failure with an opaque description.
     #[error("grant store error: {reason}")]
     Backend {
@@ -159,8 +205,16 @@ pub enum GrantError {
 #[async_trait]
 pub trait SealedGrantStore: Send + Sync {
     /// Persist a sealed grant. Fails with [`GrantError::AlreadySealed`] if a
-    /// grant with the same key is already sealed (sealing is itself one-shot
-    /// per key).
+    /// grant with the same key already exists in EITHER lifecycle status
+    /// ([`GrantStatus::Sealed`] or [`GrantStatus::Claimed`]) — sealing is
+    /// one-shot per key for the lifetime of that key.
+    ///
+    /// In particular, re-sealing a key that has already been *claimed* also
+    /// returns [`GrantError::AlreadySealed`] (NOT [`GrantError::NotFound`]): the
+    /// key is permanently spent, and "already sealed" is the canonical "this key
+    /// is not available for sealing" signal. Durable backends that archive
+    /// claimed rows separately MUST still consult that history so a re-seal of a
+    /// claimed key surfaces `AlreadySealed`, matching the in-memory store.
     async fn seal(&self, grant: AttestedSigningGrant) -> Result<(), GrantError>;
 
     /// Atomically claim a sealed grant exactly once.
@@ -216,6 +270,7 @@ impl SealedGrantStore for InMemorySealedGrantStore {
                 Ok(ClaimedGrant {
                     key: grant.key.clone(),
                     created_at_ms: grant.created_at_ms,
+                    expiry_ms: grant.expiry_ms,
                 })
             }
         }
@@ -252,10 +307,20 @@ pub mod contract {
         }
     }
 
+    /// Construct a valid sealed grant for the contract cases, panicking if the
+    /// timestamps are rejected (they never are for these fixed inputs).
+    pub fn grant_for(
+        key: GrantKey,
+        created_at_ms: i64,
+        expiry_ms: Option<i64>,
+    ) -> AttestedSigningGrant {
+        AttestedSigningGrant::new(key, created_at_ms, expiry_ms).expect("valid grant")
+    }
+
     pub async fn seal_then_claim_succeeds<S: SealedGrantStore>(store: S) {
         let k = key(1);
         store
-            .seal(AttestedSigningGrant::seal(k.clone(), 1_000, None))
+            .seal(grant_for(k.clone(), 1_000, None))
             .await
             .expect("seal must succeed");
         let claimed = store.claim(&k).await.expect("first claim must succeed");
@@ -266,7 +331,7 @@ pub mod contract {
     pub async fn second_claim_is_already_claimed<S: SealedGrantStore>(store: S) {
         let k = key(2);
         store
-            .seal(AttestedSigningGrant::seal(k.clone(), 0, None))
+            .seal(grant_for(k.clone(), 0, None))
             .await
             .expect("seal");
         store.claim(&k).await.expect("first claim");
@@ -280,7 +345,7 @@ pub mod contract {
     pub async fn claim_mismatched_component_is_not_found<S: SealedGrantStore>(store: S) {
         let sealed = key(4);
         store
-            .seal(AttestedSigningGrant::seal(sealed.clone(), 0, None))
+            .seal(grant_for(sealed.clone(), 0, None))
             .await
             .expect("seal");
         let mut mismatched = sealed.clone();
@@ -307,7 +372,7 @@ pub mod contract {
         // keys accidentally collide with each other or the sealed key.
         let sealed = key(40);
         store
-            .seal(AttestedSigningGrant::seal(sealed.clone(), 0, None))
+            .seal(grant_for(sealed.clone(), 0, None))
             .await
             .expect("seal");
 
@@ -373,12 +438,52 @@ pub mod contract {
     pub async fn double_seal_is_already_sealed<S: SealedGrantStore>(store: S) {
         let k = key(5);
         store
-            .seal(AttestedSigningGrant::seal(k.clone(), 0, None))
+            .seal(grant_for(k.clone(), 0, None))
             .await
             .expect("seal");
         assert_eq!(
-            store.seal(AttestedSigningGrant::seal(k, 0, None)).await,
+            store.seal(grant_for(k, 0, None)).await,
             Err(GrantError::AlreadySealed)
+        );
+    }
+
+    /// Re-sealing a key that has already been *claimed* returns
+    /// [`GrantError::AlreadySealed`] — NOT [`GrantError::NotFound`]. The key is
+    /// permanently spent; "already sealed" is the canonical "this key is not
+    /// available for sealing" signal regardless of whether the live row is still
+    /// `Sealed` or has moved to `Claimed`. Pins the trait-doc behaviour so a
+    /// durable backend that archives claimed rows separately cannot diverge by
+    /// returning `NotFound` for a re-seal of a claimed key.
+    pub async fn seal_after_claimed_is_already_sealed<S: SealedGrantStore>(store: S) {
+        let k = key(9);
+        store
+            .seal(grant_for(k.clone(), 0, None))
+            .await
+            .expect("seal");
+        store.claim(&k).await.expect("claim");
+        assert_eq!(
+            store.seal(grant_for(k, 0, None)).await,
+            Err(GrantError::AlreadySealed),
+            "re-sealing a claimed key must be AlreadySealed, not NotFound"
+        );
+    }
+
+    /// A claimed grant carries `created_at_ms` AND `expiry_ms` through from the
+    /// sealed grant, so the downstream signing layer can re-check the time
+    /// window as defence-in-depth. A backend that drops `expiry_ms` on claim
+    /// (the previous shape) cannot pass.
+    pub async fn claim_carries_created_and_expiry_through<S: SealedGrantStore>(store: S) {
+        let k = key(10);
+        store
+            .seal(grant_for(k.clone(), 1_000, Some(9_999)))
+            .await
+            .expect("seal");
+        let claimed = store.claim(&k).await.expect("claim");
+        assert_eq!(claimed.created_at_ms, 1_000);
+        assert_eq!(
+            claimed.expiry_ms,
+            Some(9_999),
+            "claim must carry expiry_ms through for downstream time-window checks"
         );
     }
 
@@ -389,7 +494,7 @@ pub mod contract {
         let store = Arc::new(store);
         let k = key(6);
         store
-            .seal(AttestedSigningGrant::seal(k.clone(), 0, None))
+            .seal(grant_for(k.clone(), 0, None))
             .await
             .expect("seal");
 
@@ -446,6 +551,15 @@ pub mod contract {
                 async fn double_seal_is_already_sealed() {
                     $crate::grant::contract::double_seal_is_already_sealed($factory()).await;
                 }
+                #[tokio::test]
+                async fn seal_after_claimed_is_already_sealed() {
+                    $crate::grant::contract::seal_after_claimed_is_already_sealed($factory()).await;
+                }
+                #[tokio::test]
+                async fn claim_carries_created_and_expiry_through() {
+                    $crate::grant::contract::claim_carries_created_and_expiry_through($factory())
+                        .await;
+                }
                 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
                 async fn concurrent_claims_yield_exactly_one_winner() {
                     $crate::grant::contract::concurrent_claims_yield_exactly_one_winner($factory())
@@ -485,11 +599,38 @@ mod tests {
 
     #[test]
     fn grant_and_status_round_trip_serde() {
-        let grant = AttestedSigningGrant::seal(super::contract::key(7), 1234, Some(5678));
+        let grant = AttestedSigningGrant::new(super::contract::key(7), 1234, Some(5678))
+            .expect("valid grant");
         let json = serde_json::to_string(&grant).expect("ser");
         let back: AttestedSigningGrant = serde_json::from_str(&json).expect("de");
         assert_eq!(back, grant);
         assert_eq!(back.status, GrantStatus::Sealed);
+    }
+
+    #[test]
+    fn new_rejects_negative_created_at_ms() {
+        assert_eq!(
+            AttestedSigningGrant::new(super::contract::key(8), -1, None),
+            Err(GrantError::InvalidTimestamp { created_at_ms: -1 })
+        );
+    }
+
+    #[test]
+    fn new_rejects_expiry_at_or_before_created_at() {
+        assert_eq!(
+            AttestedSigningGrant::new(super::contract::key(8), 1_000, Some(1_000)),
+            Err(GrantError::InvalidExpiry {
+                created_at_ms: 1_000,
+                expiry_ms: 1_000
+            })
+        );
+        assert_eq!(
+            AttestedSigningGrant::new(super::contract::key(8), 1_000, Some(999)),
+            Err(GrantError::InvalidExpiry {
+                created_at_ms: 1_000,
+                expiry_ms: 999
+            })
+        );
     }
 
     // A panic while the `grants` mutex is held poisons it. The next `lock()`
@@ -510,7 +651,7 @@ mod tests {
             store.claim(&key).await,
             Err(GrantError::Backend { .. })
         ));
-        let grant = AttestedSigningGrant::seal(key, 1, None);
+        let grant = AttestedSigningGrant::new(key, 1, None).expect("valid grant");
         assert!(matches!(
             store.seal(grant).await,
             Err(GrantError::Backend { .. })

@@ -69,7 +69,9 @@ pub use grant::{
     AttestedSigningGrant, ClaimedGrant, GrantError, GrantKey, GrantStatus,
     InMemorySealedGrantStore, SealedGrantStore,
 };
-pub use ledger::{InMemorySigningLedger, LedgerError, SigningLedger, SigningLedgerState};
+pub use ledger::{
+    InMemorySigningLedger, LedgerError, LedgerKey, SigningLedger, SigningLedgerState,
+};
 pub use rendered::{RenderedField, RenderedTx, render};
 
 /// Test-only re-export of the low-level component hasher.

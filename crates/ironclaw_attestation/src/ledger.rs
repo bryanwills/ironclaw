@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use ironclaw_signing_provider::GateRef;
+use ironclaw_signing_provider::{GateRef, TenantId};
 
 /// State of a single signing/broadcast flow, keyed by `gate_ref`.
 ///
@@ -126,27 +126,52 @@ pub enum LedgerError {
     },
 }
 
-/// Signing/broadcast idempotency ledger, keyed by `gate_ref`.
+/// Composite identity of a signing-ledger row: the `(tenant, gate_ref)` pair.
+///
+/// The ledger is scoped by [`TenantId`] for the same reason [`crate::GrantKey`]
+/// is: a bare `gate_ref` string is caller-supplied and two tenants can mint
+/// colliding values. Without the tenant component a durable PG/libSQL backend
+/// would let Tenant B's `create` return [`LedgerError::AlreadyExists`] (DoS)
+/// and Tenant A's `state()` leak to Tenant B (IDOR). Binding the tenant into
+/// the key now keeps that isolation an interface-level invariant rather than a
+/// breaking change once durable backends ship.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LedgerKey {
+    /// Tenant boundary.
+    pub tenant: TenantId,
+    /// Gate the signing/broadcast flow is keyed by within the tenant.
+    pub gate_ref: GateRef,
+}
+
+impl LedgerKey {
+    /// Construct a ledger key from its tenant and gate components.
+    pub fn new(tenant: TenantId, gate_ref: GateRef) -> Self {
+        Self { tenant, gate_ref }
+    }
+}
+
+/// Signing/broadcast idempotency ledger, keyed by `(tenant, gate_ref)`.
 #[async_trait]
 pub trait SigningLedger: Send + Sync {
     /// Create a new ledger row at [`SigningLedgerState::Approved`]. One-shot per
-    /// `gate_ref`: a second create fails with [`LedgerError::AlreadyExists`].
-    async fn create(&self, gate_ref: &GateRef) -> Result<(), LedgerError>;
+    /// `(tenant, gate_ref)`: a second create fails with
+    /// [`LedgerError::AlreadyExists`].
+    async fn create(&self, key: &LedgerKey) -> Result<(), LedgerError>;
 
-    /// Read the current state for `gate_ref`, or [`LedgerError::NotFound`].
-    async fn state(&self, gate_ref: &GateRef) -> Result<SigningLedgerState, LedgerError>;
+    /// Read the current state for `key`, or [`LedgerError::NotFound`].
+    async fn state(&self, key: &LedgerKey) -> Result<SigningLedgerState, LedgerError>;
 
-    /// Advance the row for `gate_ref` to `to`, validating the transition.
+    /// Advance the row for `key` to `to`, validating the transition.
     /// Fails with [`LedgerError::InvalidTransition`] for any illegal move and
     /// [`LedgerError::NotFound`] if the row does not exist.
-    async fn advance(&self, gate_ref: &GateRef, to: SigningLedgerState) -> Result<(), LedgerError>;
+    async fn advance(&self, key: &LedgerKey, to: SigningLedgerState) -> Result<(), LedgerError>;
 }
 
 /// In-memory [`SigningLedger`]. The single [`Mutex`] makes read-validate-write
 /// in [`SigningLedger::advance`] a single critical section.
 #[derive(Debug, Default)]
 pub struct InMemorySigningLedger {
-    rows: Mutex<HashMap<GateRef, SigningLedgerState>>,
+    rows: Mutex<HashMap<LedgerKey, SigningLedgerState>>,
 }
 
 impl InMemorySigningLedger {
@@ -158,29 +183,29 @@ impl InMemorySigningLedger {
 
 #[async_trait]
 impl SigningLedger for InMemorySigningLedger {
-    async fn create(&self, gate_ref: &GateRef) -> Result<(), LedgerError> {
+    async fn create(&self, key: &LedgerKey) -> Result<(), LedgerError> {
         let mut rows = self.rows.lock().map_err(|e| LedgerError::Backend {
             reason: e.to_string(),
         })?;
-        if rows.contains_key(gate_ref) {
+        if rows.contains_key(key) {
             return Err(LedgerError::AlreadyExists);
         }
-        rows.insert(gate_ref.clone(), SigningLedgerState::Approved);
+        rows.insert(key.clone(), SigningLedgerState::Approved);
         Ok(())
     }
 
-    async fn state(&self, gate_ref: &GateRef) -> Result<SigningLedgerState, LedgerError> {
+    async fn state(&self, key: &LedgerKey) -> Result<SigningLedgerState, LedgerError> {
         let rows = self.rows.lock().map_err(|e| LedgerError::Backend {
             reason: e.to_string(),
         })?;
-        rows.get(gate_ref).copied().ok_or(LedgerError::NotFound)
+        rows.get(key).copied().ok_or(LedgerError::NotFound)
     }
 
-    async fn advance(&self, gate_ref: &GateRef, to: SigningLedgerState) -> Result<(), LedgerError> {
+    async fn advance(&self, key: &LedgerKey, to: SigningLedgerState) -> Result<(), LedgerError> {
         let mut rows = self.rows.lock().map_err(|e| LedgerError::Backend {
             reason: e.to_string(),
         })?;
-        let from = rows.get_mut(gate_ref).ok_or(LedgerError::NotFound)?;
+        let from = rows.get_mut(key).ok_or(LedgerError::NotFound)?;
         if !from.can_advance_to(to) {
             return Err(LedgerError::InvalidTransition { from: *from, to });
         }
@@ -200,12 +225,16 @@ pub mod contract {
     use super::*;
     use std::sync::Arc;
 
-    fn gate() -> GateRef {
-        GateRef::new("gate:ledger")
+    fn gate() -> LedgerKey {
+        LedgerKey::new(TenantId::new("tenant-a"), GateRef::new("gate:ledger"))
     }
 
-    fn gate_named(name: &str) -> GateRef {
-        GateRef::new(name)
+    fn gate_named(name: &str) -> LedgerKey {
+        LedgerKey::new(TenantId::new("tenant-a"), GateRef::new(name))
+    }
+
+    fn key_for(tenant: &str, gate: &str) -> LedgerKey {
+        LedgerKey::new(TenantId::new(tenant), GateRef::new(gate))
     }
 
     pub async fn full_valid_sequence<L: SigningLedger>(ledger: L) {
@@ -402,6 +431,53 @@ pub mod contract {
         );
     }
 
+    /// Two tenants sharing an identical `gate_ref` string have fully
+    /// independent rows. A backend that keys only on `gate_ref` (dropping the
+    /// tenant component) CANNOT pass: Tenant B's `create` of the same gate must
+    /// succeed (not collide as `AlreadyExists`), and advancing one tenant's row
+    /// must not move or leak the other's. This pins the [`TenantId`] isolation
+    /// invariant for durable PG/libSQL backends — the exact IDOR/DoS the bare-
+    /// `gate_ref` keying would have allowed.
+    pub async fn two_tenants_same_gate_ref_are_isolated<L: SigningLedger>(ledger: L) {
+        use SigningLedgerState::*;
+        let same_gate = "gate:shared";
+        let a = key_for("tenant-a", same_gate);
+        let b = key_for("tenant-b", same_gate);
+
+        ledger.create(&a).await.expect("tenant-a create");
+        // Same gate_ref string, different tenant: must NOT collide.
+        ledger
+            .create(&b)
+            .await
+            .expect("tenant-b create must not collide with tenant-a on the same gate_ref");
+
+        // Drive A to broadcast; B must remain untouched at Approved (no IDOR).
+        ledger.advance(&a, Signing).await.expect("a signing");
+        ledger.advance(&a, Signed).await.expect("a signed");
+        ledger
+            .advance(&a, BroadcastSubmitted)
+            .await
+            .expect("a broadcast");
+        assert_eq!(
+            ledger.state(&b).await.expect("b state"),
+            Approved,
+            "tenant-b must not see tenant-a's progress (IDOR)"
+        );
+        assert_eq!(ledger.state(&a).await.expect("a state"), BroadcastSubmitted);
+
+        // B's own machine validates against B's own state, not A's.
+        assert_eq!(
+            ledger.advance(&b, Signed).await,
+            Err(LedgerError::InvalidTransition {
+                from: Approved,
+                to: Signed
+            }),
+            "tenant-b must validate against its OWN state"
+        );
+        ledger.advance(&b, Signing).await.expect("b signing");
+        assert_eq!(ledger.state(&b).await.expect("b state"), Signing);
+    }
+
     /// Many concurrent `advance(&gate, BroadcastSubmitted)` against a row
     /// pre-seeded at `Signed`: EXACTLY ONE must win and the rest must observe
     /// the already-broadcast state and fail. This is the precise double-submit
@@ -533,6 +609,11 @@ pub mod contract {
                 async fn two_gates_are_isolated() {
                     $crate::ledger::contract::two_gates_are_isolated($factory()).await;
                 }
+                #[tokio::test]
+                async fn two_tenants_same_gate_ref_are_isolated() {
+                    $crate::ledger::contract::two_tenants_same_gate_ref_are_isolated($factory())
+                        .await;
+                }
                 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
                 async fn concurrent_advance_to_broadcast_yields_one_winner() {
                     $crate::ledger::contract::concurrent_advance_to_broadcast_yields_one_winner(
@@ -590,17 +671,17 @@ mod tests {
         })
         .join();
 
-        let gate = GateRef::new("gate");
+        let key = LedgerKey::new(TenantId::new("tenant-a"), GateRef::new("gate"));
         assert!(matches!(
-            ledger.create(&gate).await,
+            ledger.create(&key).await,
             Err(LedgerError::Backend { .. })
         ));
         assert!(matches!(
-            ledger.state(&gate).await,
+            ledger.state(&key).await,
             Err(LedgerError::Backend { .. })
         ));
         assert!(matches!(
-            ledger.advance(&gate, SigningLedgerState::Signed).await,
+            ledger.advance(&key, SigningLedgerState::Signed).await,
             Err(LedgerError::Backend { .. })
         ));
     }

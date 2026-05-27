@@ -403,6 +403,7 @@ fn project_near_action(fields: &mut Vec<Field>, action: &NearAction) {
         NearAction::Delegate {
             sender_id,
             receiver_id,
+            inner_actions,
             nonce,
             max_block_height,
             public_key,
@@ -417,6 +418,23 @@ fn project_near_action(fields: &mut Vec<Field>, action: &NearAction) {
                 "Delegate Receiver",
                 receiver_id.clone(),
             ));
+            // Render every inner action so the human-approved view covers the
+            // delegated payload and the projection stays in lockstep with the
+            // canonical bytes (anti-field-smuggling): an index marker delimits
+            // each inner action's expanded fields.
+            for (i, inner) in inner_actions.iter().enumerate() {
+                fields.push(Field::num(
+                    "action.delegate.inner_action.index",
+                    "Delegate Inner Action Index",
+                    i as u64,
+                ));
+                fields.push(Field::text(
+                    "action.delegate.inner_action.kind",
+                    "Delegate Inner Action",
+                    inner.kind_label(),
+                ));
+                project_near_action(fields, inner);
+            }
             fields.push(Field::num(
                 "action.delegate.nonce",
                 "Delegate Nonce",
