@@ -140,6 +140,61 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
 }
 
 #[tokio::test]
+async fn capability_display_preview_store_admits_workspace_and_project_scoped_path_subtitles() {
+    // /workspace/ and /project/ prefixed paths should appear as workspace-relative subtitles;
+    // other absolute paths (e.g. /etc/passwd) must be dropped for safety.
+    for (input_path, expected_subtitle) in [
+        ("/workspace/src/main.rs", Some("src/main.rs")),
+        ("/project/src/lib.rs", Some("src/lib.rs")),
+        ("/etc/passwd", None),
+        ("relative/path.rs", Some("relative/path.rs")),
+    ] {
+        let run_id = TurnRunId::new();
+        let capability = CapabilityId::new("builtin.write_file").unwrap();
+        let input_ref = preview_input_ref(&format!("subtitle-path-input-{input_path}"));
+        let store = CapabilityDisplayPreviewStore::default();
+        store.record_input(
+            &run_id.to_string(),
+            &input_ref,
+            "write_file",
+            &serde_json::json!({ "path": input_path }),
+        );
+        store.record_result(CapabilityDisplayPreviewResult {
+            run_id: &run_id.to_string(),
+            input_ref: &input_ref,
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            capability_id: &capability,
+            result_ref: "result:subtitle-path",
+            output: &serde_json::json!({"success": true}),
+            output_bytes: 4,
+        });
+        let preview = store
+            .preview(&CapabilityActivityProjection {
+                invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+                run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+                capability_id: capability,
+                thread_id: None,
+                status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                output_bytes: Some(4),
+                error_kind: None,
+                last_cursor: ironclaw_events::EventCursor::new(1),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            preview.subtitle.as_deref(),
+            expected_subtitle,
+            "subtitle mismatch for input path: {input_path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
     let run_id = TurnRunId::new();
     let invocation_id = InvocationId::new();

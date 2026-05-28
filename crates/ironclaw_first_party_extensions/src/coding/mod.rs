@@ -51,14 +51,14 @@ pub struct CodingCapabilityOutput {
 }
 
 impl CodingCapabilityOutput {
-    fn new(output: Value) -> Self {
+    pub fn new(output: Value) -> Self {
         Self {
             output,
             display_preview: None,
         }
     }
 
-    fn with_display_preview(
+    pub fn with_display_preview(
         output: Value,
         display_preview: Option<CapabilityDisplayOutputPreview>,
     ) -> Self {

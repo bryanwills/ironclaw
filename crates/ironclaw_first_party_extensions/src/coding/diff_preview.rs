@@ -5,7 +5,7 @@ use ironclaw_host_api::{
 use similar::{ChangeTag, TextDiff};
 
 const DIFF_CONTEXT_LINES: usize = 3;
-const DIFF_PREVIEW_DETAILED_INPUT_MAX_BYTES: usize = 256 * 1024;
+pub(super) const DIFF_PREVIEW_DETAILED_INPUT_MAX_BYTES: usize = 256 * 1024;
 
 pub(super) fn file_diff_preview(
     path: &str,
@@ -22,16 +22,9 @@ pub(super) fn file_diff_preview(
     output.push_str(&format!("--- a/{diff_path}\n"));
     output.push_str(&format!("+++ b/{diff_path}\n"));
 
+    // Accumulate addition/deletion counts and build output in a single grouped_ops pass.
     let mut additions = 0usize;
     let mut deletions = 0usize;
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            ChangeTag::Delete => deletions += 1,
-            ChangeTag::Insert => additions += 1,
-            ChangeTag::Equal => {}
-        }
-    }
-
     let mut truncated = false;
     for group in diff.grouped_ops(DIFF_CONTEXT_LINES) {
         if output.len() >= CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES {
@@ -55,8 +48,14 @@ pub(super) fn file_diff_preview(
         for op in group {
             for change in diff.iter_changes(&op) {
                 let prefix = match change.tag() {
-                    ChangeTag::Delete => '-',
-                    ChangeTag::Insert => '+',
+                    ChangeTag::Delete => {
+                        deletions += 1;
+                        '-'
+                    }
+                    ChangeTag::Insert => {
+                        additions += 1;
+                        '+'
+                    }
                     ChangeTag::Equal => ' ',
                 };
                 push_diff_line(&mut output, prefix, change.value());
@@ -195,6 +194,21 @@ mod tests {
             preview.output_preview.len()
                 <= ironclaw_host_api::CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES
         );
+    }
+
+    #[test]
+    fn file_diff_preview_zero_change_returns_plus0_minus0_no_hunk_header() {
+        let content = "fn main() {}\n";
+        let preview = file_diff_preview("src/lib.rs", content, content);
+
+        assert_eq!(preview.output_kind.as_str(), "unified_diff");
+        assert_eq!(
+            preview.output_summary.as_deref(),
+            Some("Edited 1 file: +0/-0")
+        );
+        // No @@ hunk header: grouped_ops yields no groups for identical content.
+        assert!(!preview.output_preview.contains("@@"));
+        assert!(!preview.truncated);
     }
 
     #[test]

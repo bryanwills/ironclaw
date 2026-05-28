@@ -890,7 +890,10 @@ mod tests {
                 .is_some_and(|summary| summary.contains("path: src/main.rs"))
         );
         assert_eq!(record.output_preview.as_deref(), Some("fn main() {}"));
-        assert_eq!(record.output_kind.as_deref(), Some("text"));
+        assert_eq!(
+            record.output_kind.as_ref().map(|k| k.as_str()),
+            Some("text")
+        );
         let rendered = serde_json::to_string(&record.input_summary).unwrap();
         assert!(!rendered.contains("sk-secret"));
     }
@@ -930,7 +933,10 @@ mod tests {
             .display_previews
             .record_for_invocation(invocation_id)
             .expect("preview recorded");
-        assert_eq!(record.output_kind.as_deref(), Some("unified_diff"));
+        assert_eq!(
+            record.output_kind.as_ref().map(|k| k.as_str()),
+            Some("unified_diff")
+        );
         assert_eq!(
             record.output_summary.as_deref(),
             Some("Edited 1 file: +1/-1")

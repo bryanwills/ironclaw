@@ -2,7 +2,9 @@ use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
-use ironclaw_host_api::{CapabilityDisplayOutputPreview, CapabilityId, InvocationId};
+use ironclaw_host_api::{
+    CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview, CapabilityId, InvocationId,
+};
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
@@ -68,7 +70,7 @@ pub(crate) struct CapabilityDisplayPreviewRecord {
     pub(crate) input_summary: Option<String>,
     pub(crate) output_summary: Option<String>,
     pub(crate) output_preview: Option<String>,
-    pub(crate) output_kind: Option<String>,
+    pub(crate) output_kind: Option<CapabilityDisplayOutputKind>,
     pub(crate) output_bytes: Option<u64>,
     pub(crate) result_ref: Option<String>,
     pub(crate) truncated: bool,
@@ -241,7 +243,7 @@ fn capability_display_preview_from_store(
         input_summary: record.input_summary,
         output_summary: record.output_summary,
         output_preview: record.output_preview,
-        output_kind: record.output_kind,
+        output_kind: record.output_kind.map(String::from),
         output_bytes: activity.output_bytes.or(record.output_bytes),
         result_ref: record.result_ref,
         truncated: record.truncated,
@@ -292,40 +294,41 @@ fn failed_capability_display_preview(
 struct OutputPreview {
     summary: Option<String>,
     preview: Option<String>,
-    kind: String,
+    kind: CapabilityDisplayOutputKind,
     truncated: bool,
 }
 
 fn output_preview(value: &serde_json::Value) -> OutputPreview {
     let (kind, text, json_truncated) = if let Some(text) = value.as_str() {
-        ("text", text.to_string(), false)
+        (CapabilityDisplayOutputKind::text(), text.to_string(), false)
     } else if let Some(text) = value
         .get("content")
         .or_else(|| value.get("text"))
         .or_else(|| value.get("stdout"))
         .and_then(serde_json::Value::as_str)
     {
-        ("text", text.to_string(), false)
+        (CapabilityDisplayOutputKind::text(), text.to_string(), false)
     } else {
         let safe_value = sanitize_json_value_with_truncation(value);
         (
-            "json",
+            CapabilityDisplayOutputKind::json(),
             serde_json::to_string_pretty(&safe_value.value).unwrap_or_else(|_| "{}".to_string()),
             safe_value.truncated,
         )
     };
     let preview = bounded_preview_text(&text);
     let summary = bounded_display_text(
-        match kind {
-            "text" => "text output",
-            _ => "json output",
+        if kind == CapabilityDisplayOutputKind::text() {
+            "text output"
+        } else {
+            "json output"
         },
         CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     );
     OutputPreview {
         summary: non_empty(summary.text),
         preview: non_empty(preview.text),
-        kind: kind.to_string(),
+        kind,
         truncated: summary.truncated || preview.truncated || json_truncated,
     }
 }
@@ -340,7 +343,7 @@ fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> Output
     OutputPreview {
         summary: summary.and_then(|summary| non_empty(summary.text)),
         preview: non_empty(preview.text),
-        kind: value.output_kind.as_str().to_string(),
+        kind: value.output_kind.clone(),
         truncated: value.truncated || summary_truncated || preview.truncated,
     }
 }
@@ -394,7 +397,6 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
 
 fn safe_display_path(path: &str) -> Option<String> {
     if path.is_empty()
-        || path.starts_with('/')
         || path.starts_with('~')
         || path.contains("..")
         || path.contains('\\')
@@ -402,7 +404,19 @@ fn safe_display_path(path: &str) -> Option<String> {
     {
         return None;
     }
-    Some(bounded_display_text(path, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text)
+    // Strip scoped-root prefixes so the subtitle shows only the workspace-relative
+    // portion. Reject any other absolute path (e.g. /etc/passwd).
+    let display = if let Some(rel) = path
+        .strip_prefix("/workspace/")
+        .or_else(|| path.strip_prefix("/project/"))
+    {
+        rel
+    } else if path.starts_with('/') {
+        return None;
+    } else {
+        path
+    };
+    Some(bounded_display_text(display, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text)
 }
 
 fn safe_preview_subtitle(subtitle: &str) -> Option<String> {
@@ -414,7 +428,11 @@ fn safe_preview_subtitle(subtitle: &str) -> Option<String> {
     {
         return None;
     }
-    if subtitle.starts_with('/') && !subtitle.starts_with("/workspace/") {
+    // Admit /workspace/ and /project/ scoped roots; reject all other absolute paths.
+    if subtitle.starts_with('/')
+        && !subtitle.starts_with("/workspace/")
+        && !subtitle.starts_with("/project/")
+    {
         return None;
     }
     Some(truncate_bytes(subtitle, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text)

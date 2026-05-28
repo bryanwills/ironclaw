@@ -322,6 +322,52 @@ async fn builtin_write_file_does_not_read_existing_content_for_write_only_mount(
 }
 
 #[tokio::test]
+async fn builtin_write_file_new_file_returns_additions_only_diff_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    // No pre-existing file — write_file creates it from scratch.
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let completed = invoke_completed_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/new.rs",
+            "content": "fn hello() {}\n"
+        }),
+        context,
+    )
+    .await;
+
+    let preview = completed
+        .display_preview
+        .expect("write_file on new file should attach display preview");
+    assert_eq!(preview.output_kind.as_str(), "unified_diff");
+    // Additions-only: summary must contain /-0
+    let summary = preview.output_summary.as_deref().unwrap_or("");
+    assert!(
+        summary.contains("/-0"),
+        "expected /-0 in summary for new-file write, got: {summary}"
+    );
+    // No deletion lines in the preview (only additions from the new file).
+    let deletion_lines: Vec<_> = preview
+        .output_preview
+        .lines()
+        .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+        .collect();
+    assert!(
+        deletion_lines.is_empty(),
+        "unexpected deletion lines in new-file diff: {deletion_lines:?}"
+    );
+    assert!(
+        preview.output_preview.contains("+fn hello() {}"),
+        "expected addition line"
+    );
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_returns_unified_diff_display_preview() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();

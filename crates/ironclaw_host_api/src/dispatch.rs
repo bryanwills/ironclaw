@@ -37,6 +37,11 @@ impl CapabilityDisplayOutputKind {
         Self("unified_diff".to_string())
     }
 
+    /// JSON-serialized output.
+    pub fn json() -> Self {
+        Self("json".to_string())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -61,6 +66,12 @@ impl TryFrom<&str> for CapabilityDisplayOutputKind {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::new(value)
+    }
+}
+
+impl From<CapabilityDisplayOutputKind> for String {
+    fn from(kind: CapabilityDisplayOutputKind) -> Self {
+        kind.0
     }
 }
 
@@ -91,6 +102,10 @@ pub struct CapabilityDispatchRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDisplayOutputPreview {
     pub output_summary: Option<String>,
+    /// Raw, unsanitized content — callers MUST sanitize before display or logging.
+    /// The canonical sanitization point is the projection layer in
+    /// `ironclaw_reborn_composition`. New consumers must not read this field
+    /// without sanitizing.
     pub output_preview: String,
     pub output_kind: CapabilityDisplayOutputKind,
     pub subtitle: Option<String>,

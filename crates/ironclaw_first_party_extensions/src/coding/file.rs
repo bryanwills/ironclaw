@@ -14,7 +14,7 @@ use super::{
         DEFAULT_LINE_LIMIT, MAX_DIR_ENTRIES, MAX_PATCH_SIZE, MAX_READ_SIZE, MAX_VISITED_ENTRIES,
         MAX_WRITE_SIZE,
     },
-    diff_preview::file_diff_preview,
+    diff_preview::{self, file_diff_preview},
     input_error,
     inputs::{optional_usize, required_str},
     operation_error,
@@ -120,11 +120,15 @@ pub(super) async fn write_file(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
+    // Skip reading the old file when new content alone exceeds half the detailed-diff threshold:
+    // file_diff_preview will take the large_diff_preview fast path anyway, so the read is wasted.
     let old_content =
-        if operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile) {
-            existing_text_for_preview(request, &resolved, existing_stat.as_ref()).await
-        } else {
+        if !operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile)
+            || content.len() > diff_preview::DIFF_PREVIEW_DETAILED_INPUT_MAX_BYTES / 2
+        {
             None
+        } else {
+            existing_text_for_preview(request, &resolved, existing_stat.as_ref()).await
         };
     create_parent_dir_unless_sensitive(request, &resolved.virtual_path).await?;
     request
