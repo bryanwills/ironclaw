@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
-use ironclaw_host_api::{CapabilityId, InvocationId};
+use ironclaw_host_api::{CapabilityDisplayOutputPreview, CapabilityId, InvocationId};
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
@@ -112,7 +112,16 @@ impl CapabilityDisplayPreviewStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn record_result(&self, result: CapabilityDisplayPreviewResult<'_>) {
+        self.record_result_with_preview(result, None);
+    }
+
+    pub(crate) fn record_result_with_preview(
+        &self,
+        result: CapabilityDisplayPreviewResult<'_>,
+        display_preview: Option<&CapabilityDisplayOutputPreview>,
+    ) {
         let input = self
             .pending
             .lock()
@@ -122,11 +131,15 @@ impl CapabilityDisplayPreviewStore {
             .as_ref()
             .map(|input| input.title.clone())
             .unwrap_or_else(|| safe_capability_title(result.capability_id.as_str()).to_string());
-        let output = output_preview(result.output);
+        let output = display_preview
+            .map(output_preview_from_display)
+            .unwrap_or_else(|| output_preview(result.output));
         let record = CapabilityDisplayPreviewRecord {
             timeline_message_id: None,
             title,
-            subtitle: input.as_ref().and_then(|input| input.subtitle.clone()),
+            subtitle: display_preview
+                .and_then(|preview| preview.subtitle.as_deref().and_then(safe_preview_subtitle))
+                .or_else(|| input.as_ref().and_then(|input| input.subtitle.clone())),
             input_summary: input.as_ref().and_then(|input| input.input_summary.clone()),
             output_summary: output.summary,
             output_preview: output.preview,
@@ -317,6 +330,33 @@ fn output_preview(value: &serde_json::Value) -> OutputPreview {
     }
 }
 
+fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> OutputPreview {
+    let summary = value
+        .output_summary
+        .as_deref()
+        .map(|summary| bounded_display_text(summary, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES));
+    let preview = bounded_preview_text(&value.output_preview);
+    OutputPreview {
+        summary: summary.and_then(|summary| non_empty(summary.text)),
+        preview: non_empty(preview.text),
+        kind: safe_output_kind(&value.output_kind).unwrap_or_else(|| "text".to_string()),
+        truncated: value.truncated || preview.truncated,
+    }
+}
+
+fn safe_output_kind(kind: &str) -> Option<String> {
+    if kind.is_empty()
+        || kind.len() > ironclaw_product_adapters::CAPABILITY_DISPLAY_KIND_MAX_BYTES
+        || !kind.as_bytes()[0].is_ascii_lowercase()
+        || kind
+            .bytes()
+            .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && byte != b'_')
+    {
+        return None;
+    }
+    Some(kind.to_string())
+}
+
 #[derive(Debug, Clone)]
 struct DisplayText {
     text: String,
@@ -375,6 +415,21 @@ fn safe_display_path(path: &str) -> Option<String> {
         return None;
     }
     Some(bounded_display_text(path, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text)
+}
+
+fn safe_preview_subtitle(subtitle: &str) -> Option<String> {
+    if subtitle.is_empty()
+        || subtitle.starts_with('~')
+        || subtitle.contains("..")
+        || subtitle.contains('\\')
+        || subtitle.chars().any(char::is_control)
+    {
+        return None;
+    }
+    if subtitle.starts_with('/') && !subtitle.starts_with("/workspace/") {
+        return None;
+    }
+    Some(truncate_bytes(subtitle, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text)
 }
 
 #[derive(Debug, Clone)]

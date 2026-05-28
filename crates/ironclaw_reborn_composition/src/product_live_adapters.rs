@@ -14,17 +14,17 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, InvocationId,
-    MountView, RuntimeKind, TrustClass, UserId,
+    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, RuntimeKind,
+    TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    HostIdentityContextSource, HostInputQueue, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, RunCancellationFactory,
-    loop_driver_execution_extension_id,
+    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, HostIdentityContextSource, HostInputQueue,
+    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    RunCancellationFactory, loop_driver_execution_extension_id,
 };
 use ironclaw_reborn::{
     loop_driver_host::LoopCapabilityPortFactory,
@@ -229,12 +229,16 @@ impl LoopCapabilityInputResolver for ProductLiveCapabilityIo {
 impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        input_ref: &CapabilityInputRef,
-        invocation_id: InvocationId,
-        _capability_id: &CapabilityId,
-        output: serde_json::Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
+        let CapabilityResultWrite {
+            run_context,
+            input_ref,
+            invocation_id,
+            capability_id,
+            output,
+            display_preview,
+        } = write;
         let byte_len = serialized_json_len(&output, "capability result")?;
         let result_ref =
             LoopResultRef::new(format!("result:{}.{}", run_context.run_id, Uuid::new_v4()))
@@ -262,16 +266,18 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
                 byte_len,
             },
         );
-        self.display_previews
-            .record_result(CapabilityDisplayPreviewResult {
+        self.display_previews.record_result_with_preview(
+            CapabilityDisplayPreviewResult {
                 run_id: &run_context.run_id.to_string(),
                 input_ref,
                 invocation_id,
-                capability_id: _capability_id,
+                capability_id,
                 result_ref: result_ref.as_str(),
                 output: &output,
                 output_bytes: byte_len.try_into().unwrap_or(u64::MAX),
-            });
+            },
+            display_preview.as_ref(),
+        );
         Ok(result_ref)
     }
 
@@ -856,13 +862,15 @@ mod tests {
             .await
             .expect("input staged");
         let invocation_id = InvocationId::new();
-        io.write_capability_result(
-            &run_context,
-            &input_ref,
+        let capability_id = CapabilityId::new("builtin.read_file").unwrap();
+        io.write_capability_result(CapabilityResultWrite {
+            run_context: &run_context,
+            input_ref: &input_ref,
             invocation_id,
-            &CapabilityId::new("builtin.read_file").unwrap(),
-            serde_json::json!({"content": "fn main() {}"}),
-        )
+            capability_id: &capability_id,
+            output: serde_json::json!({"content": "fn main() {}"}),
+            display_preview: None,
+        })
         .await
         .expect("result staged");
 
@@ -892,13 +900,15 @@ mod tests {
             .stage_input(&run_context, serde_json::json!({"text": "ok"}))
             .expect("input staged");
         let invocation_id = InvocationId::new();
-        io.write_capability_result(
-            &run_context,
-            &input_ref,
+        let capability_id = CapabilityId::new("demo.echo").unwrap();
+        io.write_capability_result(CapabilityResultWrite {
+            run_context: &run_context,
+            input_ref: &input_ref,
             invocation_id,
-            &CapabilityId::new("demo.echo").unwrap(),
-            serde_json::json!({"reply": "ok"}),
-        )
+            capability_id: &capability_id,
+            output: serde_json::json!({"reply": "ok"}),
+            display_preview: None,
+        })
         .await
         .expect("result staged");
         assert!(

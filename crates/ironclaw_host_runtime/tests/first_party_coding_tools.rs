@@ -254,6 +254,78 @@ async fn builtin_coding_list_fails_when_visited_entry_budget_is_exceeded() {
     assert_eq!(error, RuntimeFailureKind::Resource);
 }
 
+#[tokio::test]
+async fn builtin_write_file_returns_unified_diff_display_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let completed = invoke_completed_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.rs",
+            "content": "fn main() {\n    new();\n}\n"
+        }),
+        context,
+    )
+    .await;
+
+    let preview = completed
+        .display_preview
+        .expect("write_file should attach display preview");
+    assert_eq!(preview.output_kind, "unified_diff");
+    assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
+    assert!(preview.output_preview.contains("--- a/workspace/main.rs"));
+    assert!(preview.output_preview.contains("-    old();"));
+    assert!(preview.output_preview.contains("+    new();"));
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_returns_unified_diff_display_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let completed = invoke_completed_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.rs",
+            "old_string": "old();",
+            "new_string": "new();"
+        }),
+        context,
+    )
+    .await;
+
+    let preview = completed
+        .display_preview
+        .expect("apply_patch should attach display preview");
+    assert_eq!(preview.output_kind, "unified_diff");
+    assert_eq!(
+        preview.output_summary.as_deref(),
+        Some("Edited 1 file: +1/-1")
+    );
+    assert!(preview.output_preview.contains("-    old();"));
+    assert!(preview.output_preview.contains("+    new();"));
+}
+
 fn assert_aggregate_scan_limit(output: &Value) {
     assert_eq!(output["truncated"], json!(true));
     assert_eq!(output["limit_reason"], json!("aggregate_scan_bytes"));
@@ -284,6 +356,28 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
+        other => panic!("unexpected capability outcome: {other:?}"),
+    }
+}
+
+async fn invoke_completed_with_context<R: HostRuntime + ?Sized>(
+    runtime: &R,
+    capability: &str,
+    input: Value,
+    context: ExecutionContext,
+) -> ironclaw_host_runtime::RuntimeCapabilityCompleted {
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            CapabilityId::new(capability).unwrap(),
+            ResourceEstimate::default(),
+            input,
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => *completed,
         other => panic!("unexpected capability outcome: {other:?}"),
     }
 }
@@ -493,6 +587,15 @@ impl RootFilesystem for ManySkippedEntriesFilesystem {
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        if !path.as_str().contains("/skip-") {
+            return Ok(FileStat {
+                path: path.clone(),
+                file_type: FileType::Directory,
+                len: 0,
+                modified: None,
+                sensitive: false,
+            });
+        }
         Err(FilesystemError::Backend {
             path: path.clone(),
             operation: FilesystemOperation::Stat,

@@ -1,4 +1,5 @@
 use super::*;
+use ironclaw_host_api::CapabilityDisplayOutputPreview;
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
 fn preview_input_ref(label: &str) -> CapabilityInputRef {
@@ -577,6 +578,55 @@ async fn capability_display_preview_store_preserves_long_line_counts() {
             .unwrap()
             .contains("line-120")
     );
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_normalizes_invalid_side_channel_kind() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.write_file").unwrap();
+    let input_ref = preview_input_ref("invalid-kind-preview-input");
+    let invocation_id = InvocationId::new();
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_result_with_preview(
+        CapabilityDisplayPreviewResult {
+            run_id: &run_id.to_string(),
+            input_ref: &input_ref,
+            invocation_id,
+            capability_id: &capability,
+            result_ref: "result:invalid-kind-preview",
+            output: &serde_json::json!({"success": true}),
+            output_bytes: 32,
+        },
+        Some(&CapabilityDisplayOutputPreview {
+            output_summary: Some("Edited 1 file: +1/-1".to_string()),
+            output_preview: "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n".to_string(),
+            output_kind: "bad/kind".to_string(),
+            subtitle: Some("/workspace/main.rs".to_string()),
+            truncated: false,
+        }),
+    );
+
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id,
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(32),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(preview.output_kind.as_deref(), Some("text"));
+    assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
 }
 
 #[tokio::test]

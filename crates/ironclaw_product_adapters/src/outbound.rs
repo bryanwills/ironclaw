@@ -2,7 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
+    CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES, CapabilityId, ExtensionId, InvocationId,
+    ProcessId, RuntimeKind, ThreadId,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -20,7 +21,7 @@ const CAPABILITY_ACTIVITY_ERROR_KIND_MAX_BYTES: usize = 64;
 const CAPABILITY_ACTIVITY_ERROR_KIND_SEGMENT_MAX_BYTES: usize = 24;
 const CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
-pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
+pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES;
 pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
 

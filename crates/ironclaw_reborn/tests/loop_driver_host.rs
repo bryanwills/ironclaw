@@ -25,15 +25,16 @@ use ironclaw_host_runtime::{
     VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
-    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
-    HostSkillContextSource, IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle, identity_message_ref,
+    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
+    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
+    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityFileName,
+    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    identity_message_ref,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
@@ -3770,6 +3771,7 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"echoed": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -3981,6 +3983,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
             RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output,
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )));
@@ -4470,6 +4473,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
         RuntimeCapabilityCompleted {
             capability_id: echo_id.clone(),
             output: json!({"should_not_run": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -4657,6 +4661,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
             RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output,
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )));
@@ -4724,6 +4729,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
             RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output: json!({"call": index}),
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )));
@@ -4735,6 +4741,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"call": "retried-after-eviction"}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -4836,6 +4843,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"write": "fails"}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -4843,6 +4851,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"duplicate": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -4908,6 +4917,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
         RuntimeCapabilityCompleted {
             capability_id: returned_id,
             output: json!({"wrong": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -4966,6 +4976,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
         RuntimeCapabilityCompleted {
             capability_id: first_id.clone(),
             output: json!({"stale": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5194,6 +5205,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"retried": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5586,11 +5598,7 @@ impl LoopCapabilityInputResolver for InMemoryCapabilityIo {
 impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-        _invocation_id: InvocationId,
-        capability_id: &CapabilityId,
-        output: Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         let mut remaining_failures = self.fail_result_writes_remaining.lock().unwrap();
         if *remaining_failures > 0 {
@@ -5604,8 +5612,12 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
         self.results
             .lock()
             .unwrap()
-            .push((capability_id.clone(), output));
-        let result_ref = format!("result:{}-{}", run_context.run_id, capability_id.as_str());
+            .push((write.capability_id.clone(), write.output));
+        let result_ref = format!(
+            "result:{}-{}",
+            write.run_context.run_id,
+            write.capability_id.as_str()
+        );
         self.result_refs.lock().unwrap().push(result_ref.clone());
         LoopResultRef::new(result_ref).map_err(|_| {
             AgentLoopHostError::new(

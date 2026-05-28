@@ -13,6 +13,8 @@ use crate::{
     ResourceScope, ResourceUsage, RuntimeKind,
 };
 
+pub const CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES: usize = 16 * 1024;
+
 /// Request for one already-authorized declared capability dispatch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilityDispatchRequest {
@@ -24,6 +26,19 @@ pub struct CapabilityDispatchRequest {
     pub input: Value,
 }
 
+/// Display-only preview metadata for a completed capability result.
+///
+/// This side channel lets runtime/tool implementations provide renderer-ready
+/// material without changing the model-visible capability output shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDisplayOutputPreview {
+    pub output_summary: Option<String>,
+    pub output_preview: String,
+    pub output_kind: String,
+    pub subtitle: Option<String>,
+    pub truncated: bool,
+}
+
 /// Normalized dispatch result returned by a runtime dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDispatchResult {
@@ -31,6 +46,7 @@ pub struct CapabilityDispatchResult {
     pub provider: ExtensionId,
     pub runtime: RuntimeKind,
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
 }

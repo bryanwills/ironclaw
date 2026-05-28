@@ -257,6 +257,7 @@ async fn runtime_capability_mismatched_outcome_does_not_emit_terminal_milestone(
                 RuntimeCapabilityCompleted {
                     capability_id: other_capability_id,
                     output: serde_json::json!({"ok": true}),
+                    display_preview: None,
                     usage: ResourceUsage::default(),
                 },
             )))],

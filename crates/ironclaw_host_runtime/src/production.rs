@@ -1252,6 +1252,7 @@ fn completed_outcome_from(
     RuntimeCapabilityCompleted {
         capability_id,
         output: result.dispatch.output,
+        display_preview: result.dispatch.display_preview,
         usage: result.dispatch.usage,
     }
 }

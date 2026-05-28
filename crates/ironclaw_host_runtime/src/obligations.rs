@@ -1362,6 +1362,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
                     return Err(error);
                 }
             };
+            dispatch.display_preview = None;
         }
 
         let output_bytes = dispatch_output_bytes(&dispatch.output)?;
@@ -2103,6 +2104,7 @@ mod tests {
             provider: context.extension_id.clone(),
             runtime: RuntimeKind::Wasm,
             output: leaky_payload,
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),
@@ -2188,6 +2190,7 @@ mod tests {
             provider: context.extension_id.clone(),
             runtime: RuntimeKind::Wasm,
             output: serde_json::Value::String("leak AKIAABCDEFGHIJKLMNOP".to_string()),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),

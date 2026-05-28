@@ -8,10 +8,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, CapabilityId, InvocationId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
+    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityResultWriter,
     ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
 };
@@ -241,11 +241,7 @@ struct UnusedCapabilityResultWriter;
 impl LoopCapabilityResultWriter for UnusedCapabilityResultWriter {
     async fn write_capability_result(
         &self,
-        _run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-        _invocation_id: InvocationId,
-        _capability_id: &CapabilityId,
-        _output: serde_json::Value,
+        _write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
