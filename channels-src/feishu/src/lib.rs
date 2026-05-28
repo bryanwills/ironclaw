@@ -539,19 +539,17 @@ fn process_feishu_event_payload(body_str: &str, require_webhook_auth: bool) {
         return;
     }
 
-    if !require_webhook_auth {
-        if let (Some(expected), Some(provided)) = (
+    if !require_webhook_auth
+        && !is_authenticated_websocket_event(
             configured_token.as_deref(),
             request_verification_token(&event),
-        ) {
-            if !bool::from(expected.as_bytes().ct_eq(provided.as_bytes())) {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    "Ignoring Feishu websocket event with mismatched verification token",
-                );
-                return;
-            }
-        }
+        )
+    {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            "Ignoring Feishu websocket event with missing or mismatched verification token",
+        );
+        return;
     }
 
     // Handle URL verification challenge (initial webhook setup).
@@ -1023,6 +1021,18 @@ fn is_authenticated_webhook(
     }
 }
 
+fn is_authenticated_websocket_event(
+    configured_token: Option<&str>,
+    request_token: Option<&str>,
+) -> bool {
+    match configured_token {
+        Some(expected) => request_token
+            .map(|provided| bool::from(expected.as_bytes().ct_eq(provided.as_bytes())))
+            .unwrap_or(false),
+        None => true,
+    }
+}
+
 fn request_verification_token(event: &FeishuEvent) -> Option<&str> {
     event
         .header
@@ -1115,6 +1125,30 @@ mod tests {
         assert!(
             is_authenticated_webhook(true, Some("expected"), Some("wrong")),
             "host authentication should take precedence over body token checks"
+        );
+    }
+
+    #[test]
+    fn websocket_auth_requires_matching_token_when_configured() {
+        assert!(
+            is_authenticated_websocket_event(None, None),
+            "websocket events are authenticated by the Feishu connection when no token is configured"
+        );
+        assert!(
+            is_authenticated_websocket_event(None, Some("token")),
+            "provided event tokens should also be accepted when no token is configured"
+        );
+        assert!(
+            !is_authenticated_websocket_event(Some("expected"), None),
+            "configured verification tokens must reject websocket events missing the token"
+        );
+        assert!(
+            !is_authenticated_websocket_event(Some("expected"), Some("wrong")),
+            "configured verification tokens must reject mismatched websocket events"
+        );
+        assert!(
+            is_authenticated_websocket_event(Some("expected"), Some("expected")),
+            "configured verification tokens should accept matching websocket events"
         );
     }
 

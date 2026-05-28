@@ -1895,7 +1895,11 @@ impl WasmChannel {
                                     }
                                 }
                                 Some(Ok(WebsocketMessage::Binary(bytes))) => {
-                                    log_websocket_diagnostic(&channel_name, &WebsocketMessage::Binary(bytes.clone()));
+                                    tracing::debug!(
+                                        channel = %channel_name,
+                                        bytes = bytes.len(),
+                                        "Websocket runtime received binary frame"
+                                    );
 
                                     let actions = session_state.process_binary_frame(
                                         bytes.as_ref(),
@@ -5958,7 +5962,8 @@ impl<'a> ProtoCursor<'a> {
     }
 
     fn read_length_delimited(&mut self) -> Result<&'a [u8], String> {
-        let len = self.read_varint()? as usize;
+        let len = usize::try_from(self.read_varint()?)
+            .map_err(|_| "protobuf length does not fit usize".to_string())?;
         let end = self
             .pos
             .checked_add(len)
@@ -5972,7 +5977,9 @@ impl<'a> ProtoCursor<'a> {
     }
 
     fn read_string(&mut self) -> Result<String, String> {
-        String::from_utf8(self.read_length_delimited()?.to_vec())
+        let bytes = self.read_length_delimited()?;
+        std::str::from_utf8(bytes)
+            .map(ToOwned::to_owned)
             .map_err(|error| format!("protobuf string is not UTF-8: {error}"))
     }
 
