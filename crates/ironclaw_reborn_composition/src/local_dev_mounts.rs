@@ -16,6 +16,11 @@ pub(crate) fn workspace_mount_view(
     ambient_workspace_mount_view(permissions, &[], host_home_aliases)
 }
 
+/// Build the workspace mount view used by local-dev capability grants.
+///
+/// `workspace_aliases` is load-bearing for local-dev-yolo ambient coding tools:
+/// callers must pass it only under a yolo runtime policy. Non-yolo local-dev
+/// must pass an empty slice so raw host workspace paths stay denied.
 pub(crate) fn ambient_workspace_mount_view(
     permissions: MountPermissions,
     workspace_aliases: &[&Path],
@@ -125,6 +130,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ambient_workspace_mount_rejects_invalid_workspace_alias() {
+        let err = ambient_workspace_mount_view(
+            MountPermissions::read_write(),
+            &[Path::new(r"C:\Users\alice\project")],
+            &[],
+        )
+        .expect_err("invalid workspace alias should fail loudly");
+
+        assert!(
+            err.to_string().contains("backslashes are not allowed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn workspace_mount_rejects_host_home_alias_that_is_not_mount_shaped() {
         let err = workspace_mount_view(
             MountPermissions::read_write(),
@@ -135,6 +155,25 @@ mod tests {
         assert!(
             err.to_string().contains("backslashes are not allowed"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ambient_workspace_mount_deduplicates_workspace_alias_against_canonical_workspace() {
+        let mounts = ambient_workspace_mount_view(
+            MountPermissions::read_write(),
+            &[Path::new(WORKSPACE_ALIAS)],
+            &[],
+        )
+        .expect("mount view builds");
+
+        assert_eq!(
+            mounts
+                .mounts
+                .iter()
+                .filter(|mount| mount.alias.as_str() == WORKSPACE_ALIAS)
+                .count(),
+            1
         );
     }
 
