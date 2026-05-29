@@ -23,7 +23,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use super::config::GitHubOAuthConfig;
-use super::error::OAuthError;
+use super::error::{OAuthError, ProviderInitError};
 use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
 use super::provider_name::OAuthProviderName;
@@ -47,6 +47,11 @@ const GITHUB_HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 /// limit trips first fails the exchange closed.
 const GITHUB_EXCHANGE_BUDGET: Duration = Duration::from_secs(20);
 
+/// Defensive cap on the `/user/emails` list. A real account has a
+/// handful of addresses; anything past this is treated as abuse /
+/// misbehavior rather than allocated and scanned.
+const MAX_GITHUB_EMAILS: usize = 100;
+
 /// GitHub OAuth provider.
 pub struct GitHubProvider {
     /// Cached provider name. Constructed once at provider build time
@@ -63,12 +68,24 @@ pub struct GitHubProvider {
     token_endpoint: String,
     user_endpoint: String,
     emails_endpoint: String,
+    /// Overall ceiling for the full `exchange_code` chain. Defaults to
+    /// [`GITHUB_EXCHANGE_BUDGET`]; tests shrink it to exercise the
+    /// timeout branch deterministically.
+    exchange_budget: Duration,
 }
 
 impl GitHubProvider {
     /// Build a provider from an operator-supplied
     /// [`GitHubOAuthConfig`] using the real GitHub endpoints.
-    pub fn new(config: GitHubOAuthConfig) -> Self {
+    ///
+    /// Fallible: the `reqwest::Client` build can fail if the rustls /
+    /// tokio runtime cannot initialize. Surfacing that as a `Result`
+    /// (rather than panicking in the constructor) lets the host
+    /// composition layer fail startup loudly. A silent fallback to
+    /// `reqwest::Client::new()` is deliberately NOT used — it would
+    /// drop the timeout and `User-Agent` (unbounded hang + GitHub
+    /// 403s) and panic on the same fault anyway.
+    pub fn new(config: GitHubOAuthConfig) -> Result<Self, ProviderInitError> {
         Self::with_endpoints_inner(
             config,
             GITHUB_AUTH_URL,
@@ -82,7 +99,7 @@ impl GitHubProvider {
     /// substitute the GitHub endpoints with a local mock server. The
     /// `dev-in-memory-session` feature gate keeps the helper out of
     /// production builds for the same reason the in-memory session
-    /// store is gated. Mirrors `GoogleProvider::with_endpoints`.
+    /// store is gated.
     #[cfg(any(test, feature = "dev-in-memory-session"))]
     pub fn with_endpoints(
         config: GitHubOAuthConfig,
@@ -90,7 +107,7 @@ impl GitHubProvider {
         token_endpoint: impl Into<String>,
         user_endpoint: impl Into<String>,
         emails_endpoint: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, ProviderInitError> {
         Self::with_endpoints_inner(
             config,
             auth_endpoint,
@@ -106,7 +123,7 @@ impl GitHubProvider {
         token_endpoint: impl Into<String>,
         user_endpoint: impl Into<String>,
         emails_endpoint: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, ProviderInitError> {
         let http = reqwest::Client::builder()
             .timeout(GITHUB_HTTP_TIMEOUT)
             // GitHub's API rejects requests without a User-Agent
@@ -114,8 +131,8 @@ impl GitHubProvider {
             // carries it.
             .user_agent("IronClaw-WebChat-v2")
             .build()
-            .expect("reqwest client build failed: TLS/runtime init is unrecoverable"); // safety: ClientBuilder::build only fails on unrecoverable rustls/tokio init; a silent Client::new() fallback would drop the timeout + User-Agent (unbounded hang, GitHub 403s) and panics on the same fault anyway
-        Self {
+            .map_err(|err| ProviderInitError(err.to_string()))?;
+        Ok(Self {
             name: OAuthProviderName::new("github").expect("\"github\" satisfies the grammar"), // safety: literal satisfies OAuthProviderName grammar (lowercase ascii, 6 chars); checked by `OAuthProviderName::accepts_lowercase_alphanumeric`
             client_id: config.client_id,
             client_secret: config.client_secret,
@@ -124,7 +141,17 @@ impl GitHubProvider {
             token_endpoint: token_endpoint.into(),
             user_endpoint: user_endpoint.into(),
             emails_endpoint: emails_endpoint.into(),
-        }
+            exchange_budget: GITHUB_EXCHANGE_BUDGET,
+        })
+    }
+
+    /// Test-only: shrink the overall exchange budget so the timeout
+    /// branch can be exercised against a blackhole endpoint without a
+    /// 20-second wait.
+    #[cfg(test)]
+    fn with_exchange_budget(mut self, budget: Duration) -> Self {
+        self.exchange_budget = budget;
+        self
     }
 }
 
@@ -185,7 +212,7 @@ impl OAuthProvider for GitHubProvider {
         // GitHub cannot pin a Tokio task for the sum of every call's
         // timeout.
         tokio::time::timeout(
-            GITHUB_EXCHANGE_BUDGET,
+            self.exchange_budget,
             self.do_exchange_code(code, callback_url),
         )
         .await
@@ -195,15 +222,55 @@ impl OAuthProvider for GitHubProvider {
 
 impl GitHubProvider {
     /// Inner exchange body, wrapped by [`OAuthProvider::exchange_code`]
-    /// in an overall timeout budget. Runs the GitHub token -> user ->
-    /// emails sequence and projects the result to an
-    /// [`OAuthUserProfile`].
+    /// in an overall timeout budget. Exchanges the code for a token,
+    /// then fetches `/user` and `/user/emails` and projects the result
+    /// to an [`OAuthUserProfile`].
+    ///
+    /// The three calls run sequentially on purpose: it keeps
+    /// [`GITHUB_EXCHANGE_BUDGET`] a meaningful ceiling (the budget only
+    /// binds across sequential stages — fanning the two profile reads
+    /// out concurrently would cap the worst case at ~2 per-call
+    /// timeouts, below the budget, leaving it dead). The saved
+    /// round-trip is not worth a dead safeguard on this cold path.
     async fn do_exchange_code(
         &self,
         code: &str,
         callback_url: &str,
     ) -> Result<OAuthUserProfile, OAuthError> {
-        // 1. Exchange the authorization code for an access token.
+        let access_token = self.exchange_code_for_token(code, callback_url).await?;
+        let user = self.fetch_user(&access_token).await?;
+        let emails = self.fetch_verified_emails(&access_token).await?;
+
+        // Prefer the primary verified email, then any verified email,
+        // and only fall back to the unverified profile email if no
+        // verified address exists — flagging it as unverified so the
+        // user directory can reject it.
+        let verified_email = emails
+            .iter()
+            .filter(|e| e.verified)
+            .find(|e| e.primary)
+            .or_else(|| emails.iter().find(|e| e.verified));
+        let (email, email_verified) = match verified_email {
+            Some(e) => (Some(e.email.clone()), true),
+            None => (user.email.clone(), false),
+        };
+
+        Ok(OAuthUserProfile {
+            provider_user_id: user.id.to_string(),
+            email,
+            email_verified,
+            display_name: user.name.or(Some(user.login)),
+        })
+    }
+
+    /// Step 1: exchange the authorization code for an access token,
+    /// wrapped in [`SecretString`] so an accidental `{:?}` / tracing
+    /// capture of an intermediate holder cannot expose it in plaintext.
+    async fn exchange_code_for_token(
+        &self,
+        code: &str,
+        callback_url: &str,
+    ) -> Result<SecretString, OAuthError> {
         let resp = self
             .http
             .post(&self.token_endpoint)
@@ -219,13 +286,13 @@ impl GitHubProvider {
             .map_err(|err| OAuthError::CodeExchange(err.to_string()))?;
 
         if !resp.status().is_success() {
+            // Deliberately do NOT read the body: it is untrusted
+            // external content of unbounded size (a misconfigured /
+            // non-HTTPS `token_endpoint` override could point at a
+            // hostile server) and would only ever go to a log. The
+            // status code alone is enough to diagnose the failure.
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            tracing::debug!(
-                %status,
-                body = %body,
-                "github token endpoint returned non-success response"
-            );
+            tracing::debug!(%status, "github token endpoint returned non-success response");
             return Err(OAuthError::CodeExchange(format!(
                 "GitHub token endpoint returned {status}"
             )));
@@ -248,70 +315,65 @@ impl GitHubProvider {
                 "GitHub token endpoint returned error: {error}"
             )));
         }
-        let access_token = token.access_token.ok_or_else(|| {
-            OAuthError::CodeExchange("GitHub did not return an access_token".to_string())
-        })?;
+        token
+            .access_token
+            .map(SecretString::from)
+            .ok_or_else(|| OAuthError::CodeExchange("GitHub did not return an access_token".into()))
+    }
 
-        // 2. Fetch the authenticated user profile.
-        let user_resp = self
+    /// Step 2a: fetch the authenticated user profile.
+    async fn fetch_user(&self, access_token: &SecretString) -> Result<GitHubUser, OAuthError> {
+        let resp = self
             .http
             .get(&self.user_endpoint)
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .bearer_auth(&access_token)
+            .bearer_auth(access_token.expose_secret())
             .send()
             .await
             .map_err(|err| OAuthError::ProfileFetch(err.to_string()))?;
-        if !user_resp.status().is_success() {
-            let status = user_resp.status();
+        if !resp.status().is_success() {
             return Err(OAuthError::ProfileFetch(format!(
-                "GitHub user endpoint returned {status}"
+                "GitHub user endpoint returned {}",
+                resp.status()
             )));
         }
-        let user: GitHubUser = user_resp
-            .json()
+        resp.json()
             .await
-            .map_err(|err| OAuthError::ProfileFetch(err.to_string()))?;
+            .map_err(|err| OAuthError::ProfileFetch(err.to_string()))
+    }
 
-        // 3. Fetch verified emails (the profile may not include one).
-        let emails_resp = self
+    /// Step 2b: fetch the user's verified emails. Rejects an
+    /// implausibly large list as a defensive bound on the work done
+    /// for one login (a normal account has a handful of addresses).
+    async fn fetch_verified_emails(
+        &self,
+        access_token: &SecretString,
+    ) -> Result<Vec<GitHubEmail>, OAuthError> {
+        let resp = self
             .http
             .get(&self.emails_endpoint)
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .bearer_auth(&access_token)
+            .bearer_auth(access_token.expose_secret())
             .send()
             .await
             .map_err(|err| OAuthError::ProfileFetch(err.to_string()))?;
-        if !emails_resp.status().is_success() {
-            let status = emails_resp.status();
+        if !resp.status().is_success() {
             return Err(OAuthError::ProfileFetch(format!(
-                "GitHub emails endpoint returned {status}"
+                "GitHub emails endpoint returned {}",
+                resp.status()
             )));
         }
-        let emails: Vec<GitHubEmail> = emails_resp
+        let emails: Vec<GitHubEmail> = resp
             .json()
             .await
             .map_err(|err| OAuthError::ProfileFetch(err.to_string()))?;
-
-        // Prefer the primary verified email, then any verified email,
-        // and only fall back to the unverified profile email if no
-        // verified address exists — flagging it as unverified so the
-        // user directory can reject it.
-        let verified_email = emails
-            .iter()
-            .filter(|e| e.verified)
-            .find(|e| e.primary)
-            .or_else(|| emails.iter().find(|e| e.verified));
-        let (email, email_verified) = match verified_email {
-            Some(e) => (Some(e.email.clone()), true),
-            None => (user.email.clone(), false),
-        };
-
-        Ok(OAuthUserProfile {
-            provider_user_id: user.id.to_string(),
-            email,
-            email_verified,
-            display_name: user.name.or(Some(user.login)),
-        })
+        if emails.len() > MAX_GITHUB_EMAILS {
+            return Err(OAuthError::ProfileFetch(format!(
+                "GitHub returned an implausible number of emails ({})",
+                emails.len()
+            )));
+        }
+        Ok(emails)
     }
 }
 
@@ -335,7 +397,7 @@ mod tests {
 
     #[test]
     fn authorization_url_includes_required_params_and_ignores_pkce() {
-        let provider = GitHubProvider::new(cfg());
+        let provider = GitHubProvider::new(cfg()).expect("build provider");
         let url = provider.authorization_url(
             "https://example.com/auth/callback/github",
             "csrf-token",
@@ -354,7 +416,7 @@ mod tests {
 
     #[test]
     fn name_is_github() {
-        let provider = GitHubProvider::new(cfg());
+        let provider = GitHubProvider::new(cfg()).expect("build provider");
         assert_eq!(provider.name().as_str(), "github");
     }
 
@@ -472,6 +534,7 @@ mod tests {
             format!("http://{addr}/user"),
             format!("http://{addr}/emails"),
         )
+        .expect("build provider")
     }
 
     async fn exchange(addr: SocketAddr) -> Result<OAuthUserProfile, OAuthError> {
@@ -638,7 +701,7 @@ mod tests {
 
     #[test]
     fn authorization_url_encodes_state_with_special_characters() {
-        let provider = GitHubProvider::new(cfg());
+        let provider = GitHubProvider::new(cfg()).expect("build provider");
         // base64url / JWT-style state can contain `+`, `/`, `=`, and
         // spaces — all of which must be percent-encoded so the router
         // recovers the exact value on callback (state is GitHub's only
@@ -658,6 +721,59 @@ mod tests {
         assert!(
             !url.contains("ghi=jkl"),
             "= inside the state value must be percent-encoded: {url}",
+        );
+    }
+
+    /// Spawn a mock GitHub whose `/token` endpoint accepts the request
+    /// but never responds (a blackhole), so the only thing that can end
+    /// the exchange is the overall budget timer.
+    async fn spawn_blackhole_token() -> (SocketAddr, AbortOnDrop) {
+        async fn blackhole() -> Json<serde_json::Value> {
+            std::future::pending::<()>().await;
+            unreachable!("blackhole endpoint never resolves")
+        }
+        let router = axum::Router::new().route(
+            "/token",
+            post(|_: Form<HashMap<String, String>>| blackhole()),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (addr, AbortOnDrop(handle))
+    }
+
+    #[tokio::test]
+    async fn exchange_code_aborts_when_overall_budget_exceeded() {
+        // The token endpoint never responds. With a tiny exchange
+        // budget the overall `tokio::time::timeout` wins long before the
+        // per-call reqwest timeout, so the exchange fails with the
+        // budget's "timed out" error. Locks in that a regression
+        // removing/raising the wrapper would surface as a hang.
+        let (addr, _server) = spawn_blackhole_token().await;
+        let provider = GitHubProvider::with_endpoints(
+            cfg(),
+            "https://github.test/login/oauth/authorize",
+            format!("http://{addr}/token"),
+            format!("http://{addr}/user"),
+            format!("http://{addr}/emails"),
+        )
+        .expect("build provider")
+        .with_exchange_budget(Duration::from_millis(150));
+        let err = provider
+            .exchange_code(
+                "fake-code",
+                "https://example.com/auth/callback/github",
+                "ignored-verifier",
+            )
+            .await
+            .expect_err("overall budget must trip");
+        assert!(
+            matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("timed out")),
+            "expected the overall-budget timeout error, got {err:?}",
         );
     }
 }

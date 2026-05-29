@@ -133,16 +133,19 @@ async fn spawn_mock_github(mock: MockGitHub) -> (SocketAddr, AbortOnDrop) {
 }
 
 fn github_provider(addr: SocketAddr) -> Arc<dyn OAuthProvider> {
-    Arc::new(GitHubProvider::with_endpoints(
-        GitHubOAuthConfig {
-            client_id: "gh-client-id".to_string(),
-            client_secret: SecretString::from("gh-client-secret".to_string()),
-        },
-        "https://github.test/login/oauth/authorize",
-        format!("http://{addr}/token"),
-        format!("http://{addr}/user"),
-        format!("http://{addr}/emails"),
-    ))
+    Arc::new(
+        GitHubProvider::with_endpoints(
+            GitHubOAuthConfig {
+                client_id: "gh-client-id".to_string(),
+                client_secret: SecretString::from("gh-client-secret".to_string()),
+            },
+            "https://github.test/login/oauth/authorize",
+            format!("http://{addr}/token"),
+            format!("http://{addr}/user"),
+            format!("http://{addr}/emails"),
+        )
+        .expect("build provider"),
+    )
 }
 
 fn tenant() -> TenantId {
@@ -412,16 +415,19 @@ async fn callback_exchange_failure_redirects_with_exchange_failed() {
     }));
 
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
-    let provider: Arc<dyn OAuthProvider> = Arc::new(GitHubProvider::with_endpoints(
-        GitHubOAuthConfig {
-            client_id: "gh-client-id".to_string(),
-            client_secret: SecretString::from("gh-client-secret".to_string()),
-        },
-        "https://github.test/login/oauth/authorize",
-        format!("http://{addr}/token"),
-        format!("http://{addr}/user"),
-        format!("http://{addr}/emails"),
-    ));
+    let provider: Arc<dyn OAuthProvider> = Arc::new(
+        GitHubProvider::with_endpoints(
+            GitHubOAuthConfig {
+                client_id: "gh-client-id".to_string(),
+                client_secret: SecretString::from("gh-client-secret".to_string()),
+            },
+            "https://github.test/login/oauth/authorize",
+            format!("http://{addr}/token"),
+            format!("http://{addr}/user"),
+            format!("http://{addr}/emails"),
+        )
+        .expect("build provider"),
+    );
     let router = build_router(vec![provider], store);
 
     let login = router
@@ -578,16 +584,19 @@ async fn callback_profile_fetch_failure_redirects_with_exchange_failed() {
     }));
 
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
-    let provider: Arc<dyn OAuthProvider> = Arc::new(GitHubProvider::with_endpoints(
-        GitHubOAuthConfig {
-            client_id: "gh-client-id".to_string(),
-            client_secret: SecretString::from("gh-client-secret".to_string()),
-        },
-        "https://github.test/login/oauth/authorize",
-        format!("http://{addr}/token"),
-        format!("http://{addr}/user"),
-        format!("http://{addr}/emails"),
-    ));
+    let provider: Arc<dyn OAuthProvider> = Arc::new(
+        GitHubProvider::with_endpoints(
+            GitHubOAuthConfig {
+                client_id: "gh-client-id".to_string(),
+                client_secret: SecretString::from("gh-client-secret".to_string()),
+            },
+            "https://github.test/login/oauth/authorize",
+            format!("http://{addr}/token"),
+            format!("http://{addr}/user"),
+            format!("http://{addr}/emails"),
+        )
+        .expect("build provider"),
+    );
     let router = build_router(vec![provider], store);
 
     let login = router

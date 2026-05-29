@@ -32,7 +32,7 @@ mod routes;
 mod user_directory;
 
 pub use config::{GitHubOAuthConfig, GoogleOAuthConfig};
-pub use error::OAuthError;
+pub use error::{OAuthError, ProviderInitError};
 pub use github::GitHubProvider;
 pub use google::GoogleProvider;
 pub use ironclaw_reborn_composition::PublicRouteMount;
