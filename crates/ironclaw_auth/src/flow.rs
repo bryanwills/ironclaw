@@ -174,6 +174,14 @@ pub struct OAuthCallbackFailureInput {
     pub error: AuthErrorCode,
 }
 
+/// User-selected configured credential that completes an account-selection
+/// auth flow without exposing credential internals to product surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialSelectionInput {
+    pub flow_id: AuthFlowId,
+    pub credential_account_id: CredentialAccountId,
+}
+
 /// Pre-egress claim for an authorized OAuth callback. This validates and marks
 /// the scoped flow before one-shot provider exchange can consume a raw code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +214,12 @@ pub trait AuthFlowManager: Send + Sync {
         input: OAuthCallbackInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
+    async fn complete_credential_selection(
+        &self,
+        scope: &AuthProductScope,
+        input: CredentialSelectionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
     async fn fail_oauth_callback(
         &self,
         scope: &AuthProductScope,
@@ -217,6 +231,20 @@ pub trait AuthFlowManager: Send + Sync {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError>;
+}
+
+/// Read-only auth-flow projection source for product interaction views.
+///
+/// This is intentionally smaller than [`AuthFlowManager`]: callers can list
+/// sanitized flow records for scoped read-model composition, but cannot mutate
+/// auth-flow state or bypass manager validation.
+pub trait AuthFlowRecordSource: Send + Sync {
+    /// Returns a durable snapshot of auth-flow records.
+    ///
+    /// Implementations may return a broader snapshot than the caller's
+    /// current scope. Any consumer that projects these records into
+    /// product/user-facing views must scope-filter before exposing them.
+    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
 }
 
 pub(crate) fn credential_status_for_completed_flow() -> CredentialAccountStatus {

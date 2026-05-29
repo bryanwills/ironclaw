@@ -48,7 +48,8 @@ use ironclaw_loop_support::{
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
-    ApprovalResolverPort, ApprovalTurnRunLocator, DefaultApprovalInteractionService,
+    ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
+    DefaultApprovalInteractionService, DefaultAuthInteractionService,
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
@@ -82,11 +83,19 @@ use ironclaw_turns::{
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
+use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
-use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
+use crate::{
+    RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
+    build_reborn_services,
+};
 
 mod approval;
+mod auth_interaction;
+#[cfg(test)]
+#[path = "runtime/tests/auth_interaction.rs"]
+mod auth_interaction_tests;
 #[cfg(test)]
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
@@ -192,6 +201,7 @@ pub struct RebornRuntime {
     reply_target_binding_ref: ReplyTargetBindingRef,
     projection_services: RebornProjectionServices,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
+    auth_interaction_service: Arc<dyn AuthInteractionService>,
     #[cfg(test)]
     approval_audit_sink: Arc<InMemoryAuditSink>,
     webui_event_log: Arc<dyn DurableEventLog>,
@@ -367,6 +377,10 @@ impl RebornRuntime {
 
     pub(crate) fn webui_approval_interaction_service(&self) -> Arc<dyn ApprovalInteractionService> {
         self.approval_interaction_service.clone()
+    }
+
+    pub(crate) fn webui_auth_interaction_service(&self) -> Arc<dyn AuthInteractionService> {
+        self.auth_interaction_service.clone()
     }
 
     #[cfg(test)]
@@ -688,21 +702,8 @@ impl RebornRuntime {
             if state.status.is_terminal() {
                 return Ok(state.status);
             }
-            if state.status == TurnStatus::RecoveryRequired {
-                // RecoveryRequired keeps the durable turn active because a
-                // future recovery worker may resume it. The standalone
-                // runtime has no recovery worker, so cancel it before
-                // returning to release the conversation lock.
-                let response = self
-                    .cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::OperatorRequested,
-                        "recovery-required-cancel",
-                    )
-                    .await?;
-                return Ok(response.status);
-            }
+            // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
+            // so the branch above handles it; no special cancel-to-release-lock is needed.
             if start.elapsed() > self.poll_settings.max_total {
                 self.cancel_run(
                     scope,
@@ -842,7 +843,7 @@ pub async fn build_reborn_runtime(
         poll,
         identity,
         skill_context_source: configured_skill_context_source,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
     } = input;
 
@@ -919,7 +920,7 @@ pub async fn build_reborn_runtime(
 
     #[cfg(feature = "root-llm-provider")]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
@@ -928,7 +929,7 @@ pub async fn build_reborn_runtime(
                 None => build_stub_gateway(),
             }
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             match llm {
                 Some(cfg) => build_llm_gateway(cfg).await?,
@@ -938,13 +939,13 @@ pub async fn build_reborn_runtime(
     };
     #[cfg(not(feature = "root-llm-provider"))]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
             build_stub_gateway()
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             build_stub_gateway()
         }
@@ -982,13 +983,32 @@ pub async fn build_reborn_runtime(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
     );
-    let milestone_sink = projection_services
-        .with_live_reasoning_milestone_sink(durable_milestone_sink, actor_user_id.clone());
+    let live_projection_publisher =
+        projection_services.live_projection_publisher(actor_user_id.clone());
+    if let Some(skill_activation_source) = &skill_activation_source {
+        skill_activation_source
+            .set_activation_observer(
+                projection_services
+                    .skill_activation_observer(Arc::clone(&live_projection_publisher)),
+            )
+            .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
+    }
+    let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
+        durable_milestone_sink,
+        live_projection_publisher,
+    );
+    let local_dev_capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
+        tracing::error!(%error, "local-dev capability policy is invalid");
+        RebornRuntimeError::InvalidArgument {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        }
+    })?);
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope.clone(),
         actor_user_id.clone(),
+        Arc::clone(&local_dev_capability_policy),
         model_gateway,
         milestone_sink.clone(),
     )
@@ -1075,12 +1095,18 @@ pub async fn build_reborn_runtime(
         Arc::new(DefaultApprovalInteractionService::new(
             approval_read_model,
             Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
+                local_dev_capability_policy,
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
             )),
             approval_resolver,
             Arc::clone(&planned_turn_coordinator),
         ));
+    let auth_interaction_service = build_webui_auth_interaction_service(
+        services.product_auth.as_deref(),
+        Arc::clone(&turn_state_store),
+        Arc::clone(&planned_turn_coordinator),
+    );
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
@@ -1109,6 +1135,7 @@ pub async fn build_reborn_runtime(
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
         projection_services,
         approval_interaction_service,
+        auth_interaction_service,
         #[cfg(test)]
         approval_audit_sink,
         webui_event_log: event_log,
@@ -1118,6 +1145,32 @@ pub async fn build_reborn_runtime(
         skill_activation_source,
         skill_execution_adapter,
     })
+}
+
+fn build_webui_auth_interaction_service(
+    product_auth: Option<&RebornProductAuthServices>,
+    turn_state_store: Arc<LocalDevTurnStateStore>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+) -> Arc<dyn AuthInteractionService> {
+    // `AuthFlowRecordSource` is optional on the product-auth bundle because
+    // production may supply a durable read projection that is not the flow
+    // manager itself. Local-dev can render pending WebUI auth interactions only
+    // when the bundle explicitly exposes this scoped projection; otherwise the
+    // WebUI surface fails closed with a stable unavailable error.
+    let Some(product_auth) = product_auth else {
+        return Arc::new(auth_interaction::UnavailableAuthInteractionService);
+    };
+    let Some(flow_records) = product_auth.flow_record_source() else {
+        return Arc::new(auth_interaction::UnavailableAuthInteractionService);
+    };
+    Arc::new(DefaultAuthInteractionService::new(
+        Arc::new(auth_interaction::LocalDevAuthInteractionReadModel::new(
+            turn_state_store,
+            flow_records,
+        )),
+        product_auth.flow_manager(),
+        turn_coordinator,
+    ))
 }
 
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
@@ -1729,6 +1782,7 @@ mod tests {
                 )
                 .expect("message ref"),
                 tool_result_provider_call: None,
+                tool_result_content: None,
             }],
             surface_version: None,
             resolved_model_route: None,
@@ -2531,20 +2585,20 @@ mod tests {
     async fn local_dev_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/setup-helper")).expect("user skill dir");
+        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
         std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
         std::fs::write(
-            storage_root.join("skills/setup-helper/SKILL.md"),
+            storage_root.join("skills/marker-helper/SKILL.md"),
             skill_md_with_setup_marker(
-                "setup-helper",
-                "setup helper description",
-                "markers/setup-helper.done",
-                "SETUP_HELPER_PROMPT_SENTINEL",
+                "marker-helper",
+                "marker helper description",
+                "markers/marker-helper.done",
+                "MARKER_HELPER_PROMPT_SENTINEL",
             ),
         )
-        .expect("write setup helper skill");
+        .expect("write marker helper skill");
         std::fs::write(
-            storage_root.join("workspace/markers/setup-helper.done"),
+            storage_root.join("workspace/markers/marker-helper.done"),
             "done",
         )
         .expect("write setup marker");
@@ -2573,7 +2627,7 @@ mod tests {
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            runtime.execute_skill_message(&conversation, "$setup-helper"),
+            runtime.execute_skill_message(&conversation, "$marker-helper"),
         )
         .await
         .expect("skill execution should finish")
@@ -2606,17 +2660,17 @@ mod tests {
     async fn local_dev_runtime_activates_setup_skill_when_workspace_marker_is_absent() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/setup-helper")).expect("user skill dir");
+        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/setup-helper/SKILL.md"),
+            storage_root.join("skills/marker-helper/SKILL.md"),
             skill_md_with_setup_marker(
-                "setup-helper",
-                "setup helper description",
-                "markers/setup-helper.done",
-                "SETUP_HELPER_PROMPT_SENTINEL",
+                "marker-helper",
+                "marker helper description",
+                "markers/marker-helper.done",
+                "MARKER_HELPER_PROMPT_SENTINEL",
             ),
         )
-        .expect("write setup helper skill");
+        .expect("write marker helper skill");
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let gateway = Arc::new(RecordingGateway {
             reply: "setup marker absent ok".to_string(),
@@ -2642,7 +2696,7 @@ mod tests {
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            runtime.execute_skill_message(&conversation, "$setup-helper"),
+            runtime.execute_skill_message(&conversation, "$marker-helper"),
         )
         .await
         .expect("skill execution should finish")
@@ -2650,7 +2704,7 @@ mod tests {
 
         assert_eq!(result.reply.status, TurnStatus::Completed);
         assert_eq!(result.plan.activations().len(), 1);
-        assert_eq!(result.plan.activations()[0].name, "setup-helper");
+        assert_eq!(result.plan.activations()[0].name, "marker-helper");
         let skill_context = {
             let requests = requests
                 .lock()
@@ -2669,8 +2723,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        assert!(skill_context.contains("setup helper description"));
-        assert!(skill_context.contains("SETUP_HELPER_PROMPT_SENTINEL"));
+        assert!(skill_context.contains("marker helper description"));
+        assert!(skill_context.contains("MARKER_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -2753,7 +2807,7 @@ mod tests {
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
             Duration::from_secs(3),
-            runtime.send_user_message(&conversation, "review this"),
+            runtime.send_user_message(&conversation, "hello with no matching skill"),
         )
         .await
         .expect("runtime send should finish")
@@ -3072,6 +3126,72 @@ mod tests {
 
         assert_eq!(err.code, RebornServicesErrorCode::NotFound);
         assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
+        assert_eq!(err.status_code, 404);
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-webui-auth-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-auth-tenant".to_string(),
+            agent_id: "runtime-webui-auth-agent".to_string(),
+            source_binding_id: "runtime-webui-auth-source".to_string(),
+            reply_target_binding_id: "runtime-webui-auth-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-auth-tenant").unwrap(),
+            UserId::new("runtime-webui-auth-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-auth-agent").unwrap()),
+            None,
+        );
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-webui-auth-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create thread");
+
+        let err = bundle
+            .api
+            .resolve_gate(
+                caller,
+                WebUiResolveGateRequest {
+                    client_action_id: Some("resolve-webui-auth-gate".to_string()),
+                    thread_id: Some(created.thread.thread_id.to_string()),
+                    run_id: Some(TurnRunId::new().to_string()),
+                    gate_ref: Some("gate:hook-auth-missing".to_string()),
+                    resolution: Some("denied".to_string()),
+                    always: None,
+                    credential_ref: None,
+                },
+            )
+            .await
+            .expect_err("missing auth gate should reach auth interaction service");
+
+        assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(err.kind, RebornServicesErrorKind::BlockedAuthentication);
         assert_eq!(err.status_code, 404);
         runtime.shutdown().await.expect("runtime shutdown");
     }

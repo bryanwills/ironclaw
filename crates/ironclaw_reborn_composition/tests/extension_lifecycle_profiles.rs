@@ -153,6 +153,18 @@ fn production_trust_policy() -> Arc<HostTrustPolicy> {
                 vec![EffectKind::DispatchCapability],
                 None,
             ),
+            AdminEntry::for_local_manifest(
+                PackageId::new("builtin").unwrap(),
+                "/system/extensions/builtin/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                ],
+                None,
+            ),
         ]))])
         .unwrap(),
     )
@@ -188,6 +200,7 @@ impl SandboxCommandTransport for NoopSandboxTransport {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         Ok(CommandExecutionOutput {
             output: String::new(),
+            saved_output: None,
             exit_code: 0,
             sandboxed: true,
             duration: Duration::from_millis(1),

@@ -27,6 +27,7 @@
 mod action;
 mod approval_interaction;
 mod auth_continuation;
+mod auth_interaction;
 mod binding;
 mod binding_ref;
 mod command_dispatch;
@@ -35,6 +36,7 @@ mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
+mod gate_state;
 mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
@@ -61,6 +63,14 @@ pub use approval_interaction::{
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
 pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
+pub use auth_interaction::{
+    AuthCredentialAccountChoiceView, AuthGateRecord, AuthInteractionChallengeView,
+    AuthInteractionDecision, AuthInteractionReadModel, AuthInteractionRejectionKind,
+    AuthInteractionScope, AuthInteractionService, AuthInteractionStatus,
+    DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, PendingAuthInteractionView, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, is_auth_gate_ref,
+};
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
@@ -108,8 +118,8 @@ pub use policy::{
 pub use ironclaw_product_adapters::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProgressKind,
-    ProgressUpdateView, ProjectionCursor,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase,
+    ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 // Re-exported so the WebUI v2 handler crate can validate the
 // `extension_name` path segment at the handler/facade boundary

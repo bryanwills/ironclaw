@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_auth::CredentialAccountId;
 use ironclaw_common::ExtensionName;
 use ironclaw_host_api::{AgentId, ThreadId};
 use ironclaw_product_adapters::{
@@ -22,23 +23,26 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
     ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope,
+    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use uuid::Uuid;
 
 use crate::{
-    ApprovalInteractionDecision, ApprovalInteractionService, LifecycleProductFacade,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
+    AuthInteractionRejectionKind, AuthInteractionService, LifecycleProductFacade,
+    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
+    auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
-    is_approval_gate_ref,
+    is_approval_gate_ref, is_auth_gate_ref,
 };
 
 mod error;
@@ -58,6 +62,60 @@ type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
+
+#[derive(Clone, Copy)]
+enum GateResolutionRoute {
+    Approval,
+    Auth,
+    Generic,
+}
+
+impl GateResolutionRoute {
+    fn from_run_state(
+        status: TurnStatus,
+        parked_gate_ref: Option<&GateRef>,
+        requested_gate_ref: &GateRef,
+        resolution: &WebUiGateResolution,
+    ) -> Result<Self, RebornServicesError> {
+        match status {
+            TurnStatus::BlockedApproval => {
+                validate_current_gate_ref(
+                    parked_gate_ref,
+                    requested_gate_ref,
+                    RebornServicesErrorKind::BlockedApproval,
+                )?;
+                Ok(Self::Approval)
+            }
+            TurnStatus::BlockedAuth => {
+                validate_current_gate_ref(
+                    parked_gate_ref,
+                    requested_gate_ref,
+                    RebornServicesErrorKind::BlockedAuthentication,
+                )?;
+                Ok(Self::Auth)
+            }
+            status if status.is_terminal() => Err(RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Conflict,
+                RebornServicesErrorKind::Conflict,
+                409,
+                false,
+            )),
+            _ => Ok(Self::from_gate_shape(requested_gate_ref, resolution)),
+        }
+    }
+
+    fn from_gate_shape(gate_ref: &GateRef, resolution: &WebUiGateResolution) -> Self {
+        match (
+            is_approval_gate_ref(gate_ref),
+            is_auth_gate_ref(gate_ref),
+            matches!(resolution, WebUiGateResolution::CredentialProvided { .. }),
+        ) {
+            (true, _, _) => Self::Approval,
+            (_, true, _) | (_, _, true) => Self::Auth,
+            _ => Self::Generic,
+        }
+    }
+}
 
 /// Stable WebUI-facing facade surface for beta Reborn routes.
 #[async_trait]
@@ -146,6 +204,7 @@ pub struct RebornServices {
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
+    auth_interactions: Arc<dyn AuthInteractionService>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
 }
@@ -163,6 +222,7 @@ impl RebornServices {
                 "reborn_lifecycle_facade_unwired",
             )),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
+            auth_interactions: Arc::new(RejectingAuthInteractionService),
             skill_activation_recorder: None,
             skill_activation_clearer: None,
         }
@@ -186,6 +246,14 @@ impl RebornServices {
         approval_interactions: Arc<dyn ApprovalInteractionService>,
     ) -> Self {
         self.approval_interactions = approval_interactions;
+        self
+    }
+
+    pub fn with_auth_interactions(
+        mut self,
+        auth_interactions: Arc<dyn AuthInteractionService>,
+    ) -> Self {
+        self.auth_interactions = auth_interactions;
         self
     }
 
@@ -584,113 +652,35 @@ impl RebornServicesApi for RebornServices {
         // the message transcript and the load would be wasted work.
         self.resolve_webui_thread_metadata(scope.clone(), &actor)
             .await?;
-        if is_approval_gate_ref(&gate_ref) {
-            let decision = match resolution {
-                WebUiGateResolution::Approved { always } => {
-                    // `always: true` requests a *persistent* approval but this
-                    // facade has only one-shot approval interaction routing and
-                    // no approval-policy port. Fail loud rather than silently
-                    // downgrade.
-                    if always {
-                        return Err(persistent_approval_unavailable());
-                    }
-                    ApprovalInteractionDecision::ApproveOnce
-                }
-                WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
-                    ApprovalInteractionDecision::Deny
-                }
-                WebUiGateResolution::CredentialProvided { .. } => {
-                    return Err(RebornServicesError::from_status_kind(
-                        RebornServicesErrorCode::Unavailable,
-                        RebornServicesErrorKind::BlockedAuthentication,
-                        503,
-                        false,
-                    ));
-                }
-            };
-            let response = self
-                .approval_interactions
-                .resolve(ResolveApprovalInteractionRequest {
+        match self
+            .gate_resolution_route(&scope, &actor, run_id, &gate_ref, &resolution)
+            .await?
+        {
+            GateResolutionRoute::Approval => {
+                self.resolve_approval_gate(
                     scope,
                     actor,
-                    run_id_hint: Some(run_id),
-                    gate_ref,
-                    decision,
-                    idempotency_key: client_action_id,
-                })
-                .await
-                .map_err(|error| map_adapter_error(error.into()))?;
-            return match response {
-                ResolveApprovalInteractionResponse::Approved(response) => {
-                    Ok(RebornResolveGateResponse::Resumed(response.into()))
-                }
-                ResolveApprovalInteractionResponse::Denied(response) => {
-                    Ok(RebornResolveGateResponse::Cancelled(response.into()))
-                }
-            };
-        }
-        match resolution {
-            WebUiGateResolution::Approved { always } => {
-                // `always: true` requests a *persistent* approval but this
-                // facade has only one-shot `resume_turn` and no approval-policy
-                // port. Fail loud rather than silently downgrade.
-                if always {
-                    return Err(persistent_approval_unavailable());
-                }
-                let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
-                let response = self
-                    .turn_coordinator
-                    .resume_turn(ResumeTurnRequest {
-                        scope,
-                        actor,
-                        run_id,
-                        gate_resolution_ref: gate_ref,
-                        precondition: ResumeTurnPrecondition::AnyBlockedGate,
-                        source_binding_ref: webui_source_binding_ref_from_raw(
-                            "webui-gate-src",
-                            &binding_id,
-                        )?,
-                        reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
-                            "webui-gate-reply",
-                            &binding_id,
-                        )?,
-                        idempotency_key: client_action_id,
-                    })
-                    .await
-                    .map_err(map_turn_error)?;
-                Ok(RebornResolveGateResponse::Resumed(response.into()))
-            }
-            WebUiGateResolution::CredentialProvided { .. } => {
-                Err(RebornServicesError::from_status_kind(
-                    RebornServicesErrorCode::Unavailable,
-                    RebornServicesErrorKind::BlockedAuthentication,
-                    503,
-                    false,
-                ))
-            }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
-                // `cancel_run` is not gate-aware, so without this check a
-                // denied/cancelled resolution for a stale or attacker-supplied
-                // gate_ref would terminate any non-terminal run sharing run_id.
-                assert_run_parked_on_gate(
-                    self.turn_coordinator.as_ref(),
-                    &scope,
                     run_id,
-                    &gate_ref,
+                    gate_ref,
+                    client_action_id,
+                    resolution,
                 )
-                .await?;
-                let response = self
-                    .turn_coordinator
-                    .cancel_run(ironclaw_turns::CancelRunRequest {
-                        scope,
-                        actor,
-                        run_id,
-                        reason: SanitizedCancelReason::UserRequested,
-                        idempotency_key: client_action_id,
-                    })
+                .await
+            }
+            GateResolutionRoute::Auth => {
+                self.resolve_auth_gate(scope, actor, run_id, gate_ref, client_action_id, resolution)
                     .await
-                    .map_err(map_turn_error)?;
-                Ok(RebornResolveGateResponse::Cancelled(response.into()))
+            }
+            GateResolutionRoute::Generic => {
+                self.resolve_generic_gate(
+                    scope,
+                    actor,
+                    run_id,
+                    gate_ref,
+                    client_action_id,
+                    resolution,
+                )
+                .await
             }
         }
     }
@@ -947,6 +937,208 @@ impl RebornServices {
             .map_err(map_ownership_probe_error)?;
         Ok((scope, thread_scope))
     }
+
+    async fn resolve_approval_gate(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        client_action_id: IdempotencyKey,
+        resolution: WebUiGateResolution,
+    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        let decision = match resolution {
+            WebUiGateResolution::Approved { always } => {
+                // `always: true` requests a *persistent* approval but this
+                // facade has only one-shot approval interaction routing and no
+                // approval-policy port. Fail loud rather than silently downgrade.
+                if always {
+                    return Err(persistent_approval_unavailable());
+                }
+                ApprovalInteractionDecision::ApproveOnce
+            }
+            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
+                ApprovalInteractionDecision::Deny
+            }
+            WebUiGateResolution::CredentialProvided { .. } => {
+                return Err(blocked_authentication_unavailable());
+            }
+        };
+        let response = self
+            .approval_interactions
+            .resolve(ResolveApprovalInteractionRequest {
+                scope,
+                actor,
+                run_id_hint: Some(run_id),
+                gate_ref,
+                decision,
+                idempotency_key: client_action_id,
+            })
+            .await
+            .map_err(|error| map_adapter_error(error.into()))?;
+        match response {
+            ResolveApprovalInteractionResponse::Approved(response) => {
+                Ok(RebornResolveGateResponse::Resumed(response.into()))
+            }
+            ResolveApprovalInteractionResponse::Denied(response) => {
+                Ok(RebornResolveGateResponse::Cancelled(response.into()))
+            }
+        }
+    }
+
+    async fn gate_resolution_route(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+        run_id: TurnRunId,
+        gate_ref: &GateRef,
+        resolution: &WebUiGateResolution,
+    ) -> Result<GateResolutionRoute, RebornServicesError> {
+        let state = match self
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await
+        {
+            Ok(state) => state,
+            Err(error) if error.category() == ironclaw_turns::TurnErrorCategory::ScopeNotFound => {
+                return Ok(GateResolutionRoute::from_gate_shape(gate_ref, resolution));
+            }
+            Err(error) => return Err(map_turn_error(error)),
+        };
+        if state.actor.as_ref() != Some(actor) {
+            return Err(participant_denied());
+        }
+        // This read only selects the WebUI route. The typed auth/approval
+        // services intentionally re-read run-state through `blocked_gate_state`
+        // before mutating auth/approval records or resuming/cancelling a run,
+        // so stale facade classification cannot authorize a side effect.
+        GateResolutionRoute::from_run_state(
+            state.status,
+            state.gate_ref.as_ref(),
+            gate_ref,
+            resolution,
+        )
+    }
+
+    async fn resolve_auth_gate(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        client_action_id: IdempotencyKey,
+        resolution: WebUiGateResolution,
+    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        let decision = match resolution {
+            WebUiGateResolution::CredentialProvided { credential_ref } => {
+                AuthInteractionDecision::CredentialProvided {
+                    credential_ref: parse_credential_account_id(&credential_ref)
+                        .map_err(map_auth_interaction_error)?,
+                }
+            }
+            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
+                AuthInteractionDecision::Deny
+            }
+            WebUiGateResolution::Approved { .. } => {
+                return Err(blocked_authentication_unavailable());
+            }
+        };
+        let response = self
+            .auth_interactions
+            .resolve(ResolveAuthInteractionRequest {
+                scope,
+                actor,
+                run_id_hint: Some(run_id),
+                gate_ref,
+                decision,
+                idempotency_key: client_action_id,
+            })
+            .await
+            .map_err(map_auth_interaction_error)?;
+        match response {
+            ResolveAuthInteractionResponse::Resumed(response) => {
+                Ok(RebornResolveGateResponse::Resumed(response.into()))
+            }
+            ResolveAuthInteractionResponse::Canceled(response) => {
+                Ok(RebornResolveGateResponse::Cancelled(response.into()))
+            }
+        }
+    }
+
+    async fn resolve_generic_gate(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        client_action_id: IdempotencyKey,
+        resolution: WebUiGateResolution,
+    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        match resolution {
+            WebUiGateResolution::Approved { always } => {
+                reject_generic_auth_gate_resolution(self.turn_coordinator.as_ref(), &scope, run_id)
+                    .await?;
+                // `always: true` requests a *persistent* approval but this
+                // facade has only one-shot `resume_turn` and no approval-policy
+                // port. Fail loud rather than silently downgrade.
+                if always {
+                    return Err(persistent_approval_unavailable());
+                }
+                let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
+                let response = self
+                    .turn_coordinator
+                    .resume_turn(ResumeTurnRequest {
+                        scope,
+                        actor,
+                        run_id,
+                        gate_resolution_ref: gate_ref,
+                        precondition: ResumeTurnPrecondition::AnyBlockedGate,
+                        source_binding_ref: webui_source_binding_ref_from_raw(
+                            "webui-gate-src",
+                            &binding_id,
+                        )?,
+                        reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
+                            "webui-gate-reply",
+                            &binding_id,
+                        )?,
+                        idempotency_key: client_action_id,
+                    })
+                    .await
+                    .map_err(map_turn_error)?;
+                Ok(RebornResolveGateResponse::Resumed(response.into()))
+            }
+            WebUiGateResolution::CredentialProvided { .. } => {
+                Err(blocked_authentication_unavailable())
+            }
+            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
+                assert_generic_run_parked_on_gate(
+                    self.turn_coordinator.as_ref(),
+                    &scope,
+                    run_id,
+                    &gate_ref,
+                )
+                .await?;
+                // `cancel_run` is not gate-aware, so without this check a
+                // denied/cancelled resolution for a stale or attacker-supplied
+                // gate_ref would terminate any non-terminal run sharing run_id.
+                let response = self
+                    .turn_coordinator
+                    .cancel_run(ironclaw_turns::CancelRunRequest {
+                        scope,
+                        actor,
+                        run_id,
+                        reason: SanitizedCancelReason::UserRequested,
+                        idempotency_key: client_action_id,
+                    })
+                    .await
+                    .map_err(map_turn_error)?;
+                Ok(RebornResolveGateResponse::Cancelled(response.into()))
+            }
+        }
+    }
 }
 
 /// Ownership probes must collapse "thread does not exist" and "thread exists
@@ -965,11 +1157,36 @@ fn map_ownership_probe_error(error: SessionThreadError) -> RebornServicesError {
     }
 }
 
-/// Reject denied/cancelled gate resolutions whose `gate_ref` does not match the
-/// gate the run is actually parked on. `cancel_run` is not gate-aware, so
-/// without this guard a stale or attacker-supplied `gate_ref` would cancel any
-/// non-terminal run sharing the same `run_id`.
-async fn assert_run_parked_on_gate(
+fn validate_current_gate_ref(
+    parked_gate_ref: Option<&GateRef>,
+    requested_gate_ref: &GateRef,
+    kind: RebornServicesErrorKind,
+) -> Result<(), RebornServicesError> {
+    match parked_gate_ref {
+        Some(parked) if parked == requested_gate_ref => Ok(()),
+        _ => Err(RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::Conflict,
+            kind,
+            409,
+            false,
+        )),
+    }
+}
+
+fn participant_denied() -> RebornServicesError {
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Forbidden,
+        RebornServicesErrorKind::ParticipantDenied,
+        403,
+        false,
+    )
+}
+
+/// Reject denied/cancelled generic gate resolutions whose `gate_ref` does not
+/// match the gate the run is actually parked on. `cancel_run` is not gate-aware,
+/// so without this guard a stale or attacker-supplied `gate_ref` would cancel
+/// any non-terminal run sharing the same `run_id`.
+async fn assert_generic_run_parked_on_gate(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,
     run_id: TurnRunId,
@@ -982,6 +1199,12 @@ async fn assert_run_parked_on_gate(
         })
         .await
         .map_err(map_turn_error)?;
+    if state.status == TurnStatus::BlockedAuth {
+        return Err(blocked_authentication_unavailable());
+    }
+    if state.status == TurnStatus::BlockedApproval {
+        return Err(blocked_approval_unavailable());
+    }
     match state.gate_ref.as_ref() {
         Some(parked) if parked == expected_gate_ref => Ok(()),
         _ => Err(RebornServicesError::from_status_kind(
@@ -991,6 +1214,39 @@ async fn assert_run_parked_on_gate(
             false,
         )),
     }
+}
+
+/// Generic WebUI gate handling is intentionally not allowed to resume or
+/// cancel auth-blocked runs. Auth gates must pass through
+/// AuthInteractionService so completed-flow/credential validation and
+/// BlockedAuthGate preconditions are enforced.
+async fn reject_generic_auth_gate_resolution(
+    turn_coordinator: &dyn TurnCoordinator,
+    scope: &TurnScope,
+    run_id: TurnRunId,
+) -> Result<(), RebornServicesError> {
+    let state = turn_coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .map_err(map_turn_error)?;
+    if state.status == TurnStatus::BlockedAuth {
+        return Err(blocked_authentication_unavailable());
+    }
+    if state.status == TurnStatus::BlockedApproval {
+        return Err(blocked_approval_unavailable());
+    }
+    Ok(())
+}
+
+fn parse_credential_account_id(value: &str) -> Result<CredentialAccountId, ProductWorkflowError> {
+    uuid::Uuid::parse_str(value)
+        .map(CredentialAccountId::from_uuid)
+        .map_err(|_| ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidCredentialRef,
+        })
 }
 
 fn thread_scope_from_turn_scope(
@@ -1255,6 +1511,19 @@ fn persistent_approval_unavailable() -> RebornServicesError {
     )
 }
 
+fn blocked_approval_unavailable() -> RebornServicesError {
+    persistent_approval_unavailable()
+}
+
+fn blocked_authentication_unavailable() -> RebornServicesError {
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Unavailable,
+        RebornServicesErrorKind::BlockedAuthentication,
+        503,
+        false,
+    )
+}
+
 fn segment(name: &str, value: &str) -> String {
     format!("{name}:{}:{value};", value.len())
 }
@@ -1391,6 +1660,20 @@ fn map_adapter_error(error: ProductAdapterError) -> RebornServicesError {
         ProductAdapterError::Internal { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
         }
+    }
+}
+
+fn map_auth_interaction_error(error: ProductWorkflowError) -> RebornServicesError {
+    match error {
+        ProductWorkflowError::AuthInteractionRejected { kind } => {
+            RebornServicesError::from_status_kind(
+                code_for_status(kind.status_code()),
+                RebornServicesErrorKind::BlockedAuthentication,
+                kind.status_code(),
+                kind.retryable(),
+            )
+        }
+        error => map_adapter_error(error.into()),
     }
 }
 
