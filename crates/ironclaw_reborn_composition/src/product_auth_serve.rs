@@ -22,9 +22,13 @@ use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef, AuthInteractionId,
     AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
-    AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
+    AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
+    CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
+    CredentialAccountProjection, CredentialAccountStatus, CredentialRecoveryProjection,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
     OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderScope, Timestamp, TurnRunRef,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest, Timestamp, TurnRunRef,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -33,7 +37,7 @@ use ironclaw_host_api::ingress::{
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
@@ -52,10 +56,25 @@ use crate::{
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
+pub(crate) const MANUAL_TOKEN_SETUP_PATH: &str = "/api/reborn/product-auth/manual-token/setup";
+pub(crate) const MANUAL_TOKEN_SECRET_SUBMIT_PATH: &str =
+    "/api/reborn/product-auth/manual-token/secret-submit";
+pub(crate) const ACCOUNTS_LIST_PATH: &str = "/api/reborn/product-auth/accounts/list";
+pub(crate) const ACCOUNTS_SELECT_PATH: &str = "/api/reborn/product-auth/accounts/select";
+pub(crate) const ACCOUNTS_RECOVERY_PATH: &str = "/api/reborn/product-auth/accounts/recovery";
+pub(crate) const ACCOUNTS_REFRESH_PATH: &str = "/api/reborn/product-auth/accounts/refresh";
+pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecycle/cleanup";
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
+const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";
+const MANUAL_TOKEN_SECRET_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.secret_submit";
+const ACCOUNTS_LIST_ROUTE_ID: &str = "product_auth.accounts.list";
+const ACCOUNTS_SELECT_ROUTE_ID: &str = "product_auth.accounts.select";
+const ACCOUNTS_RECOVERY_ROUTE_ID: &str = "product_auth.accounts.recovery";
+const ACCOUNTS_REFRESH_ROUTE_ID: &str = "product_auth.accounts.refresh";
+const LIFECYCLE_CLEANUP_ROUTE_ID: &str = "product_auth.lifecycle.cleanup";
 const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(1024) {
     Some(value) => value,
     // SAFETY: 1024 is a non-zero literal cache cap.
@@ -209,11 +228,29 @@ pub(crate) struct ProductAuthRouteMount {
     pub(crate) descriptors: Vec<IngressRouteDescriptor>,
 }
 
+// ToolDispatcher exemption (issue #4201): product-auth HTTP is a host-owned
+// auth/secret-ingress boundary. Its mutations enter `RebornProductAuthServices`
+// directly because credential setup, secure secret-submit, recovery, refresh,
+// and lifecycle cleanup are not in-turn tool calls and must not surface raw
+// secrets through the model-visible tool-dispatch path. The "everything goes
+// through tools" invariant in `docs/reborn/contracts/auth-product.md` therefore
+// explicitly exempts this surface; routes still derive scope from
+// authenticated caller context and emit only redacted projections.
 pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
     ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth_start_handler))
             .route(MANUAL_TOKEN_SUBMIT_PATH, post(manual_token_submit_handler))
+            .route(MANUAL_TOKEN_SETUP_PATH, post(manual_token_setup_handler))
+            .route(
+                MANUAL_TOKEN_SECRET_SUBMIT_PATH,
+                post(manual_token_secret_submit_handler),
+            )
+            .route(ACCOUNTS_LIST_PATH, post(accounts_list_handler))
+            .route(ACCOUNTS_SELECT_PATH, post(accounts_select_handler))
+            .route(ACCOUNTS_RECOVERY_PATH, post(accounts_recovery_handler))
+            .route(ACCOUNTS_REFRESH_PATH, post(accounts_refresh_handler))
+            .route(LIFECYCLE_CLEANUP_PATH, post(lifecycle_cleanup_handler))
             .with_state(state.clone()),
         public: Router::new()
             .route(OAUTH_CALLBACK_PATH, get(oauth_callback_handler))
@@ -240,6 +277,48 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
             MANUAL_TOKEN_SUBMIT_ROUTE_ID,
             NetworkMethod::Post,
             MANUAL_TOKEN_SUBMIT_PATH,
+            protected_mutation_policy(),
+        ),
+        descriptor(
+            MANUAL_TOKEN_SETUP_ROUTE_ID,
+            NetworkMethod::Post,
+            MANUAL_TOKEN_SETUP_PATH,
+            protected_mutation_policy(),
+        ),
+        descriptor(
+            MANUAL_TOKEN_SECRET_SUBMIT_ROUTE_ID,
+            NetworkMethod::Post,
+            MANUAL_TOKEN_SECRET_SUBMIT_PATH,
+            protected_mutation_policy(),
+        ),
+        descriptor(
+            ACCOUNTS_LIST_ROUTE_ID,
+            NetworkMethod::Post,
+            ACCOUNTS_LIST_PATH,
+            protected_mutation_policy(),
+        ),
+        descriptor(
+            ACCOUNTS_SELECT_ROUTE_ID,
+            NetworkMethod::Post,
+            ACCOUNTS_SELECT_PATH,
+            protected_mutation_policy(),
+        ),
+        descriptor(
+            ACCOUNTS_RECOVERY_ROUTE_ID,
+            NetworkMethod::Post,
+            ACCOUNTS_RECOVERY_PATH,
+            protected_mutation_policy(),
+        ),
+        descriptor(
+            ACCOUNTS_REFRESH_ROUTE_ID,
+            NetworkMethod::Post,
+            ACCOUNTS_REFRESH_PATH,
+            protected_mutation_policy(),
+        ),
+        descriptor(
+            LIFECYCLE_CLEANUP_ROUTE_ID,
+            NetworkMethod::Post,
+            LIFECYCLE_CLEANUP_PATH,
             protected_mutation_policy(),
         ),
     ]
@@ -343,6 +422,117 @@ pub(crate) struct ManualTokenSubmitResponse {
     pub(crate) credential_ref: CredentialAccountId,
     pub(crate) status: CredentialAccountStatus,
     pub(crate) continuation: AuthContinuationRef,
+}
+
+#[derive(Deserialize)]
+struct ManualTokenSetupHttpRequest {
+    provider: String,
+    account_label: String,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    gate_ref: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    invocation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ManualTokenSetupResponse {
+    pub(crate) interaction_id: AuthInteractionId,
+    pub(crate) provider: AuthProviderId,
+    pub(crate) label: CredentialAccountLabel,
+    pub(crate) expires_at: Timestamp,
+    /// Invocation scope used to mint this interaction. The browser carries it
+    /// back on the secret-submit call so the host can re-derive the same
+    /// `AuthProductScope` and let the interaction service match the pending
+    /// scope without trusting browser-supplied scope identifiers.
+    pub(crate) invocation_id: InvocationId,
+}
+
+#[derive(Deserialize)]
+struct ManualTokenSecretSubmitHttpRequest {
+    interaction_id: String,
+    token: UnvalidatedRawSecretValue,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    invocation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AccountsListHttpRequest {
+    provider: String,
+    #[serde(default)]
+    requester_extension: Option<String>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    invocation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AccountsSelectHttpRequest {
+    provider: String,
+    account_id: String,
+    #[serde(default)]
+    requester_extension: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    invocation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AccountsRecoveryHttpRequest {
+    provider: String,
+    #[serde(default)]
+    requester_extension: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    invocation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AccountsRefreshHttpRequest {
+    provider: String,
+    account_id: String,
+    #[serde(default)]
+    requester_extension: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    invocation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LifecycleCleanupHttpRequest {
+    extension_id: String,
+    action: SecretCleanupAction,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    invocation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,6 +828,310 @@ async fn abandon_manual_token_after_submit_failure(
     }
 }
 
+async fn manual_token_setup_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(request): Json<ManualTokenSetupHttpRequest>,
+) -> Result<Json<ManualTokenSetupResponse>, ProductAuthRouteFailure> {
+    let scope = scope_from_authenticated_caller_parts_with_invocation(
+        &caller,
+        request.thread_id.as_ref(),
+        request.session_id.as_ref(),
+        request.invocation_id.as_deref(),
+    )?;
+    let invocation_id = scope.resource.invocation_id;
+    let provider = AuthProviderId::new(request.provider)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let label = CredentialAccountLabel::new(request.account_label)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let continuation =
+        manual_token_continuation(request.run_id.as_deref(), request.gate_ref.as_deref())?;
+    let expires_at = Utc::now() + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS);
+
+    let challenge = tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .request_manual_token_setup(RebornManualTokenSetupRequest::new(
+                scope,
+                provider,
+                label,
+                continuation,
+                expires_at,
+            )),
+    )
+    .await
+    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+    .map_err(ProductAuthRouteFailure::from)?;
+
+    Ok(Json(ManualTokenSetupResponse {
+        interaction_id: challenge.interaction_id,
+        provider: challenge.provider,
+        label: challenge.label,
+        expires_at: challenge.expires_at,
+        invocation_id,
+    }))
+}
+
+async fn manual_token_secret_submit_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(request): Json<ManualTokenSecretSubmitHttpRequest>,
+) -> Result<Json<ManualTokenSubmitResponse>, ProductAuthRouteFailure> {
+    // Secret-submit is the secure out-of-band entry point: the raw token is
+    // read straight off the dedicated body, never echoed back, and never
+    // surfaced in model transcript or tool arguments. Only the redacted
+    // submit projection is returned.
+    let scope = scope_from_authenticated_caller_parts_with_invocation(
+        &caller,
+        request.thread_id.as_ref(),
+        request.session_id.as_ref(),
+        request.invocation_id.as_deref(),
+    )?;
+    let interaction_id = parse_interaction_id(&request.interaction_id)?;
+    let token = request
+        .token
+        .into_validated()
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+
+    let submitted = match tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .submit_manual_token(RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                interaction_id,
+                token.into_secret(),
+            )),
+    )
+    .await
+    {
+        Ok(Ok(submitted)) => submitted,
+        Ok(Err(error)) => {
+            abandon_manual_token_after_submit_failure(&state, &scope, interaction_id, error.code)
+                .await;
+            return Err(ProductAuthRouteFailure::from(error));
+        }
+        Err(_) => {
+            abandon_manual_token_after_submit_failure(
+                &state,
+                &scope,
+                interaction_id,
+                AuthErrorCode::BackendUnavailable,
+            )
+            .await;
+            return Err(ProductAuthRouteFailure::backend_timeout());
+        }
+    };
+
+    Ok(Json(ManualTokenSubmitResponse {
+        credential_ref: submitted.account_id,
+        status: submitted.status,
+        continuation: submitted.continuation,
+    }))
+}
+
+async fn accounts_list_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(request): Json<AccountsListHttpRequest>,
+) -> Result<Json<CredentialAccountListPage>, ProductAuthRouteFailure> {
+    let scope = scope_from_authenticated_caller_parts_with_invocation(
+        &caller,
+        request.thread_id.as_ref(),
+        request.session_id.as_ref(),
+        request.invocation_id.as_deref(),
+    )?;
+    let provider = AuthProviderId::new(request.provider)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+
+    let mut list_request = CredentialAccountListRequest::new(scope, provider);
+    if let Some(extension_id) = request.requester_extension.as_deref() {
+        list_request = list_request.for_extension(parse_extension_id(extension_id)?);
+    }
+    if let Some(cursor) = request.cursor.as_deref() {
+        list_request = list_request.with_cursor(parse_credential_account_id(cursor)?);
+    }
+    if let Some(limit) = request.limit {
+        list_request = list_request.with_limit(limit);
+    }
+    list_request
+        .validate()
+        .map_err(ProductAuthRouteFailure::from)?;
+
+    let page = tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state.product_auth.list_credential_accounts(list_request),
+    )
+    .await
+    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+    .map_err(ProductAuthRouteFailure::from)?;
+
+    Ok(Json(page))
+}
+
+async fn accounts_select_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(request): Json<AccountsSelectHttpRequest>,
+) -> Result<Json<CredentialAccountProjection>, ProductAuthRouteFailure> {
+    let scope = scope_from_authenticated_caller_parts_with_invocation(
+        &caller,
+        request.thread_id.as_ref(),
+        request.session_id.as_ref(),
+        request.invocation_id.as_deref(),
+    )?;
+    let provider = AuthProviderId::new(request.provider)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let account_id = parse_credential_account_id(&request.account_id)?;
+
+    let mut choice_request = CredentialAccountChoiceRequest::new(scope, provider, account_id);
+    if let Some(extension_id) = request.requester_extension.as_deref() {
+        choice_request = choice_request.for_extension(parse_extension_id(extension_id)?);
+    }
+
+    let projection = tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state.product_auth.select_credential_account(choice_request),
+    )
+    .await
+    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+    .map_err(ProductAuthRouteFailure::from)?;
+
+    Ok(Json(projection))
+}
+
+async fn accounts_recovery_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(request): Json<AccountsRecoveryHttpRequest>,
+) -> Result<Json<CredentialRecoveryProjection>, ProductAuthRouteFailure> {
+    let scope = scope_from_authenticated_caller_parts_with_invocation(
+        &caller,
+        request.thread_id.as_ref(),
+        request.session_id.as_ref(),
+        request.invocation_id.as_deref(),
+    )?;
+    let provider = AuthProviderId::new(request.provider)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+
+    let mut recovery_request = CredentialRecoveryRequest::new(scope, provider);
+    if let Some(extension_id) = request.requester_extension.as_deref() {
+        recovery_request = recovery_request.for_extension(parse_extension_id(extension_id)?);
+    }
+
+    let projection = tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .project_credential_recovery(recovery_request),
+    )
+    .await
+    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+    .map_err(ProductAuthRouteFailure::from)?;
+
+    Ok(Json(projection))
+}
+
+async fn accounts_refresh_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(request): Json<AccountsRefreshHttpRequest>,
+) -> Result<Json<CredentialRefreshReport>, ProductAuthRouteFailure> {
+    let scope = scope_from_authenticated_caller_parts_with_invocation(
+        &caller,
+        request.thread_id.as_ref(),
+        request.session_id.as_ref(),
+        request.invocation_id.as_deref(),
+    )?;
+    let provider = AuthProviderId::new(request.provider)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let account_id = parse_credential_account_id(&request.account_id)?;
+
+    let mut refresh_request = CredentialRefreshRequest::new(scope, provider, account_id);
+    if let Some(extension_id) = request.requester_extension.as_deref() {
+        refresh_request = refresh_request.for_extension(parse_extension_id(extension_id)?);
+    }
+
+    let report = tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .refresh_credential_account(refresh_request),
+    )
+    .await
+    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+    .map_err(ProductAuthRouteFailure::from)?;
+
+    Ok(Json(report))
+}
+
+async fn lifecycle_cleanup_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(request): Json<LifecycleCleanupHttpRequest>,
+) -> Result<Json<SecretCleanupReport>, ProductAuthRouteFailure> {
+    let scope = scope_from_authenticated_caller_parts_with_invocation(
+        &caller,
+        request.thread_id.as_ref(),
+        request.session_id.as_ref(),
+        request.invocation_id.as_deref(),
+    )?;
+    let extension_id = parse_extension_id(&request.extension_id)?;
+
+    let cleanup_request = SecretCleanupRequest {
+        scope,
+        extension_id,
+        action: request.action,
+    };
+
+    let report = tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .cleanup_credentials_for_lifecycle(cleanup_request),
+    )
+    .await
+    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+    .map_err(ProductAuthRouteFailure::from)?;
+
+    Ok(Json(report))
+}
+
+fn manual_token_continuation(
+    run_id: Option<&str>,
+    gate_ref: Option<&str>,
+) -> Result<AuthContinuationRef, ProductAuthRouteFailure> {
+    match (run_id, gate_ref) {
+        (Some(run_id), Some(gate_ref)) => Ok(AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(run_id.to_string())
+                .map_err(|_| ProductAuthRouteFailure::invalid_request())?,
+            gate_ref: AuthGateRef::new(gate_ref.to_string())
+                .map_err(|_| ProductAuthRouteFailure::invalid_request())?,
+        }),
+        (None, None) => Ok(AuthContinuationRef::SetupOnly),
+        // run_id without gate_ref (or vice versa) is rejected so we never
+        // resume the wrong gate or fabricate a partial turn-resume.
+        _ => Err(ProductAuthRouteFailure::invalid_request()),
+    }
+}
+
+fn parse_interaction_id(value: &str) -> Result<AuthInteractionId, ProductAuthRouteFailure> {
+    let parsed = Uuid::parse_str(value).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    Ok(AuthInteractionId::from_uuid(parsed))
+}
+
+fn parse_credential_account_id(
+    value: &str,
+) -> Result<CredentialAccountId, ProductAuthRouteFailure> {
+    let parsed = Uuid::parse_str(value).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    Ok(CredentialAccountId::from_uuid(parsed))
+}
+
+fn parse_extension_id(value: &str) -> Result<ExtensionId, ProductAuthRouteFailure> {
+    ExtensionId::new(value.to_string()).map_err(|_| ProductAuthRouteFailure::invalid_request())
+}
+
 async fn oauth_callback_handler(
     State(state): State<ProductAuthRouteState>,
     Path(flow_id): Path<String>,
@@ -781,6 +1275,15 @@ fn scope_from_authenticated_caller_parts(
     thread_id: Option<&String>,
     session_id: Option<&String>,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
+    scope_from_authenticated_caller_parts_with_invocation(caller, thread_id, session_id, None)
+}
+
+fn scope_from_authenticated_caller_parts_with_invocation(
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: Option<&String>,
+    session_id: Option<&String>,
+    invocation_id: Option<&str>,
+) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     let thread_id = thread_id
         .map(|value| {
             ThreadId::new(value.clone()).map_err(|_| ProductAuthRouteFailure::invalid_request())
@@ -792,6 +1295,17 @@ fn scope_from_authenticated_caller_parts(
                 .map_err(|_| ProductAuthRouteFailure::invalid_request())
         })
         .transpose()?;
+    // invocation_id, when supplied by the caller, must be a valid existing
+    // identifier (round-tripped from a prior start/setup response). Otherwise
+    // we mint a fresh one — the OAuth start/callback pattern from #4031 uses
+    // the same shape: the host owns the canonical id and the browser carries
+    // it forward across follow-up calls.
+    let invocation_id = match invocation_id {
+        Some(value) => {
+            InvocationId::parse(value).map_err(|_| ProductAuthRouteFailure::invalid_request())?
+        }
+        None => InvocationId::new(),
+    };
 
     let mut scope = AuthProductScope::new(
         ResourceScope {
@@ -801,7 +1315,7 @@ fn scope_from_authenticated_caller_parts(
             project_id: caller.project_id.clone(),
             mission_id: None,
             thread_id,
-            invocation_id: InvocationId::new(),
+            invocation_id,
         },
         AuthSurface::Callback,
     );
