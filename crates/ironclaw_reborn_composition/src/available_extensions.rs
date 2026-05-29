@@ -17,6 +17,8 @@ const GOOGLE_CALENDAR_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/google-calendar/manifest.toml");
 const GMAIL_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
+const NEARAI_MCP_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -67,6 +69,7 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets() -> Result<Self, ProductWorkflowError> {
         Ok(Self::from_packages(vec![
             github_package()?,
+            nearai_mcp_package()?,
             google_calendar_package()?,
             gmail_package()?,
         ]))
@@ -144,6 +147,16 @@ fn github_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("github", "GitHub", GITHUB_MANIFEST, github_assets())
 }
 
+fn nearai_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let manifest = nearai_mcp_manifest_toml();
+    bundled_extension_package(
+        "nearai",
+        "NEAR AI MCP",
+        &manifest,
+        nearai_mcp_assets(&manifest),
+    )
+}
+
 fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(
         "google-calendar",
@@ -163,6 +176,21 @@ pub(crate) fn google_calendar_manifest_digest() -> String {
 
 pub(crate) fn gmail_manifest_digest() -> String {
     sha256_digest_token(GMAIL_MANIFEST.as_bytes())
+}
+
+pub(crate) fn nearai_mcp_manifest_toml() -> String {
+    NEARAI_MCP_MANIFEST.replace("https://private.near.ai/mcp", &nearai_mcp_url_from_env())
+}
+
+fn nearai_mcp_url_from_env() -> String {
+    let configured_base = std::env::var("NEARAI_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let base = configured_base.unwrap_or_else(|| "https://private.near.ai".to_string());
+    let base = base.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{base}/mcp")
 }
 
 fn bundled_extension_package(
@@ -265,6 +293,30 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
             ),
         ),
         bytes_asset("wasm/github_tool.wasm", GITHUB_WASM_MODULE),
+    ]
+}
+
+fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", manifest.as_bytes()),
+        bytes_asset(
+            "schemas/nearai/search.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/search.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/nearai/search.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/search.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/nearai/search.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/search.md"
+            ),
+        ),
     ]
 }
 
@@ -760,10 +812,10 @@ mod tests {
     }
 
     #[test]
-    fn bundled_gsuite_manifest_asset_refs_are_packaged() {
+    fn bundled_first_party_manifest_asset_refs_are_packaged() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
-        for extension_id in ["google-calendar", "gmail"] {
+        for extension_id in ["nearai", "google-calendar", "gmail"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
             let package = catalog.resolve(&package_ref).unwrap();
