@@ -3,6 +3,7 @@ import {
   createThread as createThreadRequest,
   resolveGate as resolveGateRequest,
   sendMessage,
+  submitManualToken,
 } from "../../../lib/api.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
@@ -195,6 +196,30 @@ export function useChat(threadId) {
     [pendingGate, threadId],
   );
 
+  const submitAuthToken = React.useCallback(
+    async (token) => {
+      if (!pendingGate) return;
+      const { runId, gateRef } = pendingGate;
+      if (!runId || !gateRef) {
+        throw new Error("submitAuthToken requires a pending auth gate with run_id and gate_ref");
+      }
+      const submitted = await submitManualToken({
+        provider: pendingGate.provider || "github",
+        accountLabel: pendingGate.accountLabel || "GitHub PAT",
+        token,
+        threadId,
+        runId,
+        gateRef,
+      });
+      const credentialRef = submitted?.credential_ref;
+      if (!credentialRef) {
+        throw new Error("manual token submit returned no credential_ref");
+      }
+      await resolveGate("credential_provided", { credentialRef });
+    },
+    [pendingGate, resolveGate, threadId],
+  );
+
   const cancelRun = React.useCallback(
     async (reason) => {
       const runId = activeRun?.runId;
@@ -222,6 +247,7 @@ export function useChat(threadId) {
       let resolution = "approved";
       let always = false;
       if (action === "deny") resolution = "denied";
+      else if (action === "cancel") resolution = "cancelled";
       else if (action === "always") {
         resolution = "approved";
         always = true;
@@ -249,6 +275,7 @@ export function useChat(threadId) {
     cooldownSeconds,
     send,
     resolveGate,
+    submitAuthToken,
     cancelRun,
     loadMore,
     // fork-shape compatibility — see comments above

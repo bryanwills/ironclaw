@@ -1,8 +1,9 @@
 // WebChat v2 ingress client.
 //
 // Every function in this module targets a `/api/webchat/v2/*` route
-// defined by issue #3815, OR a v2-owned `/auth/*` route mounted by
-// `ironclaw_reborn_webui_ingress::webui_v2_auth_router`. The module
+// defined by issue #3815, a v2-owned `/auth/*` route mounted by
+// `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, or a
+// Reborn product-auth route mounted by host composition. The module
 // deliberately contains no `/api/chat`, `/api/engine`, or
 // `/api/profile` paths — the hard non-goal of issue #3886 still
 // stands for v1 gateway routes that lack a v2 counterpart.
@@ -227,6 +228,29 @@ export function resolveGate({
       body: JSON.stringify(body),
     },
   );
+}
+
+// --- Product auth ---
+
+export function submitManualToken({
+  provider,
+  accountLabel,
+  token,
+  threadId,
+  runId,
+  gateRef,
+} = {}) {
+  return apiFetch("/api/reborn/product-auth/manual-token/submit", {
+    method: "POST",
+    body: JSON.stringify({
+      provider,
+      account_label: accountLabel,
+      token,
+      thread_id: threadId,
+      run_id: runId,
+      gate_ref: gateRef,
+    }),
+  });
 }
 
 // --- Extension setup ---

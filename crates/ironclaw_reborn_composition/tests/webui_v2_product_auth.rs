@@ -264,6 +264,37 @@ async fn post_oauth_start(app: &axum::Router, body: serde_json::Value) -> axum::
         .expect("oneshot")
 }
 
+async fn post_manual_token_submit(
+    app: &axum::Router,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/manual-token/submit")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+fn manual_token_body(token: &str, extra_fields: serde_json::Value) -> serde_json::Value {
+    let mut body = json!({
+        "provider": "github",
+        "account_label": "work github",
+        "token": token,
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "gate_ref": "gate:auth-github",
+        "thread_id": "thread-auth-1"
+    });
+    merge_json_object(&mut body, extra_fields);
+    body
+}
+
 fn merge_json_object(target: &mut serde_json::Value, source: serde_json::Value) {
     let Some(target) = target.as_object_mut() else {
         return;
@@ -354,6 +385,73 @@ async fn product_auth_oauth_start_requires_bearer_auth() {
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_requires_bearer_auth() {
+    let (app, _) = build_app_with_product_auth();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/manual-token/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    manual_token_body("ghp_secret", json!({})).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_returns_credential_ref_without_exposing_pat() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let raw_pat = "ghp_super_secret_manual_pat";
+
+    let response = post_manual_token_submit(&app, manual_token_body(raw_pat, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(
+        !body.contains(raw_pat),
+        "manual token response must not expose the raw PAT: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("manual token json");
+    assert!(json["credential_ref"].as_str().is_some());
+    assert_eq!(json["status"].as_str(), Some("configured"));
+    assert_eq!(
+        json["continuation"]["type"].as_str(),
+        Some("turn_gate_resume")
+    );
+    assert_eq!(
+        json["continuation"]["gate_ref"].as_str(),
+        Some("gate:auth-github")
+    );
+    assert_eq!(
+        json["continuation"]["turn_run_ref"].as_str(),
+        Some("11111111-1111-1111-1111-111111111111")
+    );
+    assert!(
+        dispatcher.events().is_empty(),
+        "manual token submit should return credential_ref; resolve_gate owns turn resumption"
+    );
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_rejects_invalid_secret_without_echoing_it() {
+    let (app, _) = build_app_with_product_auth();
+    let raw_pat = " padded-ghp-secret ";
+
+    let response = post_manual_token_submit(&app, manual_token_body(raw_pat, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(!body.contains(raw_pat));
+    assert!(body.contains("invalid_request"));
 }
 
 #[tokio::test]

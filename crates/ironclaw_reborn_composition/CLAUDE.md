@@ -113,10 +113,10 @@ Inbound order (outer → inner → handler):
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension).
 
-### Product-auth OAuth routes
+### Product-auth routes
 
 When `bundle.product_auth` is present, `webui_v2_app` also mounts the
-Reborn-native product-auth OAuth surface:
+Reborn-native product-auth surface:
 
 - `POST /api/reborn/product-auth/oauth/start` is inside the existing
   bearer-auth layer. It derives `AuthProductScope` from the
@@ -137,6 +137,14 @@ Reborn-native product-auth OAuth surface:
   exchanges provider tokens, activates extensions, resumes turns, or
   writes secrets directly. Its descriptor declares `NoBody` and a
   transport-peer-IP public callback rate limit.
+- `POST /api/reborn/product-auth/manual-token/submit` is inside the
+  same bearer-auth layer as OAuth start. It derives `AuthProductScope`
+  from `WebUiAuthenticatedCaller`, validates the provider/account/token
+  fields, creates a short-lived manual-token interaction with a
+  `TurnGateResume` continuation, submits the raw token only to
+  `RebornProductAuthServices`, and returns the resulting
+  `credential_ref`. The browser must then call v2 `resolve_gate` with
+  that `credential_ref`; raw token values never go through gate resolution.
 - Raw `state`, OAuth authorization codes, PKCE verifiers, provider
   token handles, provider bodies, and host paths must not be logged or
   serialized by the route. Responses use the sanitized product-auth

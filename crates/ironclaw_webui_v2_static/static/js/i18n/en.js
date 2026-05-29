@@ -109,6 +109,14 @@ registerPack("en", {
   "approval.approve": "Approve",
   "approval.deny": "Deny",
   "approval.always": "Always",
+  "authGate.title": "Authentication required",
+  "authGate.tokenLabel": "GitHub personal access token",
+  "authGate.tokenPlaceholder": "Paste GitHub PAT",
+  "authGate.tokenRequired": "A token is required.",
+  "authGate.submit": "Use token",
+  "authGate.submitting": "Checking...",
+  "authGate.cancel": "Cancel",
+  "authGate.submitFailed": "Could not save the token.",
 
   // Error
   "error.gatewayConnection": "Unable to connect to the gateway",
