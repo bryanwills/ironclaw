@@ -416,7 +416,17 @@ mod tests {
         }
     }
 
-    async fn spawn_mock(mock: MockGitHub) -> SocketAddr {
+    /// Aborts the spawned mock-server task when the test's binding
+    /// goes out of scope, so neither the task nor its `TcpListener`
+    /// outlives the test that created it.
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    async fn spawn_mock(mock: MockGitHub) -> (SocketAddr, AbortOnDrop) {
         let token_mock = mock.clone();
         let user_mock = mock.clone();
         let emails_mock = mock.clone();
@@ -454,10 +464,10 @@ mod tests {
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("local_addr");
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
-        addr
+        (addr, AbortOnDrop(handle))
     }
 
     use axum::response::IntoResponse;
@@ -484,7 +494,7 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_code_prefers_primary_verified_email() {
-        let addr = spawn_mock(MockGitHub::success()).await;
+        let (addr, _server) = spawn_mock(MockGitHub::success()).await;
         let profile = exchange(addr).await.expect("exchange success");
         assert_eq!(profile.provider_user_id, "4242");
         assert_eq!(profile.email.as_deref(), Some("primary@example.com"));
@@ -508,7 +518,7 @@ mod tests {
                 primary: false,
             },
         ];
-        let addr = spawn_mock(mock).await;
+        let (addr, _server) = spawn_mock(mock).await;
         let profile = exchange(addr).await.expect("exchange success");
         assert_eq!(profile.email.as_deref(), Some("verified@example.com"));
         assert!(profile.email_verified);
@@ -529,7 +539,7 @@ mod tests {
             verified: false,
             primary: true,
         }];
-        let addr = spawn_mock(mock).await;
+        let (addr, _server) = spawn_mock(mock).await;
         let profile = exchange(addr).await.expect("exchange success");
         assert_eq!(profile.email.as_deref(), Some("profile@example.com"));
         assert!(
@@ -547,7 +557,7 @@ mod tests {
         mock.token_body =
             r#"{"error":"bad_verification_code","error_description":"should not leak"}"#
                 .to_string();
-        let addr = spawn_mock(mock).await;
+        let (addr, _server) = spawn_mock(mock).await;
         let err = exchange(addr).await.expect_err("must reject error body");
         assert!(
             matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("bad_verification_code")),
@@ -564,7 +574,7 @@ mod tests {
         let mut mock = MockGitHub::success();
         mock.token_status = StatusCode::INTERNAL_SERVER_ERROR;
         mock.token_body = "boom".to_string();
-        let addr = spawn_mock(mock).await;
+        let (addr, _server) = spawn_mock(mock).await;
         let err = exchange(addr).await.expect_err("must reject 5xx");
         assert!(
             matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("500")),
@@ -576,7 +586,7 @@ mod tests {
     async fn exchange_code_rejects_token_response_without_access_token() {
         let mut mock = MockGitHub::success();
         mock.token_body = r#"{"token_type":"bearer"}"#.to_string();
-        let addr = spawn_mock(mock).await;
+        let (addr, _server) = spawn_mock(mock).await;
         let err = exchange(addr).await.expect_err("must reject missing token");
         assert!(
             matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("access_token")),
@@ -588,7 +598,7 @@ mod tests {
     async fn exchange_code_rejects_user_endpoint_failure() {
         let mut mock = MockGitHub::success();
         mock.user_status = StatusCode::UNAUTHORIZED;
-        let addr = spawn_mock(mock).await;
+        let (addr, _server) = spawn_mock(mock).await;
         let err = exchange(addr).await.expect_err("must reject user 401");
         assert!(
             matches!(&err, OAuthError::ProfileFetch(msg) if msg.contains("401")),
@@ -600,7 +610,7 @@ mod tests {
     async fn exchange_code_rejects_emails_endpoint_failure() {
         let mut mock = MockGitHub::success();
         mock.emails_status = StatusCode::INTERNAL_SERVER_ERROR;
-        let addr = spawn_mock(mock).await;
+        let (addr, _server) = spawn_mock(mock).await;
         let err = exchange(addr).await.expect_err("must reject emails 5xx");
         assert!(
             matches!(&err, OAuthError::ProfileFetch(msg) if msg.contains("500")),
@@ -624,7 +634,7 @@ mod tests {
             "email": null,
         });
         mock.emails = vec![];
-        let addr = spawn_mock(mock).await;
+        let (addr, _server) = spawn_mock(mock).await;
         let profile = exchange(addr).await.expect("exchange success");
         assert!(
             profile.email.is_none(),

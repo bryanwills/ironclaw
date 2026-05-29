@@ -80,9 +80,19 @@ impl MockGitHub {
     }
 }
 
+/// Aborts the spawned mock-server task when the test's binding goes
+/// out of scope, so neither the task nor its `TcpListener` outlives
+/// the test that created it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Spawn the mock GitHub token / user / emails endpoints and return
-/// the bound address.
-async fn spawn_mock_github(mock: MockGitHub) -> SocketAddr {
+/// the bound address plus a guard that aborts the server on drop.
+async fn spawn_mock_github(mock: MockGitHub) -> (SocketAddr, AbortOnDrop) {
     let user_mock = mock.clone();
     let emails_mock = mock.clone();
 
@@ -116,10 +126,10 @@ async fn spawn_mock_github(mock: MockGitHub) -> SocketAddr {
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("local_addr");
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    addr
+    (addr, AbortOnDrop(handle))
 }
 
 fn github_provider(addr: SocketAddr) -> Arc<dyn OAuthProvider> {
@@ -256,7 +266,7 @@ async fn redeem_ticket(router: &axum::Router, ticket: &str) -> String {
 
 #[tokio::test]
 async fn providers_lists_configured_github() {
-    let addr = spawn_mock_github(MockGitHub::octocat()).await;
+    let (addr, _server) = spawn_mock_github(MockGitHub::octocat()).await;
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let router = build_router(vec![github_provider(addr)], store);
 
@@ -280,7 +290,7 @@ async fn providers_lists_configured_github() {
 
 #[tokio::test]
 async fn login_redirects_to_github_with_state_and_scope_and_no_pkce() {
-    let addr = spawn_mock_github(MockGitHub::octocat()).await;
+    let (addr, _server) = spawn_mock_github(MockGitHub::octocat()).await;
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let router = build_router(vec![github_provider(addr)], store);
 
@@ -314,7 +324,7 @@ async fn login_redirects_to_github_with_state_and_scope_and_no_pkce() {
 
 #[tokio::test]
 async fn callback_success_mints_session_for_primary_verified_email() {
-    let addr = spawn_mock_github(MockGitHub::octocat()).await;
+    let (addr, _server) = spawn_mock_github(MockGitHub::octocat()).await;
     let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
     let session_store: Arc<dyn SessionStore> = store_inner.clone();
     let router = build_router(vec![github_provider(addr)], session_store);
@@ -360,7 +370,7 @@ async fn callback_success_mints_session_for_primary_verified_email() {
 
 #[tokio::test]
 async fn callback_with_provider_error_redirects_with_denied() {
-    let addr = spawn_mock_github(MockGitHub::octocat()).await;
+    let (addr, _server) = spawn_mock_github(MockGitHub::octocat()).await;
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let router = build_router(vec![github_provider(addr)], store);
 
@@ -397,9 +407,9 @@ async fn callback_exchange_failure_redirects_with_exchange_failed() {
         "/token",
         post(|_: Form<HashMap<String, String>>| async { StatusCode::INTERNAL_SERVER_ERROR }),
     );
-    tokio::spawn(async move {
+    let _server = AbortOnDrop(tokio::spawn(async move {
         let _ = axum::serve(listener, failing).await;
-    });
+    }));
 
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let provider: Arc<dyn OAuthProvider> = Arc::new(GitHubProvider::with_endpoints(
@@ -452,7 +462,7 @@ async fn callback_with_unknown_state_redirects_with_invalid_state_error() {
     // A callback whose state was never minted (expired out of the
     // pending-flow store, or fabricated) must fail closed with the
     // opaque `invalid_state` code and never reach the provider.
-    let addr = spawn_mock_github(MockGitHub::octocat()).await;
+    let (addr, _server) = spawn_mock_github(MockGitHub::octocat()).await;
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let router = build_router(vec![github_provider(addr)], store);
 
@@ -479,7 +489,7 @@ async fn callback_with_state_replay_fails_closed() {
     // security property (CLAUDE.md §Security invariants). A state token
     // consumed by a successful callback must not mint a second session
     // when replayed against the same router.
-    let addr = spawn_mock_github(MockGitHub::octocat()).await;
+    let (addr, _server) = spawn_mock_github(MockGitHub::octocat()).await;
     let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
     let router = build_router(vec![github_provider(addr)], store_inner.clone());
 
@@ -563,9 +573,9 @@ async fn callback_profile_fetch_failure_redirects_with_exchange_failed() {
             }),
         )
         .route("/user", get(|| async { StatusCode::UNAUTHORIZED }));
-    tokio::spawn(async move {
+    let _server = AbortOnDrop(tokio::spawn(async move {
         let _ = axum::serve(listener, server).await;
-    });
+    }));
 
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let provider: Arc<dyn OAuthProvider> = Arc::new(GitHubProvider::with_endpoints(
@@ -617,7 +627,7 @@ async fn callback_profile_fetch_failure_redirects_with_exchange_failed() {
 
 #[tokio::test]
 async fn logout_revokes_the_minted_session() {
-    let addr = spawn_mock_github(MockGitHub::octocat()).await;
+    let (addr, _server) = spawn_mock_github(MockGitHub::octocat()).await;
     let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
     let session_store: Arc<dyn SessionStore> = store_inner.clone();
     let router = build_router(vec![github_provider(addr)], session_store);
