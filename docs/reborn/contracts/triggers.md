@@ -43,7 +43,6 @@ The trigger system is owned by `ironclaw_triggers` in implementation terms, but 
 | `source` | Trigger source kind |
 | `schedule` | V1 schedule definition |
 | `prompt` | Materialized instruction content |
-| `enabled` | Optional denormalized query flag derived from `state`; not an independent fire gate |
 | `state` | Lifecycle state for the trigger definition |
 | `next_run_at` | Next eligible fire time |
 | `last_run_at` | Last time a fire was submitted |
@@ -76,8 +75,9 @@ It is the source of truth for fire eligibility.
 - `Scheduled` means the trigger may be polled and fired.
 - `Paused` means the trigger is retained but must not fire.
 - `Completed` is reserved for future finite schedules and must not be treated as a V1 cron-state requirement.
-- If an implementation stores `enabled` for index/query convenience, it must be
-  derived from `state == Scheduled` and must never override `state`.
+- V1 does not expose a separate `enabled` field. Durable backends may add
+  denormalized indexes derived from `state == Scheduled`, but those indexes must
+  never become independent fire gates.
 
 ---
 
@@ -144,7 +144,16 @@ V1 has one provider: a schedule provider.
 
 `TriggerPollerWorker` is the background evaluator that scans eligible triggers and submits fires through trusted inbound.
 
-- The worker may poll on a configured interval and batch due triggers.
+- The worker may poll globally on a configured interval and batch due triggers
+  across tenants. Global due queries are host-owned background work only, not a
+  user-scoped request surface.
+- Every returned `TriggerRecord.tenant_id` is authority-bearing state. Trigger
+  workers must mint trusted inbound requests from the record's `tenant_id`,
+  `creator_user_id`, `agent_id`, and `project_id`; they must not use an ambient
+  or default tenant/user scope for a fire.
+- Claim, update, and remove operations must mutate the same tenant-scoped record
+  that was returned or claimed. A worker must not retarget a fire to another
+  tenant, actor, route, or scope.
 - The worker must enforce `max_concurrent_fires_per_trigger = 1` in V1 through
   an atomic repository claim/lease operation that covers read, eligibility
   check, active-fire check, and claim write.
@@ -167,18 +176,16 @@ The skip policy is per-trigger, not global. Other triggers may continue to fire 
 A trigger fire is synthetic inbound, not a parallel agent loop.
 
 - The fire must enter the normal Reborn inbound/turn pipeline.
-- Planned facade: `InboundTurnService::handle_inbound_turn_with_trusted_scope(...)`.
-  This method does not exist in the current implemented conversation slice; PR 8
-  in the implementation plan owns adding it and its caller-level tests.
+- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`. PR 8 seals the trusted request constructor locally in `ironclaw_conversations`; a later trigger-worker/composition PR will add the host-owned construction shim once that caller exists.
 - Binding resolution for trigger fires must use the trusted-scope path from `conversation-binding.md`.
 - The host-trusted ingress marker and witness used for trigger submission must be type-sealed and unconstructible by product adapters.
 - The host mints the trusted trigger ingress request from `TriggerRecord` state:
   `tenant_id`, `creator_user_id`, `agent_id`, and `project_id` are host state,
   not product payload data.
-- The synthetic inbound request may carry only ingress identity and turn scope data needed to create the canonical turn.
+- The trusted inbound request is a host-owned wrapper around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it discards adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
 
-Synthetic trigger `InboundTurnRequest` fields are:
+Trusted trigger ingress request fields are:
 
 - `adapter_kind`: sealed host-trusted ingress marker, not a product adapter kind;
 - `adapter_installation_id`: sealed host-trusted trigger installation marker;
@@ -190,12 +197,6 @@ Synthetic trigger `InboundTurnRequest` fields are:
 - `route_kind`: direct;
 - `actor`: `TurnActor` for `creator_user_id`;
 - `content_ref`: materialized trigger prompt.
-
-The planned trusted facade takes a typed trusted request that bundles the
-ordinary `InboundTurnRequest` fields with host-owned `tenant_id`,
-`creator_user_id`, `agent_id`, and `project_id` authority. `creator_user_id` is
-converted into the canonical `TurnActor` by the host-owned trusted path; product
-adapters cannot supply or override it.
 
 The sealed marker/installation/actor/conversation tuple must resolve to the same
 `SourceBindingRef` on every retry of the same tenant-scoped fire identity. Replay

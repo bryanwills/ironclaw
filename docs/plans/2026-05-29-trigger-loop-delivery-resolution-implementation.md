@@ -246,8 +246,17 @@ Add typed request/response shapes in `ironclaw_outbound`:
 
 `RequestedOutboundContext` must carry a typed `ReplyTargetBindingRef` candidate,
 not a raw adapter/channel/conversation string. The top-level request must carry
-the delivery kind so validation can reject shared/group widening for
-authority-bearing prompt payloads.
+the intent, and `CommunicationDeliveryResolutionRequest::delivery_kind()` is
+derived from that intent so validation can reject shared/group widening for
+authority-bearing prompt payloads without allowing contradictory input.
+
+`SourceRouteContext` must also stay outbound-owned and binding-level only:
+carry the canonical `ReplyTargetBindingRef` produced by
+`ironclaw_conversations`, not raw adapter identity such as `AdapterKind`,
+`AdapterInstallationId`, `ExternalActorRef`, or `ExternalConversationRef`.
+`ironclaw_outbound` must not depend on `ironclaw_conversations`; composition or
+later product outbound orchestration owns any translation between conversation
+source-route records and outbound resolution inputs.
 
 Include serde and unit tests. Do not wire product egress yet.
 
@@ -361,11 +370,13 @@ Implement the planned
 `ironclaw_conversations` after PR 2:
 
 - Add a typed trusted request shape that bundles the ordinary inbound request
-  with host-owned `tenant_id`, `creator_user_id`, `agent_id`, and `project_id`
-  authority.
-- Add `ironclaw_conversations::trusted_ingress` sealed marker/witness types and
-  constructors. Host composition can construct them for scheduled triggers;
-  product adapters cannot model or construct them.
+  with host-owned `agent_id` and `project_id` authority. Adapter-supplied
+  requested scope hints are cleared before trusted binding resolution.
+- Add `ironclaw_conversations` sealed trusted-ingress marker/witness types, but
+  do not expose production minting publicly in this PR. PR 8 seals and tests
+  the facade locally; the later trigger worker/composition integration PR owns
+  the host-owned construction shim for scheduled triggers. Product adapters
+  cannot model, mint, or construct trusted ingress.
 - Trigger fires call only this `ironclaw_conversations` facade. They must not
   pass through `ironclaw_product_workflow::InboundTurnService`, which remains
   adapter-facing.
@@ -401,6 +412,17 @@ Add the trigger crate with domain and in-memory behavior:
 - schedule validation rejecting sub-minute fire cadence
 - in-memory repository for tests
 
+`TriggerRecord` should use `state` as the single V1 fire gate and should not
+carry a separate `enabled` field. Durable backends may add derived indexes in
+PR 10, but those indexes must not become independent authority or eligibility
+state.
+
+`TriggerRepository::list_due_triggers` may be global because the poller is
+host-owned background work, but every returned `TriggerRecord.tenant_id` is
+authority-bearing. Later worker/claim code must mint trusted inbound requests
+from each record's tenant/user/agent/project scope and must not use an ambient
+tenant scope.
+
 Include unit tests for schedule validation, serde, and deterministic fire
 identity. Include tests proving expressions with sub-minute cadence are
 rejected. The workspace already has `cron = "0.13"` available.
@@ -417,7 +439,9 @@ Add the first durable `TriggerRepository` backend:
 - repository trait methods for create/list/remove, due-trigger lookup, and
   submit-result bookkeeping, but not the atomic claim API yet
 - migrations/schema for one chosen backend
-- composite poller index on `(tenant_id, enabled, state, next_run_at)`
+- composite poller index on `(tenant_id, state, next_run_at)` or an equivalent
+  backend-specific derived index; any denormalized scheduled/enabled index must
+  be derived from `state == Scheduled`, not written as independent fire state
 - `active_fire_slot` and `active_run_ref` persistence fields separate from
   `last_status`
 - due-trigger query with limit
