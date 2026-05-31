@@ -25,6 +25,7 @@ use super::config::GoogleOAuthConfig;
 use super::error::{OAuthError, ProviderInitError};
 use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
+use super::provider_http::sanitize_error_code;
 use super::provider_name::OAuthProviderName;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -177,8 +178,13 @@ impl OAuthProvider for GoogleProvider {
                 .ok()
                 .and_then(|error| error.error);
             if let Some(error_code) = error_code {
+                // Sanitize the provider-supplied code (attacker-
+                // influenceable via an overridden token endpoint) before
+                // it lands in an error string that gets logged — same
+                // log-injection guard as the GitHub provider.
+                let safe_error = sanitize_error_code(&error_code);
                 return Err(OAuthError::CodeExchange(format!(
-                    "Google token endpoint returned {status} ({error_code})"
+                    "Google token endpoint returned {status} ({safe_error})"
                 )));
             }
             tracing::debug!(
@@ -345,12 +351,6 @@ mod tests {
     }
 
     async fn spawn_mock_token_endpoint(id_token: String) -> SocketAddr {
-        async fn handler(Json(body): Json<serde_json::Value>) -> Json<MockTokenResponse> {
-            let _ = body; // form params aren't validated in the mock
-            unreachable!("axum form extractor required, replaced below")
-        }
-        let _ = handler;
-
         let router = axum::Router::new().route(
             "/token",
             post(

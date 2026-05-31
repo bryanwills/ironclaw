@@ -13,31 +13,33 @@
 /// parsed structure.
 pub(super) const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
-/// Read a response body, rejecting anything over [`MAX_RESPONSE_BYTES`]
-/// before it is handed to serde. Returns the raw bytes on success or a
-/// human error string the caller maps to the right
-/// [`OAuthError`](super::error::OAuthError) variant.
+/// Read a response body, rejecting anything over [`MAX_RESPONSE_BYTES`].
+/// Returns the raw bytes on success or a human error string the caller
+/// maps to the right [`OAuthError`](super::error::OAuthError) variant.
 ///
-/// An advertised `Content-Length` over the cap fails *before* the body
-/// is buffered; the post-read length check then covers chunked /
-/// length-less responses (`reqwest` has no built-in body cap, and the
-/// per-call client timeout is the only other bound on a hostile stream).
-pub(super) async fn read_capped_body(resp: reqwest::Response) -> Result<Vec<u8>, String> {
+/// An advertised `Content-Length` over the cap fails *before* any body
+/// is read. For chunked / length-less responses the body is read one
+/// chunk at a time with a running total, so a hostile or misconfigured
+/// endpoint cannot force an unbounded allocation regardless of what it
+/// advertises — `reqwest` has no built-in body cap, so this loop is the
+/// bound (the per-call client timeout only bounds time, not memory).
+pub(super) async fn read_capped_body(mut resp: reqwest::Response) -> Result<Vec<u8>, String> {
+    let over_limit =
+        || format!("OAuth provider response exceeds the {MAX_RESPONSE_BYTES}-byte limit");
     if resp
         .content_length()
         .is_some_and(|len| len > MAX_RESPONSE_BYTES as u64)
     {
-        return Err(format!(
-            "OAuth provider response exceeds the {MAX_RESPONSE_BYTES}-byte limit"
-        ));
+        return Err(over_limit());
     }
-    let bytes = resp.bytes().await.map_err(|err| err.to_string())?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(format!(
-            "OAuth provider response exceeds the {MAX_RESPONSE_BYTES}-byte limit"
-        ));
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|err| err.to_string())? {
+        if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(over_limit());
+        }
+        body.extend_from_slice(&chunk);
     }
-    Ok(bytes.to_vec())
+    Ok(body)
 }
 
 /// OAuth error codes returned in a provider's response body follow the
