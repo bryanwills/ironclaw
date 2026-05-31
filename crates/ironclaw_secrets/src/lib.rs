@@ -523,6 +523,11 @@ pub trait CredentialAccountStore: Send + Sync {
         account: CredentialAccount,
     ) -> Result<CredentialAccount, CredentialBrokerError>;
 
+    async fn put_account_if_newer(
+        &self,
+        account: CredentialAccount,
+    ) -> Result<CredentialAccount, CredentialBrokerError>;
+
     async fn get_account(
         &self,
         scope: &ResourceScope,
@@ -745,6 +750,26 @@ impl CredentialAccountStore for InMemoryCredentialBroker {
         account: CredentialAccount,
     ) -> Result<CredentialAccount, CredentialBrokerError> {
         InMemoryCredentialBroker::put_account(self, account.clone())?;
+        Ok(account)
+    }
+
+    async fn put_account_if_newer(
+        &self,
+        account: CredentialAccount,
+    ) -> Result<CredentialAccount, CredentialBrokerError> {
+        let mut accounts =
+            self.accounts
+                .lock()
+                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
+                    reason: error.to_string(),
+                })?;
+        let key = CredentialAccountKey::new(&account.scope, &account.id);
+        if let Some(existing) = accounts.get(&key)
+            && existing.updated_at >= account.updated_at
+        {
+            return Ok(existing.clone());
+        }
+        accounts.insert(key, account.clone());
         Ok(account)
     }
 

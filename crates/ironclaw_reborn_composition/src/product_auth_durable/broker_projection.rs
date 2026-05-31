@@ -42,12 +42,12 @@
 //!   for non-owner extensions are not currently reflected in the broker
 //!   record — a multi-extension projection (or a different broker
 //!   shape) is the follow-up.
-//! * Cleanup with `SecretCleanupAction::Uninstall` projects the auth
-//!   account's resulting `Revoked` status into the broker (rather than
-//!   removing the broker row) because `CredentialAccountStore` exposes
-//!   no `delete_account` method.  A revoked broker account cannot issue
-//!   sessions, which matches the UX intent; the row remains visible for
-//!   audit.  A trait-level delete is a separate follow-up.
+//! * Cleanup and unusable product-auth states project a `Revoked` broker
+//!   row (rather than removing the broker row) because
+//!   `CredentialAccountStore` exposes no `delete_account` method.  A
+//!   revoked broker account cannot issue sessions, which matches the UX
+//!   intent; the row remains visible for audit.  A trait-level delete is
+//!   a separate follow-up.
 
 use std::sync::Arc;
 
@@ -93,7 +93,7 @@ impl BrokerAccountProjector for CredentialBrokerProjector {
             );
             return;
         };
-        if let Err(error) = self.store.put_account(broker_account).await {
+        if let Err(error) = self.store.put_account_if_newer(broker_account).await {
             tracing::warn!(
                 account_id = %account.id,
                 error = %error,
@@ -116,24 +116,17 @@ impl BrokerAccountProjector for NoopBrokerAccountProjector {
 
 /// Map a product-auth account into a runtime broker account.
 ///
-/// Returns `None` when the account is not currently usable by the
-/// broker (e.g. `PendingSetup`) or when type conversion fails (e.g. the
-/// provider id is not a valid `ExtensionId` and no `owner_extension` is
-/// set).  Returning `None` is **not** an error: the caller logs a
-/// `debug` line and drops the projection.
+/// Returns `None` when type conversion fails (e.g. the provider id is
+/// not a valid `ExtensionId` and no `owner_extension` is set).  Product
+/// auth states that are not runtime-usable still map to a fail-closed
+/// broker row so a previous Active projection cannot survive.
 fn map_auth_to_broker(
     account: &ironclaw_auth::CredentialAccount,
 ) -> Option<ironclaw_secrets::CredentialAccount> {
     let id = ironclaw_secrets::CredentialAccountId::new(account.id.to_string()).ok()?;
     let status = map_status(account.status)?;
     let provider_or_extension_id = pick_extension_id(account)?;
-    let mut secret_handles = Vec::new();
-    if let Some(handle) = account.access_secret.clone() {
-        secret_handles.push(handle);
-    }
-    if let Some(handle) = account.refresh_secret.clone() {
-        secret_handles.push(handle);
-    }
+    let secret_handles = secret_handles_for_status(account, status);
     let redacted_metadata = build_redacted_metadata(account);
     Some(ironclaw_secrets::CredentialAccount {
         scope: account.scope.resource.clone(),
@@ -159,13 +152,25 @@ fn map_status(
     match status {
         A::Configured => Some(B::Active),
         A::Expired | A::RefreshFailed => Some(B::Expired),
-        A::Revoked => Some(B::Revoked),
-        // States below are not yet "broker-usable": the runtime broker
-        // has no equivalent state, and projecting them as Active would
-        // misrepresent reality.  Drop the projection until the account
-        // reaches a usable status.
-        A::Inactive | A::Missing | A::PendingSetup => None,
+        A::Inactive | A::Missing | A::PendingSetup | A::Revoked => Some(B::Revoked),
     }
+}
+
+fn secret_handles_for_status(
+    account: &ironclaw_auth::CredentialAccount,
+    status: ironclaw_secrets::CredentialAccountStatus,
+) -> Vec<ironclaw_host_api::SecretHandle> {
+    if status != ironclaw_secrets::CredentialAccountStatus::Active {
+        return Vec::new();
+    }
+    let mut secret_handles = Vec::new();
+    if let Some(handle) = account.access_secret.clone() {
+        secret_handles.push(handle);
+    }
+    if let Some(handle) = account.refresh_secret.clone() {
+        secret_handles.push(handle);
+    }
+    secret_handles
 }
 
 fn pick_extension_id(account: &ironclaw_auth::CredentialAccount) -> Option<ExtensionId> {
@@ -312,16 +317,22 @@ mod mapper_tests {
     }
 
     #[test]
-    fn drops_unmappable_status_states() {
+    fn maps_unusable_status_states_to_revoked_without_secret_handles() {
         for status in [
             CredentialAccountStatus::Inactive,
             CredentialAccountStatus::Missing,
             CredentialAccountStatus::PendingSetup,
         ] {
             let auth_account = sample_account(status);
+            let broker = map_auth_to_broker(&auth_account).expect("should map fail-closed");
+            assert_eq!(
+                broker.status,
+                ironclaw_secrets::CredentialAccountStatus::Revoked,
+                "status {status:?} must project fail-closed",
+            );
             assert!(
-                map_auth_to_broker(&auth_account).is_none(),
-                "status {status:?} must not project to broker",
+                broker.secret_handles.is_empty(),
+                "status {status:?} must not carry secret handles",
             );
         }
     }

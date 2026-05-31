@@ -196,7 +196,7 @@ Status is mapped on the way in:
 | `Configured` | `Active` |
 | `Expired`, `RefreshFailed` | `Expired` |
 | `Revoked` | `Revoked` |
-| `Inactive`, `Missing`, `PendingSetup` | (not projected — not yet usable) |
+| `Inactive`, `Missing`, `PendingSetup` | `Revoked` (fail-closed tombstone) |
 
 Known gaps tracked under #4238:
 
@@ -211,10 +211,11 @@ Known gaps tracked under #4238:
   `ExtensionId::new`. Grant changes for non-owner extensions are not
   reflected in the projected broker row; a multi-extension shape is the
   follow-up.
-* `SecretCleanupAction::Uninstall` projects the resulting `Revoked` status
-  (rather than removing the broker row) because `CredentialAccountStore`
-  exposes no `delete_account` method. A revoked broker account cannot issue
-  sessions, which matches the UX intent; the row remains visible for audit.
+* `SecretCleanupAction::Uninstall` and product-auth statuses without a runtime
+  broker equivalent project a `Revoked` row (rather than removing the broker
+  row) because `CredentialAccountStore` exposes no `delete_account` method. A
+  revoked broker account cannot issue sessions, which matches the UX intent;
+  the row remains visible for audit.
 
 ---
 

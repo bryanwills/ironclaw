@@ -652,6 +652,27 @@ where
             }
         })
     }
+
+    fn stored_account_entry(
+        &self,
+        account: &CredentialAccount,
+    ) -> Result<Entry, CredentialBrokerError> {
+        let aad = credential_account_aad(&account.scope, &account.id);
+        let (encrypted_payload, key_salt) = self.encrypt_payload(account, &aad)?;
+        let stored = StoredAccount {
+            scope: account.scope.clone(),
+            id: account.id.clone(),
+            encrypted_payload,
+            key_salt,
+            status: account.status,
+            updated_at: account.updated_at,
+        };
+        let body = serialize_credential(&stored)?;
+        Ok(tag_entry_with_tenant(
+            Entry::bytes(body).with_content_type(ContentType::json()),
+            &account.scope,
+        ))
+    }
 }
 
 #[async_trait]
@@ -663,22 +684,8 @@ where
         &self,
         account: CredentialAccount,
     ) -> Result<CredentialAccount, CredentialBrokerError> {
-        let aad = credential_account_aad(&account.scope, &account.id);
-        let (encrypted_payload, key_salt) = self.encrypt_payload(&account, &aad)?;
-        let stored = StoredAccount {
-            scope: account.scope.clone(),
-            id: account.id.clone(),
-            encrypted_payload,
-            key_salt,
-            status: account.status,
-            updated_at: account.updated_at,
-        };
         let path = credential_account_path(&account.scope, &account.id)?;
-        let body = serialize_credential(&stored)?;
-        let entry = tag_entry_with_tenant(
-            Entry::bytes(body).with_content_type(ContentType::json()),
-            &account.scope,
-        );
+        let entry = self.stored_account_entry(&account)?;
         ensure_tenant_id_index_broker(
             &self.filesystem,
             &account.scope,
@@ -691,6 +698,72 @@ where
             .map(|_| ())
             .map_err(fs_to_broker_error)?;
         Ok(account)
+    }
+
+    async fn put_account_if_newer(
+        &self,
+        account: CredentialAccount,
+    ) -> Result<CredentialAccount, CredentialBrokerError> {
+        let path = credential_account_path(&account.scope, &account.id)?;
+        ensure_tenant_id_index_broker(
+            &self.filesystem,
+            &account.scope,
+            &credential_account_root(&account.scope)?,
+        )
+        .await?;
+        for _ in 0..CAS_RETRY_ATTEMPTS {
+            let existing = self
+                .filesystem
+                .get(&account.scope, &path)
+                .await
+                .map_err(fs_to_broker_error)?;
+            let Some(versioned) = existing else {
+                let entry = self.stored_account_entry(&account)?;
+                match put_with_version_fallback(
+                    &self.filesystem,
+                    &account.scope,
+                    &path,
+                    entry,
+                    CasExpectation::Absent,
+                )
+                .await
+                {
+                    Ok(()) => return Ok(account),
+                    Err(FilesystemError::VersionMismatch { .. }) => continue,
+                    Err(error) => return Err(fs_to_broker_error(error)),
+                }
+            };
+            let stored: StoredAccount = deserialize_credential(&versioned.entry.body)?;
+            if !same_scope_owner(&stored.scope, &account.scope) || stored.id != account.id {
+                return Ok(account);
+            }
+            let aad = credential_account_aad(&stored.scope, &stored.id);
+            let existing_account = self.decrypt_payload::<CredentialAccount>(
+                &stored.encrypted_payload,
+                &stored.key_salt,
+                &aad,
+            )?;
+            if existing_account.updated_at >= account.updated_at {
+                return Ok(existing_account);
+            }
+            let entry = self.stored_account_entry(&account)?;
+            match put_with_version_fallback(
+                &self.filesystem,
+                &account.scope,
+                &path,
+                entry,
+                CasExpectation::Version(versioned.version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(account),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(fs_to_broker_error(error)),
+            }
+        }
+        Err(CredentialBrokerError::BrokerUnavailable {
+            reason: "credential account projection retry limit exceeded".to_string(),
+        })
     }
 
     async fn get_account(
@@ -1981,6 +2054,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(limit_error.is_use_limit_exceeded());
+    }
+
+    #[tokio::test]
+    async fn filesystem_credential_broker_conditional_account_put_rejects_stale_update() {
+        let fs = Arc::new(InMemoryBackend::new());
+        let broker = FilesystemCredentialBroker::new(default_scoped_fs(fs), test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let account_id = CredentialAccountId::new("openai_cas_projection").unwrap();
+        let base = sample_account(
+            scope.clone(),
+            account_id.clone(),
+            SecretHandle::new("openai_key").unwrap(),
+        );
+        let mut newer = base.clone();
+        newer.status = CredentialAccountStatus::Revoked;
+        newer.secret_handles.clear();
+        newer.updated_at = base.updated_at + chrono::Duration::seconds(1);
+
+        broker.put_account_if_newer(newer.clone()).await.unwrap();
+        broker.put_account_if_newer(base).await.unwrap();
+
+        let fetched = broker
+            .get_account(&scope, &account_id)
+            .await
+            .unwrap()
+            .expect("account persisted");
+        assert_eq!(fetched.status, CredentialAccountStatus::Revoked);
+        assert!(fetched.secret_handles.is_empty());
+        assert_eq!(fetched.updated_at, newer.updated_at);
     }
 
     #[tokio::test]
