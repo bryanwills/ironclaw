@@ -656,6 +656,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     );
     restore_extension_lifecycle_state(
         &available_extensions,
+        &extension_filesystem,
         &extension_installation_store,
         &extension_lifecycle_service,
         &active_extensions,
@@ -663,6 +664,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .await
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
+    })?;
+    services = services.try_with_default_wasm_runtime().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev WASM runtime could not be initialized: {error}"),
+        }
     })?;
     let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
         extension_filesystem,
@@ -2200,6 +2206,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_github_installs_activates_and_reaches_auth_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-github-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let github_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+
+        extension_management
+            .install(github_ref.clone())
+            .await
+            .expect("install GitHub");
+        extension_management
+            .activate(github_ref)
+            .await
+            .expect("activate GitHub");
+
+        let capability_id = CapabilityId::new("github.search_issues").unwrap();
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                github_context(capability_id.as_str()),
+                capability_id.clone(),
+                ResourceEstimate::default(),
+                serde_json::json!({
+                    "query": "repo:nearai/ironclaw is:issue",
+                    "limit": 1
+                }),
+                trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
+            panic!("expected missing GitHub token to open auth gate, got {outcome:?}");
+        };
+        assert_eq!(gate.capability_id, capability_id);
+    }
+
+    #[tokio::test]
     async fn local_dev_web_access_installs_activates_and_dispatches_through_host_runtime() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
@@ -2686,6 +2742,51 @@ mod tests {
             MountView::new(Vec::new()).expect("valid empty mount view"),
         )
         .expect("valid execution context")
+    }
+
+    fn github_context(capability_id: &str) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::Wasm,
+            TrustClass::Sandbox,
+            CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                    grantee: Principal::Extension(extension_id),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: github_allowed_effects(),
+                        mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                        network: github_network_policy(),
+                        secrets: vec![SecretHandle::new("github_runtime_token").unwrap()],
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            },
+            MountView::new(Vec::new()).expect("valid empty mount view"),
+        )
+        .expect("valid execution context")
+    }
+
+    fn github_allowed_effects() -> Vec<EffectKind> {
+        vec![EffectKind::Network, EffectKind::UseSecret]
+    }
+
+    fn github_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.github.com".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
     }
 
     fn web_access_context(capability_id: &str) -> ExecutionContext {

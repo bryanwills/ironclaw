@@ -261,6 +261,34 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
 }
 
 #[tokio::test]
+async fn bundled_github_wasm_builds_query_from_structured_search_fields() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
+    }));
+    let execution = execute_bundled_github_wasm(
+        "github.search_issues",
+        json!({
+            "repo": "nearai/ironclaw",
+            "author": "serrrfirat",
+            "type": "issue",
+            "state": "open",
+            "limit": 1
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(execution.error, None);
+    assert_single_wasm_request(
+        &http,
+        "GET",
+        "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20author%3Aserrrfirat%20state%3Aopen%20is%3Aissue&per_page=1",
+        None,
+    );
+}
+
+#[tokio::test]
 async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
     let cases = [
         (
@@ -297,7 +325,7 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
                 headers_json: "{}".to_string(),
                 body: br#"{"message":"bad credentials ghp_fake_fixture_token"}"#.to_vec(),
             }),
-            "github_api_error_status_403",
+            "github_api_forbidden",
         ),
         (
             RecordingWasmHostHttp::ok(WasmHttpResponse {

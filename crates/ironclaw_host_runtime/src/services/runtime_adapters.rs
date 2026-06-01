@@ -595,14 +595,20 @@ where
             });
         }
     };
-    if execution.error.is_some() {
+    if let Some(error) = execution.error {
         account_or_release_failed_wasm_execution(
             request.governor,
             reservation.id,
             &execution.usage,
         )?;
+        if error == "AuthRequired" {
+            return Err(DispatchError::AuthRequired {
+                capability: request.capability_id.clone(),
+                required_secrets: Vec::new(),
+            });
+        }
         return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::OperationFailed,
+            kind: wasm_guest_error_kind(&error),
         });
     }
     let Some(output_json) = execution.output_json else {
@@ -765,6 +771,22 @@ fn dispatch_error_for_runtime(
         RuntimeKind::Script => DispatchError::Script { kind },
         RuntimeKind::Wasm => DispatchError::Wasm { kind },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty { kind },
+    }
+}
+
+fn wasm_guest_error_kind(error: &str) -> RuntimeDispatchErrorKind {
+    if error.starts_with("invalid_") {
+        return RuntimeDispatchErrorKind::InputEncode;
+    }
+    match error {
+        "missing_invocation_context" | "unsupported_github_capability" => {
+            RuntimeDispatchErrorKind::InputEncode
+        }
+        "github_api_body_limit" => RuntimeDispatchErrorKind::OutputTooLarge,
+        "github_api_timeout" => RuntimeDispatchErrorKind::Executor,
+        "github_api_egress_denied" => RuntimeDispatchErrorKind::NetworkDenied,
+        "github_api_forbidden" | "github_api_rate_limited" => RuntimeDispatchErrorKind::Client,
+        _ => RuntimeDispatchErrorKind::OperationFailed,
     }
 }
 
