@@ -35,6 +35,19 @@
       { "config_key": "app_secret", "secret_name": "feishu_app_secret" },
       { "config_key": "verification_token", "secret_name": "feishu_verification_token" }
     ],
+    "required_fields": [
+      {
+        "name": "connection_mode",
+        "prompt": "Message receiving mode",
+        "optional": true,
+        "input_type": "select",
+        "default": "websocket",
+        "options": [
+          { "value": "websocket", "label": "Long connection (recommended)" },
+          { "value": "webhook", "label": "Webhook fallback" }
+        ]
+      }
+    ],
     "setup_url": "https://open.feishu.cn/app"
   },
   "capabilities": {

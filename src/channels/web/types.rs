@@ -573,6 +573,12 @@ pub struct SetupFieldInfo {
     pub provided: bool,
     /// Input type for web UI rendering.
     pub input_type: crate::tools::wasm::ToolSetupFieldInputType,
+    /// Current or default value for non-secret setup fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Fixed selectable values for this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<crate::tools::wasm::ToolSetupFieldOption>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1641,6 +1647,8 @@ mod tests {
             optional: false,
             provided: true,
             input_type: crate::tools::wasm::ToolSetupFieldInputType::Password,
+            value: None,
+            options: Vec::new(),
         };
 
         let json = serde_json::to_value(field).unwrap();

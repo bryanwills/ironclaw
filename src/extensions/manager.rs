@@ -7390,6 +7390,11 @@ impl ExtensionManager {
                 }
 
                 let mut secrets = Vec::new();
+                let mut fields = Vec::new();
+                let saved_fields = self
+                    .load_tool_setup_fields_for(name, user_id)
+                    .await
+                    .unwrap_or_default();
                 for secret in &cap_file.setup.required_secrets {
                     let provided = self
                         .secrets
@@ -7405,11 +7410,26 @@ impl ExtensionManager {
                         auto_generate: secret.auto_generate.is_some(),
                     });
                 }
-                // NOTE: required_fields is not yet supported for WasmChannel;
-                // only WasmTool extensions surface setup fields in the modal.
+                for field in &cap_file.setup.required_fields {
+                    let provided = self
+                        .is_tool_setup_field_provided_for(name, user_id, field, &saved_fields)
+                        .await;
+                    fields.push(crate::channels::web::types::SetupFieldInfo {
+                        name: field.name.clone(),
+                        prompt: field.prompt.clone(),
+                        optional: field.optional,
+                        provided,
+                        input_type: field.input_type,
+                        value: saved_fields
+                            .get(&field.name)
+                            .cloned()
+                            .or_else(|| field.default.clone()),
+                        options: field.options.clone(),
+                    });
+                }
                 Ok(ExtensionSetupSchema {
                     secrets,
-                    fields: Vec::new(),
+                    fields,
                     interactive_login: None,
                 })
             }
@@ -7463,6 +7483,11 @@ impl ExtensionManager {
                             optional: field.optional,
                             provided,
                             input_type: field.input_type,
+                            value: saved_fields
+                                .get(&field.name)
+                                .cloned()
+                                .or_else(|| field.default.clone()),
+                            options: field.options.clone(),
                         });
                     }
                 }
@@ -7504,6 +7529,8 @@ impl ExtensionManager {
                         optional: true,
                         provided: current_url.is_some(),
                         input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+                        value: current_url,
+                        options: Vec::new(),
                     }],
                     interactive_login: None,
                 })
@@ -7774,9 +7801,10 @@ impl ExtensionManager {
                     .iter()
                     .map(|s| s.name.clone())
                     .collect();
+                let required_fields = cap_file.setup.required_fields.clone();
                 channel_secret_defs = cap_file.setup.required_secrets.clone();
                 channel_validation_endpoint = cap_file.setup.validation_endpoint.clone();
-                (names, Vec::new())
+                (names, required_fields)
             }
             ExtensionKind::WasmTool => {
                 let cap_file = self.load_tool_capabilities(&name).await.ok_or_else(|| {
@@ -7815,6 +7843,8 @@ impl ExtensionManager {
                     optional: true,
                     setting_path: Some(format!("extensions.{name}.relay_url")),
                     input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+                    default: None,
+                    options: Vec::new(),
                 }];
                 (std::collections::HashSet::new(), relay_fields)
             }
@@ -7994,9 +8024,24 @@ impl ExtensionManager {
                         if let Some(store) = self.settings_store() {
                             let _ = store.delete_setting(&self.user_id, setting_path).await;
                         }
+                    } else if kind == ExtensionKind::WasmChannel
+                        && let Some(store) = self.settings_store()
+                    {
+                        let override_key =
+                            format!("channels.wasm_channel_runtime_overrides.{name}:{field_name}");
+                        let _ = store.delete_setting(&self.user_id, &override_key).await;
                     }
                 }
                 continue;
+            }
+            if let Some(def) = field_def
+                && !def.options.is_empty()
+                && !def.options.iter().any(|option| option.value == trimmed)
+            {
+                return Err(ExtensionError::Other(format!(
+                    "Invalid value '{}' for field '{}' in extension '{}'",
+                    trimmed, field_name, name
+                )));
             }
 
             stored_fields.insert(field_name.clone(), trimmed.to_string());
@@ -8021,6 +8066,34 @@ impl ExtensionManager {
                         ExtensionError::Other(format!(
                             "Failed to set '{}' for extension '{}': {}",
                             setting_path, name, e
+                        ))
+                    })?;
+            } else if kind == ExtensionKind::WasmChannel {
+                if is_reserved_wasm_runtime_config_key(field_name) {
+                    return Err(ExtensionError::Other(format!(
+                        "Field '{}' for extension '{}' targets a reserved channel runtime key",
+                        field_name, name
+                    )));
+                }
+                let store = self.settings_store().ok_or_else(|| {
+                    ExtensionError::Other(
+                        "Settings store unavailable for channel setup field persistence"
+                            .to_string(),
+                    )
+                })?;
+                let override_key =
+                    format!("channels.wasm_channel_runtime_overrides.{name}:{field_name}");
+                store
+                    .set_setting(
+                        &self.user_id,
+                        &override_key,
+                        &serde_json::Value::String(trimmed.to_string()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        ExtensionError::Other(format!(
+                            "Failed to set '{}' for extension '{}': {}",
+                            override_key, name, e
                         ))
                     })?;
             }
@@ -10371,6 +10444,8 @@ mod tests {
             optional: false,
             input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
             setting_path: Some("nearai.session_token".to_string()),
+            default: None,
+            options: Vec::new(),
         };
 
         let provided = mgr
@@ -10489,6 +10564,144 @@ mod tests {
                 .await
                 .expect("secret existence check"),
             "validation failure must not persist the submitted token"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wasm_channel_setup_fields_expose_and_persist_runtime_override() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "feishu",
+            r#"{
+                "version": "0.1.0",
+                "wit_version": "0.3.0",
+                "type": "channel",
+                "name": "feishu",
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "connection_mode",
+                            "prompt": "Message receiving mode",
+                            "optional": true,
+                            "input_type": "select",
+                            "default": "websocket",
+                            "options": [
+                                { "value": "websocket", "label": "Long connection" },
+                                { "value": "webhook", "label": "Webhook" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let tools_dir = dir.path().join("tools");
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+
+        let setup = mgr
+            .get_setup_schema("feishu", "test")
+            .await
+            .expect("load setup schema");
+        assert_eq!(setup.fields.len(), 1);
+        assert_eq!(setup.fields[0].name, "connection_mode");
+        assert_eq!(
+            setup.fields[0].input_type,
+            crate::tools::wasm::ToolSetupFieldInputType::Select
+        );
+        assert_eq!(setup.fields[0].value.as_deref(), Some("websocket"));
+        assert_eq!(setup.fields[0].options.len(), 2);
+
+        let fields = std::collections::HashMap::from([(
+            "connection_mode".to_string(),
+            "webhook".to_string(),
+        )]);
+        let result = mgr
+            .configure("feishu", &std::collections::HashMap::new(), &fields, "test")
+            .await
+            .expect("save channel setup field");
+        assert!(
+            !result.activated,
+            "test channel has no runtime and should not activate"
+        );
+
+        assert_eq!(
+            store
+                .get_setting(
+                    "test",
+                    "channels.wasm_channel_runtime_overrides.feishu:connection_mode"
+                )
+                .await
+                .expect("get channel runtime override"),
+            Some(serde_json::json!("webhook"))
+        );
+
+        let setup = mgr
+            .get_setup_schema("feishu", "test")
+            .await
+            .expect("reload setup schema");
+        assert!(setup.fields[0].provided);
+        assert_eq!(setup.fields[0].value.as_deref(), Some("webhook"));
+    }
+
+    #[tokio::test]
+    async fn test_configure_wasm_channel_setup_field_rejects_unknown_option() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "feishu",
+            r#"{
+                "version": "0.1.0",
+                "wit_version": "0.3.0",
+                "type": "channel",
+                "name": "feishu",
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "connection_mode",
+                            "prompt": "Message receiving mode",
+                            "optional": true,
+                            "input_type": "select",
+                            "options": [
+                                { "value": "websocket" },
+                                { "value": "webhook" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let tools_dir = dir.path().join("tools");
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let fields = std::collections::HashMap::from([(
+            "connection_mode".to_string(),
+            "polling".to_string(),
+        )]);
+
+        let err = match mgr
+            .configure("feishu", &std::collections::HashMap::new(), &fields, "test")
+            .await
+        {
+            Ok(_) => panic!("unknown select option should fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("Invalid value"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            store
+                .get_setting(
+                    "test",
+                    "channels.wasm_channel_runtime_overrides.feishu:connection_mode"
+                )
+                .await
+                .expect("get channel runtime override"),
+            None
         );
     }
 

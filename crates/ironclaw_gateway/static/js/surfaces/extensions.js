@@ -680,19 +680,38 @@ function createConfigureField(item, kind, optionalGroup) {
   const inputRow = document.createElement('div');
   inputRow.className = 'configure-input-row';
 
-  const input = document.createElement('input');
-  input.type = kind === 'field' && item.input_type !== 'password' ? 'text' : 'password';
+  const hasOptions = Array.isArray(item.options) && item.options.length > 0;
+  const input = hasOptions || item.input_type === 'select'
+    ? document.createElement('select')
+    : document.createElement('input');
   input.name = item.name;
-  const placeholderKey = item.provided
-    ? 'config.alreadySet'
-    : item.optional
-      ? 'config.optionalPlaceholder'
-      : 'config.requiredPlaceholder';
-  input.setAttribute('data-configure-placeholder', placeholderKey);
-  input.placeholder = I18n.t(placeholderKey);
-  // Do not copy extension-provided regexes into HTML pattern. Browser regex
-  // engines can backtrack catastrophically; server-side validation is the
-  // security boundary for manifest-provided secret.validation patterns.
+  if (input.tagName === 'SELECT') {
+    input.className = 'configure-select';
+    const selectedValue = item.value == null ? '' : String(item.value);
+    (item.options || []).forEach(function(option) {
+      const opt = document.createElement('option');
+      opt.value = String(option.value || '');
+      opt.textContent = option.label || option.value || '';
+      if (opt.value === selectedValue) opt.selected = true;
+      input.appendChild(opt);
+    });
+    if (!selectedValue && input.options.length > 0) {
+      input.options[0].selected = true;
+    }
+  } else {
+    input.type = kind === 'field' && item.input_type !== 'password' ? 'text' : 'password';
+    input.value = item.value || '';
+    const placeholderKey = item.provided
+      ? 'config.alreadySet'
+      : item.optional
+        ? 'config.optionalPlaceholder'
+        : 'config.requiredPlaceholder';
+    input.setAttribute('data-configure-placeholder', placeholderKey);
+    input.placeholder = I18n.t(placeholderKey);
+    // Do not copy extension-provided regexes into HTML pattern. Browser regex
+    // engines can backtrack catastrophically; server-side validation is the
+    // security boundary for manifest-provided secret.validation patterns.
+  }
   inputRow.appendChild(input);
 
   if (item.provided) {

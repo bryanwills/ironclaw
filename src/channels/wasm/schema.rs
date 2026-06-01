@@ -485,6 +485,10 @@ pub struct SetupSchema {
     #[serde(default)]
     pub required_secrets: Vec<SecretSetupSchema>,
 
+    /// Non-secret fields the user can configure during setup.
+    #[serde(default)]
+    pub required_fields: Vec<crate::tools::wasm::ToolFieldSetupSchema>,
+
     /// Optional mapping from secret names to runtime config keys.
     ///
     /// Use this when a channel needs raw secret values in its runtime config
@@ -920,6 +924,18 @@ mod tests {
                         "auto_generate": { "length": 64 }
                     }
                 ],
+                "required_fields": [
+                    {
+                        "name": "connection_mode",
+                        "prompt": "Inbound delivery mode",
+                        "input_type": "select",
+                        "default": "websocket",
+                        "options": [
+                            { "value": "websocket", "label": "Long connection" },
+                            { "value": "webhook", "label": "Webhook" }
+                        ]
+                    }
+                ],
                 "secret_config_mappings": [
                     {
                         "config_key": "bot_token",
@@ -932,6 +948,17 @@ mod tests {
 
         let file = ChannelCapabilitiesFile::from_json(json).unwrap();
         assert_eq!(file.setup.required_secrets.len(), 2);
+        assert_eq!(file.setup.required_fields.len(), 1);
+        assert_eq!(file.setup.required_fields[0].name, "connection_mode");
+        assert_eq!(
+            file.setup.required_fields[0].input_type,
+            crate::tools::wasm::ToolSetupFieldInputType::Select
+        );
+        assert_eq!(
+            file.setup.required_fields[0].default.as_deref(),
+            Some("websocket")
+        );
+        assert_eq!(file.setup.required_fields[0].options.len(), 2);
         assert_eq!(file.setup.secret_config_mappings.len(), 1);
         assert_eq!(file.setup.secret_config_mappings[0].config_key, "bot_token");
         assert_eq!(
