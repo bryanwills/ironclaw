@@ -83,6 +83,8 @@ struct PendingAuthKey {
     name: String,
 }
 
+const WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY: &str = "channels.wasm_channel_runtime_overrides";
+
 impl PendingAuthKey {
     fn new(user_id: &str, name: &str) -> Self {
         Self {
@@ -118,6 +120,10 @@ impl SecretCleanupPlan {
 
 fn oauth_refresh_secret_name(secret_name: &str) -> String {
     format!("{}_refresh_token", secret_name.to_lowercase())
+}
+
+fn wasm_channel_runtime_override_key(channel_name: &str, config_key: &str) -> String {
+    format!("{channel_name}:{config_key}")
 }
 
 fn is_reserved_wasm_runtime_config_key(key: &str) -> bool {
@@ -1122,33 +1128,26 @@ impl ExtensionManager {
         let mut overrides = HashMap::new();
 
         if let Some(store) = self.settings_store() {
-            let prefix = format!("channels.wasm_channel_runtime_overrides.{name}:");
-            match store.get_all_settings(&self.user_id).await {
-                Ok(settings) => {
-                    for (setting_key, value) in settings {
-                        let Some(config_key) = setting_key.strip_prefix(&prefix) else {
-                            continue;
-                        };
-                        let config_key = config_key.trim();
-                        if config_key.is_empty() {
-                            continue;
-                        }
-                        if is_reserved_wasm_runtime_config_key(config_key) {
-                            tracing::warn!(
-                                channel = %name,
-                                key = %config_key,
-                                "Ignoring reserved wasm runtime config override key"
-                            );
-                            continue;
-                        }
-                        overrides.insert(config_key.to_string(), value);
-                    }
+            let stored_overrides =
+                Self::load_wasm_channel_runtime_override_map_for_user(store, &self.user_id).await?;
+            let prefix = format!("{name}:");
+            for (setting_key, value) in stored_overrides {
+                let Some(config_key) = setting_key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let config_key = config_key.trim();
+                if config_key.is_empty() {
+                    continue;
                 }
-                Err(e) => {
-                    return Err(ExtensionError::Config(format!(
-                        "Failed to load persisted runtime config overrides for channel '{name}': {e}"
-                    )));
+                if is_reserved_wasm_runtime_config_key(config_key) {
+                    tracing::warn!(
+                        channel = %name,
+                        key = %config_key,
+                        "Ignoring reserved wasm runtime config override key"
+                    );
+                    continue;
                 }
+                overrides.insert(config_key.to_string(), value);
             }
         }
 
@@ -1188,6 +1187,130 @@ impl ExtensionManager {
         }
 
         Ok(overrides)
+    }
+
+    async fn load_wasm_channel_runtime_override_map_for_user(
+        store: &dyn crate::db::SettingsStore,
+        user_id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, ExtensionError> {
+        let mut overrides = match store
+            .get_setting(user_id, WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY)
+            .await
+        {
+            Ok(Some(serde_json::Value::Object(map))) => map,
+            Ok(Some(serde_json::Value::Null)) | Ok(None) => serde_json::Map::new(),
+            Ok(Some(other)) => {
+                return Err(ExtensionError::Config(format!(
+                    "Expected '{WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY}' to be an object, got {other}"
+                )));
+            }
+            Err(e) => {
+                return Err(ExtensionError::Config(format!(
+                    "Failed to load persisted wasm channel runtime overrides: {e}"
+                )));
+            }
+        };
+
+        let flattened_prefix = format!("{WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY}.");
+        match store.get_all_settings(user_id).await {
+            Ok(settings) => {
+                for (setting_key, value) in settings {
+                    let Some(map_key) = setting_key.strip_prefix(&flattened_prefix) else {
+                        continue;
+                    };
+                    let map_key = map_key.trim();
+                    if map_key.is_empty() {
+                        continue;
+                    }
+                    overrides.entry(map_key.to_string()).or_insert(value);
+                }
+            }
+            Err(e) => {
+                return Err(ExtensionError::Config(format!(
+                    "Failed to load flattened wasm channel runtime overrides: {e}"
+                )));
+            }
+        }
+
+        Ok(overrides)
+    }
+
+    async fn set_wasm_channel_runtime_override(
+        &self,
+        name: &str,
+        config_key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), ExtensionError> {
+        if is_reserved_wasm_runtime_config_key(config_key) {
+            return Err(ExtensionError::Other(format!(
+                "Field '{}' for extension '{}' targets a reserved channel runtime key",
+                config_key, name
+            )));
+        }
+        let store = self.settings_store().ok_or_else(|| {
+            ExtensionError::Other(
+                "Settings store unavailable for channel setup field persistence".to_string(),
+            )
+        })?;
+        let mut overrides =
+            Self::load_wasm_channel_runtime_override_map_for_user(store, &self.user_id).await?;
+        let map_key = wasm_channel_runtime_override_key(name, config_key);
+        overrides.insert(map_key.clone(), value);
+        store
+            .set_setting(
+                &self.user_id,
+                WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY,
+                &serde_json::Value::Object(overrides),
+            )
+            .await
+            .map_err(|e| {
+                ExtensionError::Other(format!(
+                    "Failed to set '{}' for extension '{}': {}",
+                    WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY, name, e
+                ))
+            })?;
+
+        let stale_flattened_key = format!("{WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY}.{map_key}");
+        let _ = store
+            .delete_setting(&self.user_id, &stale_flattened_key)
+            .await;
+        Ok(())
+    }
+
+    async fn delete_wasm_channel_runtime_override(
+        &self,
+        name: &str,
+        config_key: &str,
+    ) -> Result<(), ExtensionError> {
+        let Some(store) = self.settings_store() else {
+            return Ok(());
+        };
+        let mut overrides =
+            Self::load_wasm_channel_runtime_override_map_for_user(store, &self.user_id).await?;
+        let map_key = wasm_channel_runtime_override_key(name, config_key);
+        let removed = overrides.remove(&map_key).is_some();
+
+        let stale_flattened_key = format!("{WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY}.{map_key}");
+        let _ = store
+            .delete_setting(&self.user_id, &stale_flattened_key)
+            .await;
+
+        if removed {
+            store
+                .set_setting(
+                    &self.user_id,
+                    WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY,
+                    &serde_json::Value::Object(overrides),
+                )
+                .await
+                .map_err(|e| {
+                    ExtensionError::Other(format!(
+                        "Failed to clear '{}' for extension '{}': {}",
+                        WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY, name, e
+                    ))
+                })?;
+        }
+        Ok(())
     }
 
     async fn load_wechat_bound_user_id(&self) -> Option<String> {
@@ -8025,11 +8148,16 @@ impl ExtensionManager {
                             let _ = store.delete_setting(&self.user_id, setting_path).await;
                         }
                     } else if kind == ExtensionKind::WasmChannel
-                        && let Some(store) = self.settings_store()
+                        && let Err(error) = self
+                            .delete_wasm_channel_runtime_override(&name, field_name)
+                            .await
                     {
-                        let override_key =
-                            format!("channels.wasm_channel_runtime_overrides.{name}:{field_name}");
-                        let _ = store.delete_setting(&self.user_id, &override_key).await;
+                        tracing::debug!(
+                            extension = %name,
+                            field = %field_name,
+                            error = %error,
+                            "Failed to clear wasm channel runtime override"
+                        );
                     }
                 }
                 continue;
@@ -8069,33 +8197,12 @@ impl ExtensionManager {
                         ))
                     })?;
             } else if kind == ExtensionKind::WasmChannel {
-                if is_reserved_wasm_runtime_config_key(field_name) {
-                    return Err(ExtensionError::Other(format!(
-                        "Field '{}' for extension '{}' targets a reserved channel runtime key",
-                        field_name, name
-                    )));
-                }
-                let store = self.settings_store().ok_or_else(|| {
-                    ExtensionError::Other(
-                        "Settings store unavailable for channel setup field persistence"
-                            .to_string(),
-                    )
-                })?;
-                let override_key =
-                    format!("channels.wasm_channel_runtime_overrides.{name}:{field_name}");
-                store
-                    .set_setting(
-                        &self.user_id,
-                        &override_key,
-                        &serde_json::Value::String(trimmed.to_string()),
-                    )
-                    .await
-                    .map_err(|e| {
-                        ExtensionError::Other(format!(
-                            "Failed to set '{}' for extension '{}': {}",
-                            override_key, name, e
-                        ))
-                    })?;
+                self.set_wasm_channel_runtime_override(
+                    &name,
+                    field_name,
+                    serde_json::Value::String(trimmed.to_string()),
+                )
+                .await?;
             }
         }
 
@@ -10626,6 +10733,15 @@ mod tests {
             "test channel has no runtime and should not activate"
         );
 
+        let saved_overrides = store
+            .get_setting("test", super::WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY)
+            .await
+            .expect("get channel runtime overrides")
+            .expect("runtime overrides should be persisted");
+        assert_eq!(
+            saved_overrides.get("feishu:connection_mode"),
+            Some(&serde_json::json!("webhook"))
+        );
         assert_eq!(
             store
                 .get_setting(
@@ -10633,8 +10749,17 @@ mod tests {
                     "channels.wasm_channel_runtime_overrides.feishu:connection_mode"
                 )
                 .await
-                .expect("get channel runtime override"),
-            Some(serde_json::json!("webhook"))
+                .expect("get stale flattened runtime override"),
+            None
+        );
+
+        let runtime_overrides = mgr
+            .load_channel_runtime_config_overrides("feishu", "test")
+            .await
+            .expect("load runtime overrides");
+        assert_eq!(
+            runtime_overrides.get("connection_mode"),
+            Some(&serde_json::json!("webhook"))
         );
 
         let setup = mgr
@@ -10692,6 +10817,13 @@ mod tests {
         assert!(
             err.to_string().contains("Invalid value"),
             "unexpected error: {err}"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", super::WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY)
+                .await
+                .expect("get channel runtime overrides"),
+            None
         );
         assert_eq!(
             store

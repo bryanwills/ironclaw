@@ -498,6 +498,11 @@ function submitInlineChannelSetup(name, fields, container) {
     body: { secrets, fields: {} },
   }).then((res) => {
     if (!res.success) {
+      if (isSavedConfigurationResponse(res)) {
+        showToast(res.message || 'Configuration saved', 'warning');
+        refreshCurrentSettingsTab();
+        return;
+      }
       showToast(res.message || 'Configuration failed', 'error');
       buttons.forEach((btn) => { btn.disabled = false; });
       return;
@@ -618,6 +623,17 @@ function setupFieldLabel(item) {
   return translateOrFallback('setup.secret.' + item.name, fallback || item.name);
 }
 
+function isFeishuVerificationToken(name, item) {
+  return name === 'feishu' && item && item.name === 'feishu_verification_token';
+}
+
+function isSavedConfigurationResponse(res) {
+  return !!res
+    && res.activated === false
+    && typeof res.message === 'string'
+    && /^Configuration saved\b/.test(res.message);
+}
+
 function updateConfigureModalI18n(root) {
   const scope = root || document;
   scope.querySelectorAll('[data-configure-label-name]').forEach(function(label) {
@@ -736,11 +752,15 @@ function createConfigureField(item, kind, optionalGroup) {
     field: {
       kind: kind,
       name: item.name,
+      node: field,
       input: input,
       optional: !!item.optional,
       provided: !!item.provided,
       autoGenerate: !!item.auto_generate,
-      prompt: item.prompt || item.name
+      prompt: item.prompt || item.name,
+      visibleWhen: item.visible_when || null,
+      requiredWhenVisible: !!item.required_when_visible,
+      hidden: false
     }
   };
 }
@@ -757,6 +777,34 @@ function appendConfigureFieldGroup(form, fields, items, kind, optionalGroup) {
     form.appendChild(built.node);
     fields.push(built.field);
   }
+}
+
+function applyConfigureFieldConditions(fields) {
+  for (const field of fields) {
+    if (!field.visibleWhen) continue;
+    const controller = fields.find(function(candidate) {
+      return candidate.name === field.visibleWhen.name;
+    });
+    const visible = !!controller && controller.input.value === field.visibleWhen.value;
+    field.hidden = !visible;
+    field.node.hidden = !visible;
+    field.input.disabled = !visible;
+    field.input.classList.remove('configure-input-invalid');
+  }
+}
+
+function wireConfigureFieldConditions(fields) {
+  const controllers = new Set();
+  for (const field of fields) {
+    if (field.visibleWhen) controllers.add(field.visibleWhen.name);
+  }
+  fields.forEach(function(field) {
+    if (!controllers.has(field.name)) return;
+    field.input.addEventListener('change', function() {
+      applyConfigureFieldConditions(fields);
+    });
+  });
+  applyConfigureFieldConditions(fields);
 }
 
 window.addEventListener('ironclaw:language-changed', function() {
@@ -816,12 +864,27 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin, onbo
   form.className = 'configure-form';
 
   const fields = [];
-  const requiredSecrets = secrets.filter((secret) => !secret.optional);
-  const optionalSecrets = secrets.filter((secret) => secret.optional);
+  const conditionalWebhookSecrets = [];
+  const requiredSecrets = [];
+  const optionalSecrets = [];
+  secrets.forEach(function(secret) {
+    if (isFeishuVerificationToken(name, secret)) {
+      conditionalWebhookSecrets.push(Object.assign({}, secret, {
+        optional: false,
+        visible_when: { name: 'connection_mode', value: 'webhook' },
+        required_when_visible: true
+      }));
+    } else if (secret.optional) {
+      optionalSecrets.push(secret);
+    } else {
+      requiredSecrets.push(secret);
+    }
+  });
   const requiredSetupFields = setupFields.filter((field) => !field.optional);
   const optionalSetupFields = setupFields.filter((field) => field.optional);
 
   appendConfigureFieldGroup(form, fields, requiredSecrets, 'secret', false);
+  appendConfigureFieldGroup(form, fields, conditionalWebhookSecrets, 'secret', false);
   appendConfigureFieldGroup(form, fields, requiredSetupFields, 'field', false);
 
   const optionalCount = optionalSecrets.length + optionalSetupFields.length;
@@ -841,6 +904,7 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin, onbo
     optionalDetails.appendChild(optionalBody);
     form.appendChild(optionalDetails);
   }
+  wireConfigureFieldConditions(fields);
 
   if (fields.length > 0) {
     modal.appendChild(form);
@@ -1139,8 +1203,10 @@ function submitConfigureModal(name, fields, options) {
 
   for (const f of fields) {
     f.input.classList.remove('configure-input-invalid');
+    if (f.hidden) continue;
     const value = f.input.value.trim();
-    const missingRequired = !f.optional && !f.provided && !f.autoGenerate && !value;
+    const required = f.requiredWhenVisible || !f.optional;
+    const missingRequired = required && !f.provided && !f.autoGenerate && !value;
     if (missingRequired) {
       const message = I18n.t('config.requiredFieldMissing', { name: setupFieldLabel(f) });
       f.input.classList.add('configure-input-invalid');
@@ -1162,6 +1228,7 @@ function submitConfigureModal(name, fields, options) {
   }
 
   for (const f of fields) {
+    if (f.hidden) continue;
     const value = f.input.value.trim();
     if (!value) {
       continue;
@@ -1208,6 +1275,11 @@ function submitConfigureModal(name, fields, options) {
         }
         // For non-OAuth success: the server always broadcasts onboarding_state SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
+      } else if (isSavedConfigurationResponse(res)) {
+        if (overlay) overlay.removeAttribute('data-auth-flow');
+        closeConfigureModal();
+        showToast(res.message || 'Configuration saved', 'warning');
+        refreshCurrentSettingsTab();
       } else {
         // Keep modal open so the user can correct their input and retry.
         btns.forEach(function(b) { b.disabled = false; });
