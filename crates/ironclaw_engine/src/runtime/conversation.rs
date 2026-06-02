@@ -16,7 +16,7 @@ use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::store::Store;
 use crate::types::conversation::{ConversationEntry, ConversationId, ConversationSurface};
 use crate::types::error::EngineError;
-use crate::types::message::ThreadMessage;
+use crate::types::message::{MessageContentPart, ThreadMessage};
 use crate::types::project::ProjectId;
 use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
 
@@ -24,6 +24,17 @@ use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
 enum ActiveForeground {
     Running(ThreadId),
     Resumable(ThreadId),
+}
+
+fn user_message_with_content_parts(
+    content: &str,
+    content_parts: &[MessageContentPart],
+) -> ThreadMessage {
+    if content_parts.is_empty() {
+        ThreadMessage::user(content)
+    } else {
+        ThreadMessage::user_with_content_parts(content, content_parts.to_vec())
+    }
 }
 
 /// Manages conversation surfaces and routes messages to threads.
@@ -220,6 +231,33 @@ impl ConversationManager {
         user_timezone: Option<&str>,
         extra_initial_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<ThreadId, EngineError> {
+        self.handle_user_message_with_content_parts(
+            conversation_id,
+            content,
+            Vec::new(),
+            project_id,
+            user_id,
+            thread_config,
+            user_timezone,
+            extra_initial_metadata,
+        )
+        .await
+    }
+
+    /// Like [`Self::handle_user_message`], but carries transient multimodal
+    /// parts for the current user turn into the engine's LLM request.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_user_message_with_content_parts(
+        &self,
+        conversation_id: ConversationId,
+        content: &str,
+        content_parts: Vec<MessageContentPart>,
+        project_id: ProjectId,
+        user_id: &str,
+        thread_config: ThreadConfig,
+        user_timezone: Option<&str>,
+        extra_initial_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
 
@@ -255,7 +293,11 @@ impl ConversationManager {
                 // Updating the persisted record here would not affect the live
                 // step. Rare in practice; defer to a follow-up if needed.
                 self.thread_manager
-                    .inject_message(thread_id, user_id, ThreadMessage::user(content))
+                    .inject_message(
+                        thread_id,
+                        user_id,
+                        user_message_with_content_parts(content, &content_parts),
+                    )
                     .await?;
                 thread_id
             }
@@ -287,7 +329,7 @@ impl ConversationManager {
                     .resume_thread(
                         thread_id,
                         user_id,
-                        Some(ThreadMessage::user(content)),
+                        Some(user_message_with_content_parts(content, &content_parts)),
                         None,
                         None,
                     )
@@ -353,7 +395,7 @@ impl ConversationManager {
                 // the initial user turn); `title` is the short sidebar label.
                 let title = crate::types::thread::Thread::derive_title_from_message(content);
                 self.thread_manager
-                    .spawn_thread_with_history(
+                    .spawn_thread_with_history_and_content_parts(
                         content, // use message as goal
                         title,
                         ThreadType::Foreground,
@@ -363,6 +405,7 @@ impl ConversationManager {
                         user_id,
                         history,
                         initial_metadata,
+                        content_parts,
                     )
                     .await?
             }
