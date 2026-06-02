@@ -1539,13 +1539,26 @@ impl EffectBridgeAdapter {
             .client_thread_id
             .clone()
             .unwrap_or_else(|| context.thread_id.to_string());
-        let mut job_metadata = serde_json::json!({
-            "notify_thread_id": notify_thread_id,
-        });
-        if let Some(ref rid) = context.client_response_id {
-            job_metadata["notify_response_id"] = serde_json::Value::String(rid.clone());
+        // Merge into the existing metadata map rather than replacing it, so a
+        // future caller that pre-stamps `job_ctx.metadata` upstream can't have
+        // its keys silently clobbered. `JobContext::with_user` initializes
+        // `metadata` to `Value::Null`, so promote it to an object before
+        // inserting.
+        if !job_ctx.metadata.is_object() {
+            job_ctx.metadata = serde_json::Value::Object(serde_json::Map::new());
         }
-        job_ctx.metadata = job_metadata;
+        if let Some(meta) = job_ctx.metadata.as_object_mut() {
+            meta.insert(
+                "notify_thread_id".into(),
+                serde_json::Value::String(notify_thread_id),
+            );
+            if let Some(ref rid) = context.client_response_id {
+                meta.insert(
+                    "notify_response_id".into(),
+                    serde_json::Value::String(rid.clone()),
+                );
+            }
+        }
         // Stamp the trace HTTP interceptor onto the per-call JobContext so
         // tools that respect it (http, web_fetch, etc.) route their outbound
         // requests through the recorder/replayer.

@@ -17,7 +17,6 @@
 //! libsql-gated: needs a real DB to seed conversations and to satisfy
 //! the fail-closed `state.store.is_some()` requirement.
 
-
 #![cfg(feature = "libsql")]
 
 use std::collections::HashMap;

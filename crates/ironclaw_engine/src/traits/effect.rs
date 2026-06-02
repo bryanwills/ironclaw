@@ -81,9 +81,13 @@ pub struct ThreadExecutionContext {
     pub conversation_id: Option<ConversationId>,
     /// Channel-supplied stable thread id (Responses API thread half).
     /// Stable across turns. `None` for callers that don't supply one.
+    // TODO(Z2): newtype as `ClientThreadId` per .claude/rules/types.md
+    // (stringly-typed id deferred from PR #3669).
     pub client_thread_id: Option<String>,
     /// Channel-supplied per-turn response id (full Responses API `resp_...`).
     /// Changes every turn. `None` for callers that don't supply one.
+    // TODO(Z2): newtype as `ClientResponseId` per .claude/rules/types.md
+    // (stringly-typed id deferred from PR #3669).
     pub client_response_id: Option<String>,
 }
 

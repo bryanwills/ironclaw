@@ -277,22 +277,44 @@ impl ConversationManager {
                         "failed to refresh client_response_id on inject"
                     );
                 }
-                // Spawn-only contract; log if a later turn changes it.
-                if let Some(new_cid) = client_thread_id
-                    && let Ok(Some(thread)) = self.store.load_thread(thread_id).await
-                    && let Some(stored) = thread
-                        .metadata
-                        .get("client_thread_id")
-                        .and_then(|v| v.as_str())
-                    && stored != new_cid
-                {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        stored = %stored,
-                        incoming = %new_cid,
-                        phase = "inject",
-                        "client_thread_id drift detected; keeping stored value"
-                    );
+                // Spawn-only contract; log if a later turn changes it. Read
+                // the spawn-time id from the in-memory running set first to
+                // avoid a store round-trip on every injected message; only a
+                // thread that isn't in the running set (resumed post-restart)
+                // falls back to a store load.
+                if let Some(new_cid) = client_thread_id {
+                    let stored = match self
+                        .thread_manager
+                        .running_client_thread_id(thread_id)
+                        .await
+                    {
+                        Some(cid) => Some(cid),
+                        // silent-ok: best-effort drift diagnostic; a failed or
+                        // missing load just skips the warn, never changes routing.
+                        None => self
+                            .store
+                            .load_thread(thread_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|t| {
+                                t.metadata
+                                    .get("client_thread_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                            }),
+                    };
+                    if let Some(stored) = stored
+                        && stored != new_cid
+                    {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            stored = %stored,
+                            incoming = %new_cid,
+                            phase = "inject",
+                            "client_thread_id drift detected; keeping stored value"
+                        );
+                    }
                 }
                 self.thread_manager
                     .inject_message(thread_id, user_id, ThreadMessage::user(content))
