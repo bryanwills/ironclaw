@@ -4558,6 +4558,56 @@ mod tests {
         assert_eq!(captured[0], None);
     }
 
+    #[test]
+    fn reattach_transient_content_parts_disambiguates_identical_content() {
+        fn image_part(url: &str) -> crate::types::message::MessageContentPart {
+            crate::types::message::MessageContentPart::ImageUrl {
+                image_url: crate::types::message::MessageImageUrl {
+                    url: url.to_string(),
+                    detail: Some("auto".to_string()),
+                },
+            }
+        }
+
+        fn only_image_url(message: &ThreadMessage) -> &str {
+            assert_eq!(message.content_parts.len(), 1);
+            match &message.content_parts[0] {
+                crate::types::message::MessageContentPart::ImageUrl { image_url } => {
+                    image_url.url.as_str()
+                }
+                other => panic!("expected image content part, got: {other:?}"),
+            }
+        }
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.messages = vec![
+            ThreadMessage::user_with_content_parts(
+                "look at this",
+                vec![image_part("data:image/png;base64,A")],
+            ),
+            ThreadMessage::user_with_content_parts(
+                "look at this",
+                vec![image_part("data:image/png;base64,B")],
+            ),
+        ];
+
+        let mut rebuilt = vec![
+            ThreadMessage::user("look at this"),
+            ThreadMessage::user("look at this"),
+        ];
+
+        reattach_transient_content_parts(&mut rebuilt, &thread);
+
+        assert_eq!(only_image_url(&rebuilt[0]), "data:image/png;base64,A");
+        assert_eq!(only_image_url(&rebuilt[1]), "data:image/png;base64,B");
+    }
+
     #[tokio::test]
     async fn llm_complete_reattaches_transient_content_parts_from_thread_messages() {
         let concrete = Arc::new(PromptCapturingLlm {
