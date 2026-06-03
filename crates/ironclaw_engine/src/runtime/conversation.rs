@@ -28,12 +28,12 @@ enum ActiveForeground {
 
 fn user_message_with_content_parts(
     content: &str,
-    content_parts: &[MessageContentPart],
+    content_parts: Vec<MessageContentPart>,
 ) -> ThreadMessage {
     if content_parts.is_empty() {
         ThreadMessage::user(content)
     } else {
-        ThreadMessage::user_with_content_parts(content, content_parts.to_vec())
+        ThreadMessage::user_with_content_parts(content, content_parts)
     }
 }
 
@@ -296,7 +296,7 @@ impl ConversationManager {
                     .inject_message(
                         thread_id,
                         user_id,
-                        user_message_with_content_parts(content, &content_parts),
+                        user_message_with_content_parts(content, content_parts),
                     )
                     .await?;
                 thread_id
@@ -329,7 +329,7 @@ impl ConversationManager {
                     .resume_thread(
                         thread_id,
                         user_id,
-                        Some(user_message_with_content_parts(content, &content_parts)),
+                        Some(user_message_with_content_parts(content, content_parts)),
                         None,
                         None,
                     )
