@@ -4467,6 +4467,184 @@ mod tests {
         }
     }
 
+    struct ApprovalFlagRequiredEffects {
+        approval_flags_observed: std::sync::Mutex<Vec<bool>>,
+    }
+
+    impl ApprovalFlagRequiredEffects {
+        fn new() -> Self {
+            Self {
+                approval_flags_observed: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn approval_flags(&self) -> Vec<bool> {
+            self.approval_flags_observed.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for ApprovalFlagRequiredEffects {
+        async fn execute_action(
+            &self,
+            name: &str,
+            params: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            ctx: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            self.approval_flags_observed
+                .lock()
+                .unwrap()
+                .push(ctx.call_approval_granted);
+
+            if !ctx.call_approval_granted {
+                return Err(EngineError::GatePaused {
+                    gate_name: "approval".into(),
+                    action_name: name.into(),
+                    call_id: ctx
+                        .current_call_id
+                        .clone()
+                        .unwrap_or_else(|| "call-image".into()),
+                    parameters: Box::new(params),
+                    resume_kind: Box::new(crate::gate::ResumeKind::Approval { allow_always: true }),
+                    resume_output: None,
+                    paused_lease: None,
+                });
+            }
+
+            Ok(crate::types::step::ActionResult {
+                call_id: ctx
+                    .current_call_id
+                    .clone()
+                    .unwrap_or_else(|| "call-image".into()),
+                action_name: name.into(),
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![crate::types::capability::ActionDef {
+                name: "image_generate".into(),
+                description: "Generate an image".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string"}
+                    },
+                    "required": ["prompt"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: crate::types::capability::ModelToolSurface::FullSchema,
+                discovery: None,
+            }])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    struct ApprovingGateController {
+        pauses: std::sync::Mutex<Vec<crate::gate::GatePauseRequest>>,
+    }
+
+    impl ApprovingGateController {
+        fn new() -> Self {
+            Self {
+                pauses: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn pause_count(&self) -> usize {
+            self.pauses.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::gate::GateController for ApprovingGateController {
+        async fn pause(
+            &self,
+            request: crate::gate::GatePauseRequest,
+        ) -> crate::gate::GateResolution {
+            self.pauses.lock().unwrap().push(request);
+            crate::gate::GateResolution::Approved { always: false }
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_actions_parallel_retries_with_approval_flag_after_inline_gate() {
+        let effects = Arc::new(ApprovalFlagRequiredEffects::new());
+        let effects_dyn: Arc<dyn EffectExecutor> = effects.clone();
+        let gate = Arc::new(ApprovingGateController::new());
+        let gate_dyn: Arc<dyn crate::gate::GateController> = gate.clone();
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let mut thread = Thread::new(
+            "generate image",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                crate::types::capability::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let result = handle_execute_actions_parallel(
+            &[json_to_monty(&serde_json::json!([
+                {
+                    "name": "image_generate",
+                    "params": {"prompt": "a dog"},
+                    "call_id": "call-image"
+                }
+            ]))],
+            &mut thread,
+            &effects_dyn,
+            &leases,
+            &policy,
+            None,
+            &gate_dyn,
+        )
+        .await;
+
+        let ExtFunctionResult::Return(obj) = result else {
+            panic!("expected __execute_actions_parallel__ to return a value");
+        };
+        let json = monty_to_json(&obj);
+        assert_eq!(json[0]["is_error"], serde_json::json!(false));
+        assert_eq!(json[0]["output"]["ok"], serde_json::json!(true));
+        assert_eq!(
+            effects.approval_flags(),
+            vec![false, true],
+            "the retry must carry the one-shot approval flag into the effect executor"
+        );
+        assert_eq!(
+            gate.pause_count(),
+            1,
+            "approval should be requested once, then the approved retry should execute"
+        );
+    }
+
     #[tokio::test]
     async fn llm_complete_forwards_model_from_explicit_config() {
         let concrete = Arc::new(ModelCapturingLlm {

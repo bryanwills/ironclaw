@@ -27,6 +27,7 @@ use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::naming::legacy_extension_alias;
 use crate::gate::pending::{PendingGate, PendingGateKey};
+use crate::generated_images::GeneratedImageSentinel;
 
 /// Typed outcome from a v2 bridge handler.
 ///
@@ -2229,13 +2230,14 @@ async fn resolve_pending_gate_for_user(
         .list_for_user(user_id)
         .await
         .into_iter()
-        .filter(|gate| {
-            hinted_scope.is_none_or(|hint| {
+        .filter(|gate| match hinted_scope {
+            None => true,
+            Some(hint) => {
                 gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
-                    || hinted_uuid.is_none_or(|uuid| {
+                    || hinted_uuid.is_some_and(|uuid| {
                         gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                     })
-            })
+            }
         })
         .collect();
 
@@ -2596,15 +2598,11 @@ pub async fn handle_approval(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
-    // Scope explicit approval replies to the active gateway conversation when
+    // Scope explicit approval replies to the active channel conversation when
     // available so `/approve` cannot resume an unrelated pending gate owned by
-    // another thread, such as a background routine. Other channels still use
-    // legacy thread IDs that do not map 1:1 to engine conversation scopes.
-    let thread_scope = if message.channel == "gateway" {
-        message.conversation_scope()
-    } else {
-        None
-    };
+    // another thread. This applies to UUID-backed gateway threads and to
+    // external channel scopes such as Feishu/WeCom private vs group chats.
+    let thread_scope = message.conversation_scope();
     let pending = match resolve_pending_gate_for_user(
         &state.pending_gates,
         &message.user_id,
@@ -5042,6 +5040,16 @@ fn spawn_post_park_continuation(
                 if let Some(ref db) = db {
                     persist_v2_tool_calls(&store, db, thread_id, &message).await;
                 }
+                if response.is_some() {
+                    forward_v2_generated_images_to_channel(
+                        &store,
+                        &channels,
+                        thread_id,
+                        &channel_name,
+                        &metadata,
+                    )
+                    .await;
+                }
                 response.clone()
             }
             ThreadOutcome::Stopped => Some("Thread was stopped.".into()),
@@ -5642,6 +5650,16 @@ async fn await_thread_outcome(
             if let Some(ref db) = state.db {
                 persist_v2_tool_calls(&state.store, db, thread_id, message).await;
             }
+            if response.is_some() {
+                forward_v2_generated_images_to_channel(
+                    &state.store,
+                    &agent.channels,
+                    thread_id,
+                    &message.channel,
+                    &message.metadata,
+                )
+                .await;
+            }
 
             match response {
                 Some(text) => Ok(BridgeOutcome::Respond(text)),
@@ -6066,6 +6084,85 @@ pub(crate) async fn handle_mission_notification(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Forward generated-image tool results from a completed v2 thread to channels.
+///
+/// Engine v1 emits `StatusUpdate::ImageGenerated` directly from the dispatcher
+/// as soon as an image tool returns. Engine v2 stores the action result in the
+/// completed thread transcript, so bridge it here before the final text
+/// response is delivered. WASM channels such as WeCom stage this status and
+/// attach the image during their final `respond` call.
+async fn forward_v2_generated_images_to_channel(
+    store: &std::sync::Arc<dyn Store>,
+    channels: &std::sync::Arc<crate::channels::ChannelManager>,
+    thread_id: ironclaw_engine::ThreadId,
+    channel_name: &str,
+    metadata: &serde_json::Value,
+) {
+    let thread = match store.load_thread(thread_id).await {
+        Ok(Some(thread)) => thread,
+        Ok(None) => {
+            tracing::debug!(
+                thread_id = %thread_id,
+                "thread not found in store for generated-image status forwarding"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::debug!(
+                thread_id = %thread_id,
+                error = %error,
+                "failed to load thread for generated-image status forwarding"
+            );
+            return;
+        }
+    };
+
+    let mut seen_data_urls = HashSet::new();
+    for (index, msg) in thread.internal_messages.iter().enumerate() {
+        if msg.role != ironclaw_engine::MessageRole::ActionResult {
+            continue;
+        }
+        let Some(action_name) = msg.action_name.as_deref() else {
+            continue;
+        };
+        if !matches!(action_name, "image_generate" | "image_edit") {
+            continue;
+        }
+        let Some(sentinel) = GeneratedImageSentinel::from_output(&msg.content) else {
+            continue;
+        };
+        let Some(data_url) = sentinel.data_url().filter(|value| !value.is_empty()) else {
+            tracing::warn!(
+                thread_id = %thread_id,
+                action = %action_name,
+                "generated-image sentinel has empty data URL; skipping channel status"
+            );
+            continue;
+        };
+        if !seen_data_urls.insert(data_url.to_string()) {
+            continue;
+        }
+
+        let event_id = msg
+            .action_call_id
+            .clone()
+            .unwrap_or_else(|| format!("generated-image-{thread_id}-{index}"));
+        let status = StatusUpdate::ImageGenerated {
+            event_id,
+            data_url: data_url.to_string(),
+            path: sentinel.path().map(String::from),
+        };
+        if let Err(error) = channels.send_status(channel_name, status, metadata).await {
+            tracing::debug!(
+                thread_id = %thread_id,
+                channel = %channel_name,
+                error = %error,
+                "failed to forward generated-image status"
+            );
         }
     }
 }
@@ -8941,6 +9038,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_pending_gate_respects_external_scope_hint() {
+        let store = crate::gate::store::PendingGateStore::in_memory();
+        let dm_scope = "feishu:dm:ou_123";
+        let group_scope = "feishu:chat:oc_456";
+        let dm_thread = ironclaw_engine::ThreadId::new();
+        let group_thread = ironclaw_engine::ThreadId::new();
+
+        let mut dm_gate = sample_pending_gate(
+            "alice",
+            dm_thread,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+        dm_gate.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            dm_scope.to_string(),
+        ));
+        let mut group_gate = sample_pending_gate(
+            "alice",
+            group_thread,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+        group_gate.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            group_scope.to_string(),
+        ));
+
+        store.insert(dm_gate).await.unwrap();
+        store.insert(group_gate).await.unwrap();
+
+        let resolved = resolve_pending_gate_for_user(&store, "alice", Some(group_scope)).await;
+
+        let PendingGateResolution::Resolved(gate) = resolved else {
+            panic!("expected a gate scoped to the external Feishu chat");
+        };
+        assert_eq!(gate.thread_id, group_thread);
+
+        let missing =
+            resolve_pending_gate_for_user(&store, "alice", Some("feishu:chat:missing")).await;
+        assert!(
+            matches!(missing, PendingGateResolution::None),
+            "non-UUID scope hints must not degenerate into an unscoped lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_pending_gate_detects_ambiguity_without_thread_hint() {
         let store = crate::gate::store::PendingGateStore::in_memory();
         store
@@ -9125,6 +9265,77 @@ mod tests {
         outcome
     }
 
+    #[tokio::test]
+    async fn handle_approval_scopes_non_gateway_reply_to_external_thread() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store);
+            let pending_gates = Arc::clone(&state.pending_gates);
+            let dm_scope = "wecom:dm:ZhangSan";
+            let group_scope = "wecom:chat:room-1";
+            let dm_thread = ironclaw_engine::ThreadId::new();
+            let group_thread = ironclaw_engine::ThreadId::new();
+
+            let mut dm_gate = sample_pending_gate(
+                "alice",
+                dm_thread,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            );
+            dm_gate.source_channel = "wecom".into();
+            dm_gate.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+                dm_scope.to_string(),
+            ));
+            let mut group_gate = sample_pending_gate(
+                "alice",
+                group_thread,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            );
+            group_gate.source_channel = "wecom".into();
+            group_gate.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+                group_scope.to_string(),
+            ));
+
+            pending_gates
+                .insert(dm_gate)
+                .await
+                .expect("insert dm pending gate");
+            pending_gates
+                .insert(group_gate)
+                .await
+                .expect("insert group pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_router_test_agent(None).await;
+            let message = IncomingMessage::new("wecom", "alice", "/approve")
+                .with_thread(group_scope.to_string());
+
+            let result = handle_approval(&agent, &message, true, false)
+                .await
+                .expect("handle approval");
+
+            assert!(
+                !matches!(
+                    result,
+                    BridgeOutcome::Respond(ref s)
+                        if s == "Multiple pending gates are waiting. Resolve from the original thread or retry with that thread selected."
+                ),
+                "non-gateway approval replies must use the external thread scope instead of becoming ambiguous"
+            );
+            let remaining = pending_gates.list_all().await;
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].thread_id, dm_thread);
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome
+    }
+
     #[test]
     fn resolved_call_id_prefers_stored_id_for_parallel_same_name_calls() {
         let mut thread = ironclaw_engine::Thread::new(
@@ -9212,6 +9423,65 @@ mod tests {
             } if call_id.as_deref() == Some("call-memory-read-1")
                 && duration_ms == &Some(42)
                 && *success
+        ));
+    }
+
+    #[tokio::test]
+    async fn forward_v2_generated_images_to_channel_sends_image_status() {
+        let store = Arc::new(TestStore::new());
+        let data_url = "data:image/png;base64,YWJj";
+        let mut thread = ironclaw_engine::Thread::new(
+            "generate an image",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-image-1",
+            "image_generate",
+            serde_json::json!({
+                "type": "image_generated",
+                "data": data_url,
+                "path": "/tmp/generated.png",
+                "media_type": "image/png",
+            })
+            .to_string(),
+        ));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.expect("save thread");
+
+        let statuses = Arc::new(TokioMutex::new(Vec::new()));
+        let manager = ChannelManager::new();
+        manager
+            .add(Box::new(RecordingStatusChannel {
+                name: "test".to_string(),
+                statuses: Arc::clone(&statuses),
+            }))
+            .await;
+        let manager = Arc::new(manager);
+        let store: Arc<dyn Store> = store;
+
+        forward_v2_generated_images_to_channel(
+            &store,
+            &manager,
+            thread_id,
+            "test",
+            &serde_json::json!({ "route": "unit-test" }),
+        )
+        .await;
+
+        let statuses = statuses.lock().await;
+        assert_eq!(statuses.len(), 1);
+        assert!(matches!(
+            &statuses[0],
+            StatusUpdate::ImageGenerated {
+                event_id,
+                data_url: actual_data_url,
+                path,
+            } if event_id == "call-image-1"
+                && actual_data_url == data_url
+                && path.as_deref() == Some("/tmp/generated.png")
         ));
     }
 
