@@ -996,6 +996,7 @@ impl CanonicalAgentLoopExecutor {
         )?))
     }
 
+    // arch-exempt: too_many_args, gate-identifying params (call, kind, gate_ref, expected_tx_hash) want a GateInvocation bundle distinct from the planner/host/state framework refs; bundling deferred to the gate-dispatch follow-up, plan #4015
     #[allow(clippy::too_many_arguments)]
     async fn handle_gate(
         &self,
