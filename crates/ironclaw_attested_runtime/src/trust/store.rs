@@ -261,18 +261,34 @@ impl TrustStore for InMemoryTrustStore {
     }
 
     async fn get_enrollment(&self, idempotency_key: &str) -> Option<TrustEnrollment> {
-        self.enrollments
-            .lock()
-            .ok()
-            .and_then(|m| m.get(idempotency_key).cloned())
+        // Fail closed on a poisoned mutex, but surface the system fault loudly
+        // like the write paths rather than collapsing it silently to `None`.
+        match self.enrollments.lock() {
+            Ok(map) => map.get(idempotency_key).cloned(),
+            Err(_) => {
+                tracing::error!(
+                    idempotency_key,
+                    "trust store enrollments mutex poisoned; enrollment read returning None"
+                );
+                None
+            }
+        }
     }
 
     async fn get_enrollment_by_id(&self, enrollment_id: &str) -> Option<TrustEnrollment> {
-        self.enrollments.lock().ok().and_then(|m| {
-            m.values()
+        match self.enrollments.lock() {
+            Ok(map) => map
+                .values()
                 .find(|e| e.enrollment_id == enrollment_id)
-                .cloned()
-        })
+                .cloned(),
+            Err(_) => {
+                tracing::error!(
+                    enrollment_id,
+                    "trust store enrollments mutex poisoned; enrollment-by-id read returning None"
+                );
+                None
+            }
+        }
     }
 
     async fn put_binding(&self, binding: TrustedSignerBinding) {
@@ -291,7 +307,16 @@ impl TrustStore for InMemoryTrustStore {
     }
 
     async fn get_binding(&self, key: &BindingKey) -> Option<TrustedSignerBinding> {
-        self.bindings.lock().ok().and_then(|m| m.get(key).cloned())
+        match self.bindings.lock() {
+            Ok(map) => map.get(key).cloned(),
+            Err(_) => {
+                tracing::error!(
+                    tenant_id = %key.tenant_id.as_str(),
+                    "trust store bindings mutex poisoned; binding read returning None"
+                );
+                None
+            }
+        }
     }
 
     async fn lookup_active_binding(
@@ -308,10 +333,18 @@ impl TrustStore for InMemoryTrustStore {
             chain_id: chain_id.clone(),
             network: network.to_string(),
         };
-        self.bindings
-            .lock()
-            .ok()
-            .and_then(|m| m.get(&key).cloned())
-            .filter(|b| b.is_resolvable(now_unix_ms))
+        match self.bindings.lock() {
+            Ok(map) => map
+                .get(&key)
+                .cloned()
+                .filter(|b| b.is_resolvable(now_unix_ms)),
+            Err(_) => {
+                tracing::error!(
+                    tenant_id = %tenant_id.as_str(),
+                    "trust store bindings mutex poisoned; active-binding lookup returning None"
+                );
+                None
+            }
+        }
     }
 }

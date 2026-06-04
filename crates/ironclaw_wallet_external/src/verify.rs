@@ -19,7 +19,7 @@
 //! domain-separated attestation digest, or a trust challenge); this module owns
 //! *how* the signer is recovered/verified and matched to the bound account.
 
-use ed25519_dalek::{Signature as EdSignature, Verifier, VerifyingKey as EdVerifyingKey};
+use ed25519_dalek::{Signature as EdSignature, VerifyingKey as EdVerifyingKey};
 use k256::ecdsa::{RecoveryId, Signature as EcSignature, VerifyingKey};
 use sha3::{Digest, Keccak256};
 
@@ -47,6 +47,16 @@ pub fn verify_evm_signer_over_digest(
             reason: format!("invalid evm signature scalars: {e}"),
         }
     })?;
+    // Reject malleable high-S signatures: EIP-2 mandates the low-S half-order
+    // form. `normalize_s` returns `Some` only when the input was high-S, so its
+    // presence is the high-S signal. Matters on the shared kernel's injected /
+    // walletconnect paths; the trust ceremony additionally consumes the
+    // challenge single-use.
+    if sig.normalize_s().is_some() {
+        return Err(SigningProviderError::ProofInvalid {
+            reason: "evm signature has non-canonical high-S (malleable)".to_string(),
+        });
+    }
     let rec_id = recovery_id_from_v(signature[64])?;
     let recovered =
         VerifyingKey::recover_from_prehash(digest.as_slice(), &sig, rec_id).map_err(|e| {
@@ -108,8 +118,12 @@ pub fn verify_ed25519_signer_over_digest(
                 reason: "ed25519 signature length mismatch".to_string(),
             })?;
     let sig = EdSignature::from_bytes(&sig_bytes);
+    // Strict verification rejects malleable signatures (non-canonical `s`,
+    // small-order `R`), which matters on the shared kernel's injected /
+    // walletconnect paths even though the trust ceremony binds the key to the
+    // claimed account and consumes the challenge single-use.
     verifying_key
-        .verify(digest, &sig)
+        .verify_strict(digest, &sig)
         .map_err(|e| SigningProviderError::ProofInvalid {
             reason: format!("ed25519 verification failed: {e}"),
         })?;

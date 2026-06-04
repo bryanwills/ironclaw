@@ -220,28 +220,25 @@ pub(super) fn normalize_solana_pubkey(account: &str) -> Result<String, SigningPr
                     decoded.len()
                 ),
             })?;
-    let mut hex = String::with_capacity(64);
-    for b in bytes {
-        hex.push_str(&format!("{b:02x}"));
-    }
-    Ok(hex)
+    // One byte->hex implementation for the subsystem: reuse the allocation-free
+    // nibble-push helper rather than per-byte `format!`.
+    Ok(super::hex_encode(&bytes))
 }
 
 /// Decode a 32-byte ed25519 public key from (optionally `0x`-prefixed) hex.
 fn decode_hex32(s: &str) -> Result<[u8; 32], SigningProviderError> {
-    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    // Decode over raw bytes: `s` is the attacker-controlled `public_key_hex`
+    // (not committed in the challenge digest), so `&str` byte-range slicing
+    // would panic on a non-char boundary for even-byte-length multi-byte UTF-8.
+    let stripped = s.strip_prefix("0x").unwrap_or(s).as_bytes();
     if stripped.len() != 64 {
         return Err(SigningProviderError::ProofInvalid {
             reason: format!("near access-key public key must be 32-byte hex, got {s}"),
         });
     }
     let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&stripped[i * 2..i * 2 + 2], 16).map_err(|e| {
-            SigningProviderError::ProofInvalid {
-                reason: format!("near access-key hex invalid: {e}"),
-            }
-        })?;
+    for (byte, pair) in out.iter_mut().zip(stripped.chunks_exact(2)) {
+        *byte = (super::hex_digit(pair[0])? << 4) | super::hex_digit(pair[1])?;
     }
     Ok(out)
 }

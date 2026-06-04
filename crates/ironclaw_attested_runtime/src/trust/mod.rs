@@ -640,7 +640,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// Lowercase hex of `bytes`. Hand-rolled (no runtime `hex`/`const-hex`
 /// dependency) but allocation-free per byte: a single `String` of the exact
 /// capacity, pushing nibble chars directly rather than `format!`-ing each byte.
-fn hex_encode(bytes: &[u8]) -> String {
+pub(super) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -650,22 +650,35 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+/// Decode a single ASCII hex digit byte to its 0-15 value, rejecting any
+/// non-hex (including non-ASCII) byte without panicking. Shared by the hex
+/// decoders so they never index a `&str` by byte (which panics on a non-char
+/// boundary for attacker-controlled multi-byte UTF-8); they decode over
+/// `.as_bytes()` instead. Mirrors the `hex_digit` in the wallet-external kernel.
+pub(super) fn hex_digit(b: u8) -> Result<u8, SigningProviderError> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        other => Err(SigningProviderError::ProofInvalid {
+            reason: format!("invalid hex digit: {other:#04x}"),
+        }),
+    }
+}
+
 fn decode_hex(s: &str) -> Result<Vec<u8>, SigningProviderError> {
-    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    // Decode over raw bytes: `s` is attacker-controlled (the uncommitted
+    // `public_key_hex`) and may carry even-byte-length multi-byte UTF-8, so
+    // `&str` byte-range slicing would panic on a non-char boundary.
+    let stripped = s.strip_prefix("0x").unwrap_or(s).as_bytes();
     if !stripped.len().is_multiple_of(2) {
         return Err(SigningProviderError::ProofInvalid {
             reason: "odd-length hex".to_string(),
         });
     }
-    (0..stripped.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&stripped[i..i + 2], 16).map_err(|e| {
-                SigningProviderError::ProofInvalid {
-                    reason: format!("invalid hex: {e}"),
-                }
-            })
-        })
+    stripped
+        .chunks_exact(2)
+        .map(|pair| Ok((hex_digit(pair[0])? << 4) | hex_digit(pair[1])?))
         .collect()
 }
 
