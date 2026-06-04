@@ -97,15 +97,21 @@ const ALLOWLIST: &[AllowedSite] = &[
         file: "src/worker/container.rs",
         kind: AllowKind::Executor,
     },
-    // Tool-builder verification (#4019 step 5): runs a tool *during its own
-    // construction* — `execute_build_tool` resolves the just-built tool and
-    // runs it under a synthetic build `JobContext` with build-specific
-    // approval context, to verify it compiled and behaves. There is no real
-    // user/agent/channel/job behind this call — it is internal build
-    // machinery, not a user- or agent-initiated dispatch. An `ActionRecord`
-    // for "the build system test-ran the tool it is building" would be audit
-    // noise, not signal. Exempt for the same reason as the worker loops:
-    // a legitimate terminal executor, not a bypass to migrate.
+    // Tool-builder verification (#4019 step 5): `execute_build_tool`
+    // (`src/tools/builder/core.rs`, the `.execute(` at ~core.rs:886) resolves a
+    // tool *by name* from the registry and runs it under a synthetic build
+    // `JobContext` with a build-specific autonomous approval context. This is
+    // NOT limited to "the tool under construction": the build loop drives
+    // arbitrary LLM-selected registry tools (`shell`, `write_file`,
+    // `apply_patch`, `read_file`, `list_dir`) to scaffold, compile, and verify
+    // the artifact. It is exempt as an `Executor` because there is no real
+    // user/agent/channel/job behind these calls — it is internal build
+    // machinery with its own `check_approval_in_context` gate (so the
+    // `Always`-approval tools still can't run unless whitelisted for the
+    // build), not a user- or agent-initiated dispatch. An `ActionRecord` per
+    // build-step tool call would be audit noise, not signal. The narrower
+    // ratchet below still forbids this file from reaching the *un-audited*
+    // primitive `execute_tool_with_safety` directly.
     AllowedSite {
         file: "src/tools/builder/core.rs",
         kind: AllowKind::Executor,
@@ -245,6 +251,46 @@ fn tool_execution_flows_through_audited_dispatch_funnel() {
          site is now audited or a justified executor. Migrate the following through the \
          audited funnel instead of allowlisting them as bypasses:\n{}",
         remaining_bypasses
+            .iter()
+            .map(|file| format!("  - {file}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// The two tool-builder sites are exempted as `Executor` (build machinery runs
+/// registry tools by design — see the allowlist rationale), which removes them
+/// from the staleness ratchet. To keep a regression net under them, assert the
+/// narrower invariant that they never reach the *un-audited* primitive
+/// `execute_tool_with_safety` directly: they may run tools via the bare
+/// `tool.execute(...)` build path, but introducing the un-audited safety
+/// primitive there would be a new, separately-reviewable bypass.
+#[test]
+fn tool_builder_sites_do_not_call_unaudited_primitive() {
+    let root = workspace_root();
+    let builder_dir = root.join("src/tools/builder");
+    if !builder_dir.exists() {
+        // Directory moved/removed — the main funnel test covers regressions in
+        // the new location; nothing to assert here.
+        return;
+    }
+
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    collect_callers(
+        &builder_dir,
+        &root,
+        &|line| line.contains("execute_tool_with_safety("),
+        &mut found,
+    );
+
+    let offenders: Vec<&String> = found.iter().collect();
+    assert!(
+        offenders.is_empty(),
+        "Tool-builder file(s) call the un-audited primitive `execute_tool_with_safety` — \
+         the tool-builder `Executor` exemption only covers the bare `tool.execute(...)` build \
+         path, not the un-audited safety primitive. Route through the audited funnel or justify \
+         a new bypass explicitly:\n{}",
+        offenders
             .iter()
             .map(|file| format!("  - {file}"))
             .collect::<Vec<_>>()
