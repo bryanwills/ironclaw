@@ -151,6 +151,12 @@ pub(crate) fn solana_message_bytes(tx: &SolanaTransaction) -> Result<Vec<u8>, At
 /// Borsh `u32` length prefix for a slice, rejecting lengths beyond `u32::MAX`.
 /// Borsh encodes `String`/`Vec` lengths as `u32` little-endian; a longer slice
 /// cannot be represented, so we fail closed rather than truncate the prefix.
+///
+/// Target-width note: the overflow branch (`NearBorshLengthOverflow`) is
+/// reachable only on targets where `usize > u32` — i.e. 64-bit. On 32-bit
+/// targets `usize == u32`, so `u32::try_from` is infallible and the branch (and
+/// the `borsh_bytes_rejects_overlong_length` test exercising it) cannot fire;
+/// that is expected, not dead code.
 fn borsh_len_le(len: usize, what: &'static str) -> Result<[u8; 4], AttestationError> {
     u32::try_from(len).map(u32::to_le_bytes).map_err(|_| {
         AttestationError::NearBorshLengthOverflow {
@@ -182,8 +188,14 @@ fn push_borsh_string(out: &mut Vec<u8>, s: &str) -> Result<(), AttestationError>
 /// borsh `u128` (little-endian, 16 bytes). Rejects inputs longer than 16 bytes:
 /// such a value does not fit a `u128`, so the human-rendered amount would
 /// diverge from the (wrapped) signed amount — an approve-vs-sign mismatch.
-fn push_borsh_u128_be(out: &mut Vec<u8>, be_minimal: &[u8]) -> Result<(), AttestationError> {
-    let value = u128_from_be_minimal(be_minimal)?;
+/// `what` names the offending amount (`deposit` / `stake` / `allowance`) so a
+/// rejection can identify which field overflowed.
+fn push_borsh_u128_be(
+    out: &mut Vec<u8>,
+    be_minimal: &[u8],
+    what: &'static str,
+) -> Result<(), AttestationError> {
+    let value = u128_from_be_minimal(be_minimal, what)?;
     out.extend_from_slice(&value.to_le_bytes());
     Ok(())
 }
@@ -192,9 +204,10 @@ fn push_borsh_u128_be(out: &mut Vec<u8>, be_minimal: &[u8]) -> Result<(), Attest
 /// exceed 16 bytes (which cannot fit a `u128`). Leading-zero padding within 16
 /// bytes is tolerated; only a genuine length overflow is rejected, so the
 /// canonical wire `u128` always equals the value the human approved.
-fn u128_from_be_minimal(be_minimal: &[u8]) -> Result<u128, AttestationError> {
+fn u128_from_be_minimal(be_minimal: &[u8], what: &'static str) -> Result<u128, AttestationError> {
     if be_minimal.len() > 16 {
         return Err(AttestationError::NearU128Overflow {
+            what,
             len: be_minimal.len(),
         });
     }
@@ -231,15 +244,15 @@ fn push_near_action(out: &mut Vec<u8>, action: &NearAction) -> Result<(), Attest
             push_borsh_string(out, method_name)?;
             push_borsh_bytes(out, args, "function_call.args")?;
             out.extend_from_slice(&gas.to_le_bytes());
-            push_borsh_u128_be(out, deposit)?;
+            push_borsh_u128_be(out, deposit, "function_call.deposit")?;
         }
         NearAction::Transfer { deposit } => {
             out.push(3);
-            push_borsh_u128_be(out, deposit)?;
+            push_borsh_u128_be(out, deposit, "transfer.deposit")?;
         }
         NearAction::Stake { stake, public_key } => {
             out.push(4);
-            push_borsh_u128_be(out, stake)?;
+            push_borsh_u128_be(out, stake, "stake.stake")?;
             push_near_public_key(out, public_key);
         }
         NearAction::AddKey {
@@ -262,7 +275,7 @@ fn push_near_action(out: &mut Vec<u8>, action: &NearAction) -> Result<(), Attest
                     match allowance {
                         Some(a) => {
                             out.push(1);
-                            push_borsh_u128_be(out, a)?;
+                            push_borsh_u128_be(out, a, "add_key.allowance")?;
                         }
                         None => out.push(0),
                     }
@@ -290,21 +303,28 @@ fn push_near_action(out: &mut Vec<u8>, action: &NearAction) -> Result<(), Attest
         NearAction::Delegate {
             sender_id,
             receiver_id,
+            actions,
             nonce,
             max_block_height,
             public_key,
         } => {
             out.push(8);
             // NEP-366 DelegateAction borsh layout:
-            // `sender_id ∥ receiver_id ∥ Vec<Action> ∥ nonce(u64 le) ∥
-            //  max_block_height(u64 le) ∥ public_key`. The decoded model does
-            // not carry the inner delegated actions, so we serialize an
-            // explicit empty `Vec<Action>` (borsh `0u32`) in the correct
-            // position — omitting it entirely (as before) made deserializers
-            // read `nonce` as the actions-vector length, corrupting the parse.
+            // `sender_id ∥ receiver_id ∥ Vec<NonDelegateAction> ∥ nonce(u64 le)
+            //  ∥ max_block_height(u64 le) ∥ public_key`. The inner actions are
+            // carried at full fidelity so two delegates differing only in their
+            // inner actions produce distinct bytes (injectivity). Inner actions
+            // are `NonDelegateAction`: a nested `Delegate` is unrepresentable
+            // on-chain, so it is rejected (fail closed) rather than serialized.
             push_borsh_string(out, sender_id)?;
             push_borsh_string(out, receiver_id)?;
-            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&borsh_len_le(actions.len(), "delegate.actions")?);
+            for inner in actions {
+                if matches!(inner, NearAction::Delegate { .. }) {
+                    return Err(AttestationError::NearNestedDelegate);
+                }
+                push_near_action(out, inner)?;
+            }
             out.extend_from_slice(&nonce.to_le_bytes());
             out.extend_from_slice(&max_block_height.to_le_bytes());
             push_near_public_key(out, public_key);
@@ -353,15 +373,15 @@ mod tests {
 
     #[test]
     fn u128_be_minimal_round_trips() {
-        assert_eq!(u128_from_be_minimal(&[]), Ok(0));
-        assert_eq!(u128_from_be_minimal(&[0x01]), Ok(1));
-        assert_eq!(u128_from_be_minimal(&[0x01, 0x00]), Ok(256));
+        assert_eq!(u128_from_be_minimal(&[], "deposit"), Ok(0));
+        assert_eq!(u128_from_be_minimal(&[0x01], "deposit"), Ok(1));
+        assert_eq!(u128_from_be_minimal(&[0x01, 0x00], "deposit"), Ok(256));
         assert_eq!(
-            u128_from_be_minimal(&[0x0d, 0xe0, 0xb6, 0xb3, 0xa7, 0x64, 0x00, 0x00]),
+            u128_from_be_minimal(&[0x0d, 0xe0, 0xb6, 0xb3, 0xa7, 0x64, 0x00, 0x00], "deposit"),
             Ok(1_000_000_000_000_000_000)
         );
         // Exactly 16 bytes (u128::MAX) is the boundary and must be accepted.
-        assert_eq!(u128_from_be_minimal(&[0xff; 16]), Ok(u128::MAX));
+        assert_eq!(u128_from_be_minimal(&[0xff; 16], "deposit"), Ok(u128::MAX));
     }
 
     #[test]
@@ -369,10 +389,17 @@ mod tests {
         // 17 bytes cannot fit a u128. Rather than silently wrapping/discarding
         // the high bytes (which would make the signed value diverge from the
         // human-approved one), the parse must fail closed.
-        let err = u128_from_be_minimal(&[0x01; 17]).expect_err("17 bytes must be rejected");
-        assert_eq!(err, AttestationError::NearU128Overflow { len: 17 });
+        let err =
+            u128_from_be_minimal(&[0x01; 17], "stake").expect_err("17 bytes must be rejected");
+        assert_eq!(
+            err,
+            AttestationError::NearU128Overflow {
+                what: "stake",
+                len: 17
+            }
+        );
         // A leading-zero-padded value within 16 bytes is still fine.
-        assert_eq!(u128_from_be_minimal(&[0x00, 0x00, 0x01]), Ok(1));
+        assert_eq!(u128_from_be_minimal(&[0x00, 0x00, 0x01], "stake"), Ok(1));
     }
 
     #[test]

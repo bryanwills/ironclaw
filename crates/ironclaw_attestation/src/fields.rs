@@ -403,6 +403,7 @@ fn project_near_action(fields: &mut Vec<Field>, action: &NearAction) {
         NearAction::Delegate {
             sender_id,
             receiver_id,
+            actions,
             nonce,
             max_block_height,
             public_key,
@@ -432,6 +433,29 @@ fn project_near_action(fields: &mut Vec<Field>, action: &NearAction) {
                 "Delegate Public Key",
                 public_key,
             ));
+            // Project the inner actions so the human render shows what the
+            // delegate authorizes. The binding/injectivity over inner actions
+            // is enforced by the `near.transaction_bytes` wire field (which
+            // also fails closed on a nested delegate); here we mirror the inner
+            // actions into the human view so render and canonical stay in step.
+            fields.push(Field::num(
+                "action.delegate.inner_count",
+                "Delegate Inner Action Count",
+                actions.len() as u64,
+            ));
+            for (i, inner) in actions.iter().enumerate() {
+                fields.push(Field::num(
+                    "action.delegate.inner.index",
+                    "Delegate Inner Action Index",
+                    i as u64,
+                ));
+                fields.push(Field::text(
+                    "action.delegate.inner.kind",
+                    "Delegate Inner Action Kind",
+                    inner.kind_label(),
+                ));
+                project_near_action(fields, inner);
+            }
         }
     }
 }

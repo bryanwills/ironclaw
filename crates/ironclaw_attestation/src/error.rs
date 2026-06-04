@@ -51,11 +51,25 @@ pub enum AttestationError {
     /// human-rendered value would not match the signed (wrapped/truncated)
     /// value — an approve-vs-sign divergence — so reject rather than wrap.
     #[error(
-        "near u128 amount has {len} big-endian bytes, exceeding the 16-byte \
-         u128 maximum; the rendered value would diverge from the signed value"
+        "near {what} u128 amount has {len} big-endian bytes, exceeding the \
+         16-byte u128 maximum; the rendered value would diverge from the \
+         signed value"
     )]
     NearU128Overflow {
+        /// Which amount overflowed (e.g. `deposit`, `stake`, `allowance`).
+        what: &'static str,
         /// The number of big-endian bytes supplied.
         len: usize,
     },
+
+    /// A NEAR NEP-366 `DelegateAction` carried an inner `Delegate` action.
+    /// Inner actions are typed `NonDelegateAction` on-chain — a delegate may
+    /// not nest a delegate — so the nested delegate cannot be reproduced
+    /// faithfully as the signed bytes. Reject rather than emit ambiguous bytes.
+    #[error(
+        "near delegate action nests another delegate action, which NEP-366 \
+         forbids (inner actions are NonDelegateAction); cannot reproduce the \
+         signed wire bytes"
+    )]
+    NearNestedDelegate,
 }
