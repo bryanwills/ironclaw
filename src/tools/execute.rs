@@ -155,11 +155,19 @@ pub async fn execute_tool_with_safety(
 /// **Store-optional.** When `store` is `None` (local/test setups that run
 /// without a database, exactly as chat tolerates today) the function is a
 /// pure pass-through to `execute_tool_with_safety` — no audit row, no behavior
-/// change. When `store` is `Some` but persistence fails, the failure is logged
-/// at `debug!` (never `warn!`/`info!`: this path is reachable from the
-/// interactive REPL/TUI where higher levels corrupt the terminal — see
-/// CLAUDE.md → Code Style → logging) and the tool result is returned
-/// unmasked, mirroring the dispatcher.
+/// change.
+///
+/// **Fail-closed audit anchor.** When `store` is `Some`, the audit FK job is
+/// resolved *before* the tool runs, mirroring `ToolDispatcher::dispatch`
+/// (which `create_system_job`s before `tool.execute`). On the `None`
+/// (`existing_job_id`) path this means minting the system job up front; if
+/// that mint fails the call aborts with a typed error and the tool never
+/// executes — an audited path must not produce an executed-but-unaudited
+/// effect. (The subsequent `save_action` write is still best-effort: once the
+/// anchor exists, a transient row-insert failure is logged at `debug!` and the
+/// tool result is returned unmasked, mirroring the dispatcher. `debug!` not
+/// `warn!`/`info!`: this path is reachable from the interactive REPL/TUI where
+/// higher levels corrupt the terminal — see CLAUDE.md → Code Style → logging.)
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_tool_audited(
     tools: &ToolRegistry,
@@ -190,57 +198,67 @@ pub async fn execute_tool_audited(
         })
         .unwrap_or_else(|| params.clone());
 
+    // Resolve the audit FK job and its sequence number *before* execution
+    // (fail-closed). When the caller already persisted a real `agent_jobs` row
+    // (e.g. the scheduler), correlate the ActionRecord to it and allocate the
+    // next sequence after that job's existing actions — `sequence_num = 0`
+    // would collide with the originating job's first action on
+    // `UNIQUE(job_id, sequence_num)`. Otherwise mint a fresh system job whose
+    // first (and only) action takes sequence 0.
+    let (audit_job_id, sequence_num) = match existing_job_id {
+        Some(job_id) => {
+            let next_seq = store
+                .get_job_actions(job_id)
+                .await
+                .map_err(|e| crate::error::ToolError::ExecutionFailed {
+                    name: tool_name.to_string(),
+                    reason: format!("failed to read existing job actions for audit: {e}"),
+                })?
+                .iter()
+                .map(|a| a.sequence)
+                .max()
+                .map(|max| max + 1)
+                .unwrap_or(0);
+            (job_id, next_seq)
+        }
+        None => {
+            let source_label = source.to_string();
+            let job_id = store
+                .create_system_job(&base_ctx.user_id, &source_label)
+                .await
+                .map_err(|e| crate::error::ToolError::ExecutionFailed {
+                    name: tool_name.to_string(),
+                    reason: format!("failed to create system job for tool audit record: {e}"),
+                })?;
+            (job_id, 0)
+        }
+    };
+
     let start = std::time::Instant::now();
     let result = execute_tool_with_safety(tools, safety, tool_name, params, base_ctx).await;
     let elapsed = start.elapsed();
 
-    // Resolve the audit FK job. When the caller already persisted a real
-    // `agent_jobs` row (e.g. the scheduler), correlate the ActionRecord to it.
-    // Otherwise mint a fresh system job (chat/dispatcher behavior).
-    let audit_job_id = match existing_job_id {
-        Some(job_id) => Some(job_id),
-        None => {
-            let source_label = source.to_string();
-            match store
-                .create_system_job(&base_ctx.user_id, &source_label)
-                .await
-            {
-                Ok(job_id) => Some(job_id),
-                Err(e) => {
-                    tracing::debug!(
-                        error = %e,
-                        tool = %tool_name,
-                        "failed to create system job for tool audit record"
-                    );
-                    None
-                }
-            }
+    let action = ActionRecord::new(sequence_num, tool_name, redacted_input);
+    let action = match &result {
+        Ok(output) => {
+            // `output` is already the pretty-printed tool result string.
+            // Sanitize it for the audit payload (mirrors dispatch).
+            let sanitized = safety.sanitize_tool_output(tool_name, output).content;
+            action.succeed(
+                Some(sanitized),
+                serde_json::Value::String(output.clone()),
+                elapsed,
+            )
         }
+        Err(e) => action.fail(e.to_string(), elapsed),
     };
-
-    if let Some(job_id) = audit_job_id {
-        let action = ActionRecord::new(0, tool_name, redacted_input);
-        let action = match &result {
-            Ok(output) => {
-                // `output` is already the pretty-printed tool result string.
-                // Sanitize it for the audit payload (mirrors dispatch).
-                let sanitized = safety.sanitize_tool_output(tool_name, output).content;
-                action.succeed(
-                    Some(sanitized),
-                    serde_json::Value::String(output.clone()),
-                    elapsed,
-                )
-            }
-            Err(e) => action.fail(e.to_string(), elapsed),
-        };
-        if let Err(e) = store.save_action(job_id, &action).await {
-            tracing::debug!(
-                error = %e,
-                tool = %tool_name,
-                job_id = %job_id,
-                "failed to persist tool ActionRecord"
-            );
-        }
+    if let Err(e) = store.save_action(audit_job_id, &action).await {
+        tracing::debug!(
+            error = %e,
+            tool = %tool_name,
+            job_id = %audit_job_id,
+            "failed to persist tool ActionRecord"
+        );
     }
 
     result
@@ -1018,5 +1036,124 @@ mod audited_integration_tests {
             seen.lock().unwrap().is_none(),
             "tool must not run when validation fails"
         );
+    }
+
+    // ── Fail-closed audit anchor (#4025 review) ───────────────────────────
+    // The audited funnel must resolve/create its audit FK job *before* running
+    // the tool. If the anchor cannot be created (DB failure on the `None`
+    // path), the call aborts with a typed error and the tool never executes —
+    // an audited path must never produce an executed-but-unaudited effect.
+
+    #[tokio::test]
+    async fn audited_anchor_failure_aborts_execution_fail_closed() {
+        let (db, backend, _dir) = test_store().await;
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let registry = registry_with(Arc::new(ContextEchoTool {
+            seen_user: Arc::clone(&seen),
+        }))
+        .await;
+        let safety = safety();
+
+        // Force `create_system_job` to fail by removing the table its INSERT
+        // targets. This simulates a DB hiccup on the audit-anchor write.
+        {
+            let conn = backend.connect().await.expect("connect");
+            conn.execute("DROP TABLE agent_jobs", ())
+                .await
+                .expect("drop");
+        }
+
+        let job_ctx = JobContext::with_user("chatter", "chat", "interactive");
+        let result = execute_tool_audited(
+            &registry,
+            &safety,
+            Some(&db),
+            "ctx_echo",
+            serde_json::json!({ "message": "must-not-run" }),
+            &job_ctx,
+            DispatchSource::Channel("web".into()),
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(crate::error::Error::Tool(
+                    crate::error::ToolError::ExecutionFailed { .. }
+                ))
+            ),
+            "anchor failure must abort with a typed ExecutionFailed error: {result:?}"
+        );
+        assert!(
+            seen.lock().unwrap().is_none(),
+            "tool must NOT execute when the audit anchor cannot be created"
+        );
+    }
+
+    // ── Sequence allocation on the existing_job_id path (#4025 review) ─────
+    // `ActionRecord::new(0, ...)` collides on `UNIQUE(job_id, sequence_num)`
+    // when a real persisted job already has actions. The audited path must
+    // allocate `max(existing sequence) + 1` for the `existing_job_id` case.
+
+    #[tokio::test]
+    async fn audited_existing_job_allocates_next_sequence_no_collision() {
+        let (db, backend, _dir) = test_store().await;
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let registry = registry_with(Arc::new(ContextEchoTool {
+            seen_user: Arc::clone(&seen),
+        }))
+        .await;
+        let safety = safety();
+
+        // A real persisted job that already owns an action at sequence 0.
+        let job_id = db
+            .create_system_job("chatter", "scheduler")
+            .await
+            .expect("create job");
+        let seeded = ActionRecord::new(0, "seed_tool", serde_json::json!({}));
+        db.save_action(job_id, &seeded).await.expect("seed action");
+
+        // First audited call against the existing job: must NOT collide on
+        // sequence 0; it should land at sequence 1.
+        execute_tool_audited(
+            &registry,
+            &safety,
+            Some(&db),
+            "ctx_echo",
+            serde_json::json!({ "message": "first" }),
+            &JobContext::with_user("chatter", "scheduler", "lightweight"),
+            DispatchSource::Channel("scheduler".into()),
+            Some(job_id),
+        )
+        .await
+        .expect("first audited call must succeed (no sequence collision)");
+
+        // A second audited call against the same job must also succeed and take
+        // the next free sequence (2).
+        execute_tool_audited(
+            &registry,
+            &safety,
+            Some(&db),
+            "ctx_echo",
+            serde_json::json!({ "message": "second" }),
+            &JobContext::with_user("chatter", "scheduler", "lightweight"),
+            DispatchSource::Channel("scheduler".into()),
+            Some(job_id),
+        )
+        .await
+        .expect("second audited call must succeed (no sequence collision)");
+
+        let actions = db.get_job_actions(job_id).await.expect("get actions");
+        // 1 seeded + 2 audited, all persisted with distinct sequence numbers.
+        assert_eq!(actions.len(), 3, "all three actions must persist");
+        let mut sequences: Vec<u32> = actions.iter().map(|a| a.sequence).collect();
+        sequences.sort_unstable();
+        assert_eq!(
+            sequences,
+            vec![0, 1, 2],
+            "sequences must be contiguous and unique, not all 0"
+        );
+        let _ = backend;
     }
 }
