@@ -1,7 +1,9 @@
 use ironclaw_reborn_openai_compat::{
     OpenAiChatCompletionChunk, OpenAiChatCompletionRequest, OpenAiChatCompletionResponse,
-    OpenAiChatFinishReason, OpenAiChatMessageRole, OpenAiResponseObject, OpenAiResponseStatus,
-    OpenAiResponseUsage, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
+    OpenAiChatFinishReason, OpenAiChatMessageRole, OpenAiResponseObject, OpenAiResponseOutputItem,
+    OpenAiResponseOutputItemStatus, OpenAiResponseStatus, OpenAiResponseUsage,
+    OpenAiResponsesCreateRequest, OpenAiResponsesInput, OpenAiResponsesInputItem,
+    OpenAiResponsesMessageRole,
 };
 use serde_json::json;
 
@@ -61,8 +63,43 @@ fn responses_create_request_accepts_text_or_item_input() {
         "tool_choice": "auto"
     }))
     .expect("item input");
-    assert!(matches!(items.input, OpenAiResponsesInput::Items(_)));
+    match items.input {
+        OpenAiResponsesInput::Items(items) => {
+            assert!(matches!(
+                items[0],
+                OpenAiResponsesInputItem::Message {
+                    role: OpenAiResponsesMessageRole::User,
+                    ..
+                }
+            ));
+        }
+        OpenAiResponsesInput::Text(_) => panic!("expected item input"),
+    }
     assert_eq!(items.tools.as_ref().expect("tools").len(), 1);
+}
+
+#[test]
+fn responses_items_are_tagged_and_reject_contradictory_fields() {
+    let function_call: OpenAiResponsesInputItem = serde_json::from_value(json!({
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "lookup_order",
+        "arguments": "{\"id\":\"123\"}"
+    }))
+    .expect("function call input item");
+    assert!(matches!(
+        function_call,
+        OpenAiResponsesInputItem::FunctionCall { .. }
+    ));
+
+    let invalid = serde_json::from_value::<OpenAiResponsesInputItem>(json!({
+        "type": "message",
+        "role": "user",
+        "content": "hello",
+        "arguments": "{}"
+    }))
+    .expect_err("typed item must reject fields from another variant");
+    assert!(invalid.to_string().contains("unknown field"));
 }
 
 #[test]
@@ -135,7 +172,27 @@ fn response_dtos_serialize_openai_shapes() {
         created_at: 1_777_777_777,
         status: OpenAiResponseStatus::Completed,
         model: "gpt-reborn".to_string(),
-        output: Vec::new(),
+        output: vec![
+            OpenAiResponseOutputItem::Message {
+                id: "msg_1".to_string(),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                role: OpenAiResponsesMessageRole::Assistant,
+                content: json!([{"type": "output_text", "text": "hello"}]),
+            },
+            OpenAiResponseOutputItem::FunctionCall {
+                id: "fc_1".to_string(),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                call_id: "call_1".to_string(),
+                name: "lookup_order".to_string(),
+                arguments: "{\"id\":\"123\"}".to_string(),
+            },
+            OpenAiResponseOutputItem::FunctionCallOutput {
+                id: "fco_1".to_string(),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                call_id: "call_1".to_string(),
+                output: json!({"ok": true}),
+            },
+        ],
         error: None,
         incomplete_details: None,
         usage: Some(OpenAiResponseUsage {
@@ -147,6 +204,9 @@ fn response_dtos_serialize_openai_shapes() {
     let response_json = serde_json::to_value(response).expect("response json");
     assert_eq!(response_json["object"], "response");
     assert_eq!(response_json["status"], "completed");
+    assert_eq!(response_json["output"][0]["type"], "message");
+    assert_eq!(response_json["output"][1]["type"], "function_call");
+    assert_eq!(response_json["output"][2]["type"], "function_call_output");
     assert_eq!(response_json["usage"]["input_tokens"], 3);
     assert!(response_json["usage"].get("prompt_tokens").is_none());
 }

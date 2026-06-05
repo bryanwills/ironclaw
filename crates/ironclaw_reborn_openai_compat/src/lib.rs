@@ -47,6 +47,7 @@ pub use responses::{
     OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,
     OpenAiResponseOutputItemStatus, OpenAiResponseStatus, OpenAiResponseUsage,
     OpenAiResponsesCreateRequest, OpenAiResponsesInput, OpenAiResponsesInputItem,
+    OpenAiResponsesMessageRole,
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use router::openai_compat_router;

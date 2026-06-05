@@ -61,6 +61,19 @@ fn busy_and_transient_failures_keep_retryable_status_mapping() {
 }
 
 #[test]
+fn server_status_codes_collapse_to_service_unavailable() {
+    for status in [500, 501, 502, 503, 504, 599, 200] {
+        let error = OpenAiCompatHttpError::from_kind(
+            status,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        );
+        assert_eq!(error.status_code(), 503, "{status}");
+    }
+}
+
+#[test]
 fn error_mapping_does_not_serialize_backend_or_secret_details() {
     let error = OpenAiCompatHttpError::from_product_adapter_error(ProductAdapterError::Internal {
         detail: RedactedString::new(

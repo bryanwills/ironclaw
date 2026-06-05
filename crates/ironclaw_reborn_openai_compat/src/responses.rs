@@ -26,21 +26,30 @@ pub enum OpenAiResponsesInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OpenAiResponsesInputItem {
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub item_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<serde_json::Value>,
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OpenAiResponsesInputItem {
+    Message {
+        role: OpenAiResponsesMessageRole,
+        content: serde_json::Value,
+    },
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    FunctionCallOutput {
+        call_id: String,
+        output: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenAiResponsesMessageRole {
+    System,
+    Developer,
+    User,
+    Assistant,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,16 +88,30 @@ pub enum OpenAiResponseStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OpenAiResponseOutputItem {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub item_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<OpenAiResponseOutputItemStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<serde_json::Value>,
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OpenAiResponseOutputItem {
+    Message {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<OpenAiResponseOutputItemStatus>,
+        role: OpenAiResponsesMessageRole,
+        content: serde_json::Value,
+    },
+    FunctionCall {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<OpenAiResponseOutputItemStatus>,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    FunctionCallOutput {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<OpenAiResponseOutputItemStatus>,
+        call_id: String,
+        output: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

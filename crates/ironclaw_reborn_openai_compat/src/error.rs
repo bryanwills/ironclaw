@@ -264,10 +264,10 @@ impl ErrorSpec {
 }
 
 fn sanitize_status_code(status_code: u16) -> u16 {
-    if (400..=599).contains(&status_code) {
+    if (400..=499).contains(&status_code) {
         status_code
     } else {
-        500
+        503
     }
 }
 
