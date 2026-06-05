@@ -294,8 +294,7 @@ impl FilesystemIdempotencyLedger {
         self.settled_since_prune
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1)
-            % interval
-            == 0
+            .is_multiple_of(interval)
     }
 
     async fn try_acquire_prune_lease(&self) -> Result<bool, ProductWorkflowError> {
@@ -1017,13 +1016,11 @@ fn action_path(
 }
 
 fn default_ledger_root() -> VirtualPath {
-    // safety: DEFAULT_LEDGER_ROOT is a static absolute virtual path literal.
-    VirtualPath::new(DEFAULT_LEDGER_ROOT).expect("default ledger root is a valid virtual path")
+    VirtualPath::new(DEFAULT_LEDGER_ROOT).expect("default ledger root is a valid virtual path") // safety: DEFAULT_LEDGER_ROOT is a static absolute virtual path literal.
 }
 
 fn default_scoped_ledger_root() -> ScopedPath {
-    // safety: DEFAULT_LEDGER_ROOT is also valid in the scoped path grammar.
-    ScopedPath::new(DEFAULT_LEDGER_ROOT).expect("default ledger root is a valid scoped path")
+    ScopedPath::new(DEFAULT_LEDGER_ROOT).expect("default ledger root is a valid scoped path") // safety: DEFAULT_LEDGER_ROOT is also valid in the scoped path grammar.
 }
 
 fn scoped_ledger_root_for_scope(root: ScopedPath, scope: &ResourceScope) -> ScopedPath {
@@ -1057,8 +1054,7 @@ fn scoped_ledger_root_for_scope(root: ScopedPath, scope: &ResourceScope) -> Scop
         hex_component(mission_id),
         hex_component(thread_id)
     );
-    // safety: the input root is valid and every appended component is hex-encoded.
-    ScopedPath::new(path).expect("scope-partitioned ledger root is a valid scoped path")
+    ScopedPath::new(path).expect("scope-partitioned ledger root is a valid scoped path") // safety: the input root is valid and every appended component is hex-encoded.
 }
 
 fn ledger_path_kind_error(operation: FilesystemOperation) -> FilesystemError {

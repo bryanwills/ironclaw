@@ -132,7 +132,6 @@ where
         ) {
             Ok(value) => value,
             Err(error) => {
-                restore_staged_secrets(secret_injections, request, &mut credential_materials);
                 request.credential_injections = credential_injections;
                 return Err(error);
             }
@@ -152,7 +151,6 @@ where
         if let Err(error) =
             apply_credential_injection(request, &mut parsed_url, &injection.target, plaintext)
         {
-            restore_staged_secrets(secret_injections, request, &mut credential_materials);
             request.credential_injections = credential_injections;
             return Err(error);
         }
@@ -162,37 +160,6 @@ where
         request.url = url.to_string();
     }
     Ok(redaction_values)
-}
-
-fn restore_staged_secrets(
-    secret_injections: Option<&RuntimeSecretInjectionStore>,
-    request: &RuntimeHttpEgressRequest,
-    cache: &mut Vec<CredentialCacheEntry>,
-) {
-    let Some(secret_injections) = secret_injections else {
-        return;
-    };
-    for entry in cache.drain(..) {
-        let (
-            CredentialCacheKey::StagedObligation {
-                capability_id,
-                handle,
-            },
-            Some(material),
-        ) = (entry.key, entry.value)
-        else {
-            continue;
-        };
-        if let Err(error) =
-            secret_injections.insert(&request.scope, &capability_id, &handle, material)
-        {
-            tracing::debug!(
-                error = ?error,
-                capability_id = %capability_id,
-                "runtime HTTP egress failed to restore staged secret after injection failure"
-            );
-        }
-    }
 }
 
 fn credential_value_for_injection<'cache, S>(
@@ -234,7 +201,7 @@ fn staged_secret_for_injection(
     let Some(secret_injections) = secret_injections else {
         return missing_runtime_credential(injection.required);
     };
-    match secret_injections.take(&request.scope, capability_id, &injection.handle) {
+    match secret_injections.get(&request.scope, capability_id, &injection.handle) {
         Ok(Some(material)) => Ok(Some(material)),
         Ok(None) => missing_runtime_credential(injection.required),
         Err(_) => Err(RuntimeHttpEgressError::Credential {
