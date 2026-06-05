@@ -1,0 +1,307 @@
+use std::sync::Arc;
+
+use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId, VirtualPath};
+use ironclaw_reborn_openai_compat::{
+    OpenAiCompatActorScope, OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyKey,
+    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
+    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatResourceBinding, OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef,
+};
+use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
+
+#[tokio::test]
+async fn durable_store_replays_same_idempotency_key_after_reopen() {
+    let (filesystem, root, store) = test_store("replay");
+    let request = reservation("tenant-a", "alice", "same-key", b"same body");
+    let created = expect_created(store.reserve(request.clone()).await);
+
+    let reopened = FilesystemOpenAiCompatRefStore::with_root(filesystem, root);
+    let replayed = expect_replayed(reopened.reserve(request).await);
+
+    assert_eq!(replayed.public_id, created.public_id);
+    assert_eq!(replayed.request_fingerprint, created.request_fingerprint);
+}
+
+#[tokio::test]
+async fn durable_store_conflicts_same_key_different_body_after_reopen() {
+    let (filesystem, root, store) = test_store("conflict");
+    let request = reservation("tenant-a", "alice", "same-key", b"first body");
+    let created = expect_created(store.reserve(request).await);
+
+    let reopened = FilesystemOpenAiCompatRefStore::with_root(filesystem, root);
+    let conflict = reopened
+        .reserve(reservation(
+            "tenant-a",
+            "alice",
+            "same-key",
+            b"different body",
+        ))
+        .await
+        .expect("reserve should not fail");
+
+    assert!(matches!(
+        conflict,
+        OpenAiCompatRefReservationOutcome::Conflict(_)
+    ));
+    let replayed = expect_replayed(
+        reopened
+            .reserve(reservation("tenant-a", "alice", "same-key", b"first body"))
+            .await,
+    );
+    assert_eq!(replayed.public_id, created.public_id);
+}
+
+#[tokio::test]
+async fn durable_store_without_idempotency_key_always_creates_new_public_ref() {
+    let (_, _, store) = test_store("no-key");
+    let owner = actor("tenant-a", "alice");
+    let fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(b"same body");
+
+    let first = expect_created(
+        store
+            .reserve(OpenAiCompatRefReservation::new(
+                owner.clone(),
+                OpenAiCompatRouteSurface::ResponsesApi,
+                fingerprint.clone(),
+                None,
+            ))
+            .await,
+    );
+    let second = expect_created(
+        store
+            .reserve(OpenAiCompatRefReservation::new(
+                owner,
+                OpenAiCompatRouteSurface::ResponsesApi,
+                fingerprint,
+                None,
+            ))
+            .await,
+    );
+
+    assert_ne!(first.public_id, second.public_id);
+}
+
+#[tokio::test]
+async fn durable_store_does_not_leak_unauthorized_refs() {
+    let (_, _, store) = test_store("auth");
+    let created = expect_created(
+        store
+            .reserve(reservation("tenant-a", "alice", "key", b"body"))
+            .await,
+    );
+
+    let bob_lookup = store
+        .lookup_authorized(OpenAiCompatRefLookup::new(
+            actor("tenant-a", "bob"),
+            created.public_id.clone(),
+            OpenAiCompatRefOperation::Retrieve,
+        ))
+        .await
+        .expect("lookup");
+
+    assert!(bob_lookup.is_none());
+}
+
+#[tokio::test]
+async fn durable_store_persists_bound_internal_refs() {
+    let (filesystem, root, store) = test_store("bind");
+    let created = expect_created(
+        store
+            .reserve(reservation("tenant-a", "alice", "key", b"body"))
+            .await,
+    );
+    let internal_refs = OpenAiCompatInternalRefs::new(
+        OpenAiCompatProductActionRef::new("product-action:1").expect("valid product action ref"),
+    )
+    .with_turn_run_ref(OpenAiCompatTurnRunRef::new("turn-run:1").expect("valid turn run ref"))
+    .with_projection_ref(OpenAiCompatProjectionRef::new("projection:1").expect("valid projection"));
+
+    let bound = store
+        .bind_internal_refs(OpenAiCompatBindInternalRefs::new(
+            actor("tenant-a", "alice"),
+            created.public_id.clone(),
+            internal_refs.clone(),
+        ))
+        .await
+        .expect("bind")
+        .expect("mapping should exist");
+
+    assert_eq!(
+        bound.binding,
+        OpenAiCompatResourceBinding::Bound {
+            internal_refs: internal_refs.clone()
+        }
+    );
+
+    let reopened = FilesystemOpenAiCompatRefStore::with_root(filesystem, root);
+    let loaded = reopened
+        .lookup_authorized(OpenAiCompatRefLookup::new(
+            actor("tenant-a", "alice"),
+            created.public_id,
+            OpenAiCompatRefOperation::StreamResume,
+        ))
+        .await
+        .expect("lookup")
+        .expect("mapping should survive reopen");
+
+    assert_eq!(
+        loaded.binding,
+        OpenAiCompatResourceBinding::Bound { internal_refs }
+    );
+}
+
+#[tokio::test]
+async fn durable_store_cross_actor_bind_is_indistinguishable_from_missing() {
+    let (_, _, store) = test_store("bind-auth");
+    let created = expect_created(
+        store
+            .reserve(reservation("tenant-a", "alice", "key", b"body"))
+            .await,
+    );
+    let internal_refs = OpenAiCompatInternalRefs::new(
+        OpenAiCompatProductActionRef::new("product-action:1").expect("valid product action ref"),
+    );
+
+    let denied = store
+        .bind_internal_refs(OpenAiCompatBindInternalRefs::new(
+            actor("tenant-a", "bob"),
+            created.public_id.clone(),
+            internal_refs,
+        ))
+        .await
+        .expect("bind");
+
+    assert!(denied.is_none());
+    let loaded = store
+        .lookup_authorized(OpenAiCompatRefLookup::new(
+            actor("tenant-a", "alice"),
+            created.public_id,
+            OpenAiCompatRefOperation::Cancel,
+        ))
+        .await
+        .expect("lookup")
+        .expect("mapping exists");
+    assert!(matches!(
+        loaded.binding,
+        OpenAiCompatResourceBinding::Pending
+    ));
+}
+
+#[tokio::test]
+async fn durable_store_retries_concurrent_same_key_to_single_mapping() {
+    let (_, _, store) = test_store("concurrent");
+    let left_request = reservation("tenant-a", "alice", "same-key", b"same body");
+    let right_request = left_request.clone();
+
+    let (left, right) = tokio::join!(store.reserve(left_request), store.reserve(right_request));
+    let mappings = [left.expect("left"), right.expect("right")]
+        .into_iter()
+        .filter_map(|outcome| outcome.mapping().cloned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(mappings.len(), 2);
+    assert_eq!(mappings[0].public_id, mappings[1].public_id);
+}
+
+#[tokio::test]
+async fn durable_store_rejects_corrupt_persisted_state() {
+    let (filesystem, root, store) = test_store("corrupt");
+    let state_path = VirtualPath::new(format!("{}/state.json", root.as_str()))
+        .expect("valid OpenAI-compatible ref state path");
+    filesystem
+        .put(
+            &state_path,
+            Entry::bytes(b"{ malformed json".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("write malformed state");
+
+    let error = store
+        .lookup_authorized(OpenAiCompatRefLookup::new(
+            actor("tenant-a", "alice"),
+            expect_created(
+                FilesystemOpenAiCompatRefStore::with_root(
+                    Arc::new(InMemoryBackend::new()),
+                    root_for("unused"),
+                )
+                .reserve(reservation("tenant-a", "alice", "key", b"body"))
+                .await,
+            )
+            .public_id,
+            OpenAiCompatRefOperation::Retrieve,
+        ))
+        .await
+        .expect_err("malformed state should fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_reborn_openai_compat::OpenAiCompatRefError::CorruptMapping
+    ));
+}
+
+fn test_store(
+    suffix: &str,
+) -> (
+    Arc<InMemoryBackend>,
+    VirtualPath,
+    FilesystemOpenAiCompatRefStore,
+) {
+    let filesystem = Arc::new(InMemoryBackend::new());
+    let root = root_for(suffix);
+    let store = FilesystemOpenAiCompatRefStore::with_root(filesystem.clone(), root.clone());
+    (filesystem, root, store)
+}
+
+fn root_for(suffix: &str) -> VirtualPath {
+    VirtualPath::new(format!("/engine/openai_compat/test/{suffix}")).expect("valid test root")
+}
+
+fn reservation(
+    tenant_id: &str,
+    user_id: &str,
+    idempotency_key: &str,
+    body: &[u8],
+) -> OpenAiCompatRefReservation {
+    OpenAiCompatRefReservation::new(
+        actor(tenant_id, user_id),
+        OpenAiCompatRouteSurface::ResponsesApi,
+        OpenAiCompatRequestFingerprint::from_body_bytes(body),
+        Some(OpenAiCompatIdempotencyKey::new(idempotency_key).expect("valid idempotency key")),
+    )
+}
+
+fn actor(tenant_id: &str, user_id: &str) -> OpenAiCompatActorScope {
+    OpenAiCompatActorScope::new(
+        TenantId::new(tenant_id).expect("valid tenant"),
+        UserId::new(user_id).expect("valid user"),
+        Some(AgentId::new("agent-a").expect("valid agent")),
+        Some(ProjectId::new("project-a").expect("valid project")),
+    )
+}
+
+fn expect_created(
+    result: Result<
+        OpenAiCompatRefReservationOutcome,
+        ironclaw_reborn_openai_compat::OpenAiCompatRefError,
+    >,
+) -> ironclaw_reborn_openai_compat::OpenAiCompatResourceMapping {
+    match result.expect("reserve should not fail") {
+        OpenAiCompatRefReservationOutcome::Created(mapping) => mapping,
+        other => panic!("expected created mapping, got {other:?}"),
+    }
+}
+
+fn expect_replayed(
+    result: Result<
+        OpenAiCompatRefReservationOutcome,
+        ironclaw_reborn_openai_compat::OpenAiCompatRefError,
+    >,
+) -> ironclaw_reborn_openai_compat::OpenAiCompatResourceMapping {
+    match result.expect("reserve should not fail") {
+        OpenAiCompatRefReservationOutcome::Replayed(mapping) => mapping,
+        other => panic!("expected replayed mapping, got {other:?}"),
+    }
+}

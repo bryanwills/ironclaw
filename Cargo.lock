@@ -5078,6 +5078,7 @@ dependencies = [
 name = "ironclaw_reborn_openai_compat"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum 0.8.9",
  "http 1.4.1",
  "http-body-util",
@@ -5085,8 +5086,25 @@ dependencies = [
  "ironclaw_product_adapters",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_reborn_openai_compat_storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_reborn_openai_compat",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 
