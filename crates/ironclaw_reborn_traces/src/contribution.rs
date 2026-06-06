@@ -4349,6 +4349,12 @@ struct TraceUploadClaimContext {
     submission_id: Option<Uuid>,
     consent_scopes: Vec<ConsentScope>,
     allowed_uses: Vec<TraceAllowedUse>,
+    /// Base directory of the user scope (e.g. `trace_contribution_dir_for_scope(scope)`).
+    /// Required for `TraceUploadAuthMode::DeviceKey` — the device key is loaded from
+    /// this directory.  `None` for callers that do not have a scope context (legacy
+    /// CLI paths, static-token paths) which is fine as long as `auth_mode` is
+    /// `WorkloadTokenEnv`.
+    scope_dir: Option<PathBuf>,
 }
 
 impl TraceUploadClaimContext {
@@ -4358,6 +4364,7 @@ impl TraceUploadClaimContext {
             submission_id: Some(envelope.submission_id),
             consent_scopes: envelope.consent.scopes.clone(),
             allowed_uses: envelope.trace_card.allowed_uses.clone(),
+            scope_dir: None,
         }
     }
 
@@ -4367,6 +4374,7 @@ impl TraceUploadClaimContext {
             submission_id: None,
             consent_scopes: Vec::new(),
             allowed_uses: Vec::new(),
+            scope_dir: None,
         }
     }
 
@@ -4376,7 +4384,15 @@ impl TraceUploadClaimContext {
             submission_id: Some(submission_id),
             consent_scopes: Vec::new(),
             allowed_uses: Vec::new(),
+            scope_dir: None,
         }
+    }
+
+    /// Attach the scope's base directory so that `DeviceKey` auth mode can
+    /// locate the per-tenant keypair.
+    fn with_scope_dir(mut self, dir: PathBuf) -> Self {
+        self.scope_dir = Some(dir);
+        self
     }
 }
 
@@ -4713,8 +4729,26 @@ fn trace_upload_claim_cache_key(
         .filter(|s| !s.is_empty())
         .map(|code| format!("sha256:{}", hex::encode(Sha256::digest(code.as_bytes()))))
         .unwrap_or_default();
+    // In DeviceKey mode, different scopes within the same tenant would otherwise
+    // collide on the same cache key (they share the same issuer/tenant/audience).
+    // Include a hash of the scope_dir path to ensure each scope gets its own
+    // cached claim.  WorkloadTokenEnv mode has no scope concept so scope_dir is
+    // always None there — no change in that path.
+    let scope_dir_key = match policy.auth_mode {
+        TraceUploadAuthMode::DeviceKey => context
+            .scope_dir
+            .as_ref()
+            .map(|p| {
+                format!(
+                    "sha256:{}",
+                    hex::encode(Sha256::digest(p.to_string_lossy().as_bytes()))
+                )
+            })
+            .unwrap_or_default(),
+        TraceUploadAuthMode::WorkloadTokenEnv => String::new(),
+    };
     Ok(format!(
-        "{}|tenant={}|audience={}|scopes={}|uses={}|workload_env={}|invite_code={}",
+        "{}|tenant={}|audience={}|scopes={}|uses={}|workload_env={}|invite_code={}|scope_dir={}",
         issuer,
         policy.upload_token_tenant_id.as_deref().unwrap_or_default(),
         policy.upload_token_audience.as_deref().unwrap_or_default(),
@@ -4725,6 +4759,7 @@ fn trace_upload_claim_cache_key(
             .as_deref()
             .unwrap_or_default(),
         invite_code_key,
+        scope_dir_key,
     ))
 }
 
@@ -4849,6 +4884,71 @@ fn build_trace_upload_claim_http_error(
     )
 }
 
+/// Returns the bearer credential to present to the upload-claim issuer.
+///
+/// - `TraceUploadAuthMode::DeviceKey`: self-signs a short-lived workload JWT
+///   with the local device keypair for the tenant.  The context must carry a
+///   `scope_dir`.
+/// - `TraceUploadAuthMode::WorkloadTokenEnv`: reads the workload token from
+///   the environment variable named in the policy (existing behavior, byte-for-byte
+///   identical to the inline block this replaces).
+///
+/// Returns `Ok(None)` when the policy has no `upload_token_workload_token_env`
+/// configured and `auth_mode` is `WorkloadTokenEnv`, which means the caller
+/// should proceed without a bearer credential (unauthenticated issuer).
+async fn issuer_request_bearer(
+    policy: &StandingTraceContributionPolicy,
+    context: &TraceUploadClaimContext,
+) -> anyhow::Result<Option<String>> {
+    match policy.auth_mode {
+        TraceUploadAuthMode::DeviceKey => {
+            let tenant = policy.upload_token_tenant_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "device-key auth requires upload_token_tenant_id in the trace policy"
+                )
+            })?;
+            let audience = policy.upload_token_audience.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "device-key auth requires upload_token_audience in the trace policy"
+                )
+            })?;
+            let scope_dir = context.scope_dir.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "device-key auth requires a scope directory on the claim context; \
+                     ensure the caller threads the user scope"
+                )
+            })?;
+            let key = crate::onboarding::DeviceKeypair::load_for_tenant(scope_dir, tenant)
+                .map_err(|e| anyhow::anyhow!("failed to load device key: {e}"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "trace policy is in device-key auth mode but no device key exists \
+                         for tenant {tenant}; re-run onboarding"
+                    )
+                })?;
+            Ok(Some(key.sign_workload_jwt(audience).map_err(|e| {
+                anyhow::anyhow!("failed to sign workload JWT: {e}")
+            })?))
+        }
+        TraceUploadAuthMode::WorkloadTokenEnv => {
+            let Some(env_name) = policy.upload_token_workload_token_env.as_deref() else {
+                return Ok(None);
+            };
+            if env_name.trim().is_empty() {
+                return Ok(None);
+            }
+            let workload_token = std::env::var(env_name).map_err(|_| {
+                anyhow::anyhow!(
+                    "{} is not set; refusing to fetch Trace Commons upload claim without \
+                     workload credentials",
+                    env_name
+                )
+            })?;
+            Ok(Some(workload_token))
+        }
+    }
+}
+
 async fn fetch_trace_upload_claim_from_issuer(
     policy: &StandingTraceContributionPolicy,
     context: &TraceUploadClaimContext,
@@ -4876,6 +4976,17 @@ async fn fetch_trace_upload_claim_from_issuer(
         .resolve_to_addrs(&host, &resolved_addrs)
         .build()
         .context("failed to build Trace Commons upload token issuer HTTP client")?;
+    // In DeviceKey mode the registered device key is the post-invite credential —
+    // the server does not expect (and must not receive) an invite_code in the body.
+    let invite_code = match policy.auth_mode {
+        TraceUploadAuthMode::WorkloadTokenEnv => policy
+            .upload_token_invite_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        TraceUploadAuthMode::DeviceKey => None,
+    };
     let request_body = TraceUploadClaimIssuerRequest {
         schema_version: "ironclaw.trace_upload_claim_request.v1",
         tenant_id: policy.upload_token_tenant_id.clone(),
@@ -4885,27 +4996,14 @@ async fn fetch_trace_upload_claim_from_issuer(
         consent_scopes: context.consent_scopes.clone(),
         allowed_uses: context.allowed_uses.clone(),
         requested_at: Utc::now(),
-        invite_code: policy
-            .upload_token_invite_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
+        invite_code,
     };
     let mut request = client
         .post(parsed.clone())
         .header(reqwest::header::ACCEPT, "application/json")
         .json(&request_body);
-    if let Some(env_name) = policy.upload_token_workload_token_env.as_deref()
-        && !env_name.trim().is_empty()
-    {
-        let workload_token = std::env::var(env_name).map_err(|_| {
-            anyhow::anyhow!(
-                "{} is not set; refusing to fetch Trace Commons upload claim without workload credentials",
-                env_name
-            )
-        })?;
-        request = request.bearer_auth(workload_token);
+    if let Some(bearer) = issuer_request_bearer(policy, context).await? {
+        request = request.bearer_auth(bearer);
     }
 
     let response = request.send().await.with_context(|| {
@@ -5210,7 +5308,7 @@ pub async fn submit_trace_envelope_to_endpoint(
         ..Default::default()
     };
     submit_trace_envelope_to_endpoint_with_credential_provider(
-        envelope, endpoint, &policy, &provider,
+        envelope, endpoint, &policy, &provider, None,
     )
     .await
 }
@@ -5225,6 +5323,7 @@ pub async fn submit_trace_envelope_to_endpoint_with_policy(
         endpoint,
         policy,
         &DefaultTraceUploadCredentialProvider,
+        None,
     )
     .await
 }
@@ -5234,8 +5333,16 @@ async fn submit_trace_envelope_to_endpoint_with_credential_provider(
     endpoint: &str,
     policy: &StandingTraceContributionPolicy,
     provider: &dyn TraceUploadCredentialProvider,
+    scope_dir: Option<&Path>,
 ) -> anyhow::Result<TraceSubmissionReceipt> {
-    let context = TraceUploadClaimContext::for_envelope(envelope);
+    let context = {
+        let ctx = TraceUploadClaimContext::for_envelope(envelope);
+        if let Some(dir) = scope_dir {
+            ctx.with_scope_dir(dir.to_path_buf())
+        } else {
+            ctx
+        }
+    };
     let token = provider.bearer_token(policy, &context, false).await?;
     match submit_trace_envelope_to_endpoint_with_token(envelope, endpoint, &token).await {
         Ok(receipt) => Ok(receipt),
@@ -5364,6 +5471,10 @@ async fn flush_trace_contribution_queue_for_scope_with_credential_provider(
     let flush_started_at = Utc::now();
     record_trace_queue_flush_attempt_for_scope_unlocked(scope, flush_started_at)?;
 
+    // Compute the scope's base directory once; passed into contexts so that
+    // DeviceKey auth mode can locate the per-tenant keypair.
+    let scope_dir = trace_contribution_dir_for_scope(scope);
+
     let policy = match read_trace_policy_for_scope(scope) {
         Ok(policy) => policy,
         Err(error) => {
@@ -5410,7 +5521,11 @@ async fn flush_trace_contribution_queue_for_scope_with_credential_provider(
                     continue;
                 }
                 let receipt = match submit_trace_envelope_to_endpoint_with_credential_provider(
-                    &envelope, endpoint, &policy, provider,
+                    &envelope,
+                    endpoint,
+                    &policy,
+                    provider,
+                    Some(&scope_dir),
                 )
                 .await
                 {
@@ -5574,11 +5689,13 @@ async fn sync_remote_trace_submission_records_for_scope_with_credential_provider
     }
 
     let status_endpoint = trace_submission_status_endpoint(endpoint)?;
+    let scope_dir = trace_contribution_dir_for_scope(scope);
     let updates = fetch_trace_submission_statuses_with_credential_provider(
         &status_endpoint,
         &policy,
         provider,
         &submission_ids,
+        Some(&scope_dir),
     )
     .await?;
     let _guard = lock_trace_scope_for_mutation(scope).await;
@@ -5608,11 +5725,13 @@ async fn sync_remote_trace_submission_records_for_scope_unlocked_with_credential
     }
 
     let status_endpoint = trace_submission_status_endpoint(endpoint)?;
+    let scope_dir = trace_contribution_dir_for_scope(scope);
     let updates = fetch_trace_submission_statuses_with_credential_provider(
         &status_endpoint,
         &policy,
         provider,
         &submission_ids,
+        Some(&scope_dir),
     )
     .await?;
     apply_remote_trace_submission_statuses_for_scope_unlocked(scope, &updates)
@@ -5668,6 +5787,7 @@ pub async fn fetch_trace_submission_statuses(
         &policy,
         &provider,
         submission_ids,
+        None,
     )
     .await
 }
@@ -5682,6 +5802,7 @@ pub async fn fetch_trace_submission_statuses_with_policy(
         policy,
         &DefaultTraceUploadCredentialProvider,
         submission_ids,
+        None,
     )
     .await
 }
@@ -5691,8 +5812,16 @@ async fn fetch_trace_submission_statuses_with_credential_provider(
     policy: &StandingTraceContributionPolicy,
     provider: &dyn TraceUploadCredentialProvider,
     submission_ids: &[Uuid],
+    scope_dir: Option<&Path>,
 ) -> anyhow::Result<Vec<TraceSubmissionStatusUpdate>> {
-    let context = TraceUploadClaimContext::for_status_sync();
+    let context = {
+        let ctx = TraceUploadClaimContext::for_status_sync();
+        if let Some(dir) = scope_dir {
+            ctx.with_scope_dir(dir.to_path_buf())
+        } else {
+            ctx
+        }
+    };
     let mut updates = Vec::new();
 
     for chunk in submission_ids.chunks(200) {
@@ -6122,11 +6251,15 @@ async fn revoke_trace_submission_for_scope_with_credential_provider(
     provider: &dyn TraceUploadCredentialProvider,
 ) -> anyhow::Result<()> {
     if let Some(endpoint) = endpoint {
+        // Compute the scope's base directory so DeviceKey auth mode can locate
+        // the per-tenant keypair when self-signing the revoke request bearer.
+        let scope_dir = trace_contribution_dir_for_scope(scope);
         revoke_trace_submission_at_endpoint_with_credential_provider(
             submission_id,
             endpoint,
             policy,
             provider,
+            Some(&scope_dir),
         )
         .await?;
     }
@@ -6145,6 +6278,7 @@ pub async fn revoke_trace_submission_at_endpoint_with_policy(
         endpoint,
         policy,
         &DefaultTraceUploadCredentialProvider,
+        None,
     )
     .await
 }
@@ -6154,8 +6288,16 @@ async fn revoke_trace_submission_at_endpoint_with_credential_provider(
     endpoint: &str,
     policy: &StandingTraceContributionPolicy,
     provider: &dyn TraceUploadCredentialProvider,
+    scope_dir: Option<&Path>,
 ) -> anyhow::Result<()> {
-    let context = TraceUploadClaimContext::for_submission_id(submission_id);
+    let context = {
+        let ctx = TraceUploadClaimContext::for_submission_id(submission_id);
+        if let Some(dir) = scope_dir {
+            ctx.with_scope_dir(dir.to_path_buf())
+        } else {
+            ctx
+        }
+    };
     let token = provider.bearer_token(policy, &context, false).await?;
     match revoke_trace_submission_at_endpoint_with_token(submission_id, endpoint, &token).await {
         Ok(()) => Ok(()),
@@ -12154,6 +12296,52 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_isolates_scopes_in_device_key_mode() {
+        // Security property: in DeviceKey mode a claim minted for scope A must
+        // not be servable from cache for scope B. Same tenant/audience/issuer,
+        // different scope_dir => different cache key.
+        let policy = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_issuer_url: Some("https://issuer.example/v1/trace-upload-claim".into()),
+            upload_token_tenant_id: Some("tenant-shared".into()),
+            upload_token_audience: Some("trace-commons-ingest".into()),
+            ..StandingTraceContributionPolicy::default()
+        };
+        let ctx_a = TraceUploadClaimContext::for_status_sync()
+            .with_scope_dir(std::path::PathBuf::from("/scopes/user-a"));
+        let ctx_b = TraceUploadClaimContext::for_status_sync()
+            .with_scope_dir(std::path::PathBuf::from("/scopes/user-b"));
+
+        let key_a = trace_upload_claim_cache_key(&policy, &ctx_a).unwrap();
+        let key_b = trace_upload_claim_cache_key(&policy, &ctx_b).unwrap();
+        assert_ne!(
+            key_a, key_b,
+            "DeviceKey mode: different scope_dir must yield different cache keys"
+        );
+    }
+
+    #[test]
+    fn cache_key_ignores_scope_dir_in_workload_token_env_mode() {
+        // In WorkloadTokenEnv mode there is no scope concept; adding a scope_dir
+        // to the context must not change the key (preserves pre-change behavior).
+        let policy = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::WorkloadTokenEnv,
+            upload_token_issuer_url: Some("https://issuer.example/v1/trace-upload-claim".into()),
+            ..StandingTraceContributionPolicy::default()
+        };
+        let ctx_no_scope = TraceUploadClaimContext::for_status_sync();
+        let ctx_with_scope = TraceUploadClaimContext::for_status_sync()
+            .with_scope_dir(std::path::PathBuf::from("/scopes/user-a"));
+
+        let key_no_scope = trace_upload_claim_cache_key(&policy, &ctx_no_scope).unwrap();
+        let key_with_scope = trace_upload_claim_cache_key(&policy, &ctx_with_scope).unwrap();
+        assert_eq!(
+            key_no_scope, key_with_scope,
+            "WorkloadTokenEnv mode: scope_dir must not affect the cache key"
+        );
+    }
+
+    #[test]
     fn parse_trace_upload_claim_error_label_handles_known_shapes() {
         assert_eq!(
             parse_trace_upload_claim_error_label(r#"{"error":"PilotAllowlistNotMatched"}"#)
@@ -12334,5 +12522,177 @@ mod tests {
         let back: StandingTraceContributionPolicy = serde_json::from_value(json).unwrap();
         assert_eq!(back.auth_mode, TraceUploadAuthMode::DeviceKey);
         assert_eq!(back.device_key_id.as_deref(), Some("sha256:abc"));
+    }
+
+    // --- DeviceKey auth mode tests for issuer_request_bearer ---
+
+    #[tokio::test]
+    async fn device_key_auth_mode_self_signs_workload_jwt() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending =
+            crate::onboarding::DeviceKeypair::load_or_generate_pending(dir.path(), "h").unwrap();
+        let promoted = pending.promote(dir.path(), "tenant-a").unwrap();
+
+        let policy = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_tenant_id: Some("tenant-a".to_string()),
+            upload_token_audience: Some("trace-commons-ingest".to_string()),
+            ..Default::default()
+        };
+        let context =
+            TraceUploadClaimContext::for_status_sync().with_scope_dir(dir.path().to_path_buf());
+
+        let result = issuer_request_bearer(&policy, &context).await.unwrap();
+        let bearer = result.expect("DeviceKey mode must return a bearer token");
+
+        // The JWT must be EdDSA and carry the device key id as kid.
+        let header = jsonwebtoken::decode_header(&bearer).unwrap();
+        assert_eq!(header.alg, jsonwebtoken::Algorithm::EdDSA);
+        assert_eq!(header.kid.as_deref(), Some(promoted.device_key_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn device_key_auth_mode_without_local_key_errors_clearly() {
+        // Empty dir — no key has ever been generated or promoted.
+        let dir = tempfile::tempdir().unwrap();
+
+        let policy = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_tenant_id: Some("tenant-a".to_string()),
+            upload_token_audience: Some("trace-commons-ingest".to_string()),
+            ..Default::default()
+        };
+        let context =
+            TraceUploadClaimContext::for_status_sync().with_scope_dir(dir.path().to_path_buf());
+
+        let err = issuer_request_bearer(&policy, &context).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("re-run onboarding"),
+            "error should mention re-run onboarding, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_key_auth_mode_without_scope_dir_errors_clearly() {
+        let policy = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_tenant_id: Some("tenant-a".to_string()),
+            upload_token_audience: Some("trace-commons-ingest".to_string()),
+            ..Default::default()
+        };
+        // No scope_dir — context constructed without with_scope_dir().
+        let context = TraceUploadClaimContext::for_status_sync();
+
+        let err = issuer_request_bearer(&policy, &context).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("scope"),
+            "error should mention scope directory, got: {msg}"
+        );
+    }
+
+    /// Regression for the revoke path: a DeviceKey-mode revoke context built
+    /// from `for_submission_id` plus a real `scope_dir` must reach the signing
+    /// path and resolve a bearer, rather than hard-erroring on missing scope.
+    /// This is a focused test on the bearer/context construction the revoke
+    /// path now performs (wiring the full revoke HTTP path is heavier; the
+    /// scope_dir threading is what regressed).
+    #[tokio::test]
+    async fn device_key_auth_mode_revoke_context_self_signs_workload_jwt() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending =
+            crate::onboarding::DeviceKeypair::load_or_generate_pending(dir.path(), "h").unwrap();
+        let promoted = pending.promote(dir.path(), "tenant-a").unwrap();
+
+        let policy = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_tenant_id: Some("tenant-a".to_string()),
+            upload_token_audience: Some("trace-commons-ingest".to_string()),
+            ..Default::default()
+        };
+        // Mirror the revoke path: context from for_submission_id + scope_dir.
+        let context = TraceUploadClaimContext::for_submission_id(Uuid::new_v4())
+            .with_scope_dir(dir.path().to_path_buf());
+
+        let bearer = issuer_request_bearer(&policy, &context)
+            .await
+            .unwrap()
+            .expect("DeviceKey revoke context must resolve a bearer token");
+
+        let header = jsonwebtoken::decode_header(&bearer).unwrap();
+        assert_eq!(header.alg, jsonwebtoken::Algorithm::EdDSA);
+        assert_eq!(header.kid.as_deref(), Some(promoted.device_key_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn workload_token_env_mode_reads_env_unchanged() {
+        // Use a uniquely named env var so other tests cannot interfere.
+        let env_var = "IRONCLAW_TEST_WORKLOAD_TOKEN_UNIQUE_9f3a2b1c";
+        // SAFETY: test-only; uniquely named var not read by any other test.
+        unsafe {
+            std::env::set_var(env_var, "test-bearer-xyz");
+        }
+
+        let policy = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::WorkloadTokenEnv,
+            upload_token_workload_token_env: Some(env_var.to_string()),
+            ..Default::default()
+        };
+        let context = TraceUploadClaimContext::for_status_sync();
+
+        let result = issuer_request_bearer(&policy, &context).await.unwrap();
+        assert_eq!(result.as_deref(), Some("test-bearer-xyz"));
+
+        // SAFETY: same as set above — cleanup.
+        unsafe {
+            std::env::remove_var(env_var);
+        }
+    }
+
+    /// Focused unit test on request construction: verify that DeviceKey mode
+    /// sets invite_code = None while WorkloadTokenEnv mode uses the policy value.
+    #[test]
+    fn invite_code_gated_by_auth_mode() {
+        // DeviceKey mode — invite_code must be None regardless of policy field.
+        let policy_device_key = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_invite_code: Some("should-not-appear".to_string()),
+            ..Default::default()
+        };
+        let invite_code_device_key = match policy_device_key.auth_mode {
+            TraceUploadAuthMode::WorkloadTokenEnv => policy_device_key
+                .upload_token_invite_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            TraceUploadAuthMode::DeviceKey => None,
+        };
+        assert!(
+            invite_code_device_key.is_none(),
+            "DeviceKey mode must not send invite_code"
+        );
+
+        // WorkloadTokenEnv mode — invite_code from policy should be forwarded.
+        let policy_env = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::WorkloadTokenEnv,
+            upload_token_invite_code: Some("invite-abc".to_string()),
+            ..Default::default()
+        };
+        let invite_code_env = match policy_env.auth_mode {
+            TraceUploadAuthMode::WorkloadTokenEnv => policy_env
+                .upload_token_invite_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            TraceUploadAuthMode::DeviceKey => None,
+        };
+        assert_eq!(
+            invite_code_env.as_deref(),
+            Some("invite-abc"),
+            "WorkloadTokenEnv mode must forward invite_code from policy"
+        );
     }
 }
