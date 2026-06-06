@@ -137,12 +137,12 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy code style workflow" \
+  "shared code style workflow" \
   ".github/workflows/code_style.yml" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "docs only" \

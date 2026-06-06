@@ -33,6 +33,8 @@ jobs:
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
       has_boundary_check: ${{ steps.non_pr.outputs.has_boundary_check || steps.diff.outputs.has_boundary_check }}
+      has_legacy_tests: ${{ steps.non_pr.outputs.has_legacy_tests || steps.diff.outputs.has_legacy_tests }}
+      has_reborn_tests: ${{ steps.non_pr.outputs.has_reborn_tests || steps.diff.outputs.has_reborn_tests }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
     steps:
       - id: non_pr
@@ -40,6 +42,8 @@ jobs:
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
           echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
+          echo "has_legacy_tests=true" >> "$GITHUB_OUTPUT"
+          echo "has_reborn_tests=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -53,12 +57,14 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"...HEAD)"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile$|build\.rs$|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile$|build\.rs$|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|scripts/ci/|\.github/workflows/code_style\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "No code changes — style checks will be skipped"
           fi
+
+          printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
           if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
             echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
@@ -75,7 +81,7 @@ jobs:
   clippy-matrix:
     name: Configure clippy matrix
     needs: changes
-    if: needs.changes.outputs.has_code == 'true'
+    if: needs.changes.outputs.has_code == 'true' && needs.changes.outputs.has_legacy_tests == 'true'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
@@ -143,7 +149,7 @@ jobs:
   clippy:
     name: Clippy (${{ matrix.name }})
     needs: [changes, clippy-matrix]
-    if: needs.changes.outputs.has_code == 'true'
+    if: needs.changes.outputs.has_code == 'true' && needs.changes.outputs.has_legacy_tests == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
@@ -164,6 +170,81 @@ jobs:
           save-if: ${{ matrix.name == 'all-features' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check lints
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
+
+  reborn-clippy-matrix:
+    name: Discover Reborn clippy packages
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true' && needs.changes.outputs.has_reborn_tests == 'true' && needs.changes.outputs.has_legacy_tests != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.packages.outputs.packages }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - id: packages
+        name: Build package matrix from Reborn crate families
+        run: |
+          packages="$(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -c '
+                  [
+                    .packages[]
+                    | select(
+                        (.name | startswith("ironclaw_reborn"))
+                        or (.name | startswith("ironclaw_product"))
+                        or (.name == "ironclaw_architecture")
+                        or (.name == "ironclaw_slack_v2_adapter")
+                        or (.name == "ironclaw_telegram_v2_adapter")
+                        or (.name == "ironclaw_wasm_product_adapters")
+                        or (.name | startswith("ironclaw_webui_v2"))
+                      )
+                    | .name
+                  ]
+                  | unique
+                '
+          )"
+
+          if [ -z "${packages}" ] || [ "${packages}" = "[]" ]; then
+            echo "No Reborn workspace crates discovered" >&2
+            exit 1
+          fi
+
+          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
+          echo "Linting Reborn package crates:"
+          printf '%s\n' "${packages}" | jq -r '.[] | "- " + .'
+
+  reborn-clippy:
+    name: Reborn Clippy (${{ matrix.package }})
+    needs: [changes, reborn-clippy-matrix]
+    if: needs.changes.outputs.has_code == 'true' && needs.changes.outputs.has_reborn_tests == 'true' && needs.changes.outputs.has_legacy_tests != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        package: ${{ fromJSON(needs.reborn-clippy-matrix.outputs.packages) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-clippy-${{ matrix.package }}
+          save-if: false
+      - name: Check Reborn lints
+        run: |
+          feature_flags="$(scripts/ci/package-feature-flags.sh "${{ matrix.package }}")"
+
+          # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
+          cargo clippy -p "${{ matrix.package }}" ${feature_flags} --all-targets -- -D warnings
 
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
@@ -267,6 +348,8 @@ jobs:
       - format
       - gateway-js-syntax
       - clippy
+      - reborn-clippy-matrix
+      - reborn-clippy
       - clippy-windows
       - deny-check
       - reborn-cli-smoke
@@ -282,7 +365,6 @@ jobs:
           for job_result in \
             "format=${{ needs.format.result }}" \
             "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
-            "clippy=${{ needs.clippy.result }}" \
             "deny-check=${{ needs.deny-check.result }}" \
             "gateway-boundaries=${{ needs.gateway-boundaries.result }}"; do
             name="${job_result%%=*}"
@@ -292,6 +374,24 @@ jobs:
               exit 1
             fi
           done
+
+          if [[ "${{ needs.changes.outputs.has_legacy_tests }}" == "true" ]]; then
+            if [[ "${{ needs.clippy.result }}" != "success" ]]; then
+              echo "clippy failed: ${{ needs.clippy.result }}"
+              exit 1
+            fi
+          fi
+
+          if [[ "${{ needs.changes.outputs.has_reborn_tests }}" == "true" && "${{ needs.changes.outputs.has_legacy_tests }}" != "true" ]]; then
+            if [[ "${{ needs.reborn-clippy-matrix.result }}" != "success" ]]; then
+              echo "reborn-clippy-matrix failed: ${{ needs.reborn-clippy-matrix.result }}"
+              exit 1
+            fi
+            if [[ "${{ needs.reborn-clippy.result }}" != "success" ]]; then
+              echo "reborn-clippy failed: ${{ needs.reborn-clippy.result }}"
+              exit 1
+            fi
+          fi
 
           for job_result in \
             "no-panics=${{ needs.no-panics.result }}" \
