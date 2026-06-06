@@ -28,6 +28,9 @@ case "$1" in
   ironclaw_reborn_event_store)
     printf '%s\n' "--features libsql"
     ;;
+  ironclaw_outbound | ironclaw_triggers)
+    printf '%s\n' "--features libsql,postgres"
+    ;;
   ironclaw_reborn_webui_ingress)
     printf '%s\n' "--features dev-in-memory-session"
     ;;
