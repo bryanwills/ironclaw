@@ -7,6 +7,12 @@ if [ "$#" -ne 1 ]; then
 fi
 
 case "$1" in
+  ironclaw)
+    printf '%s\n' "--all-features"
+    ;;
+  ironclaw_host_runtime)
+    printf '%s\n' "--features test-support,libsql,postgres"
+    ;;
   ironclaw_reborn_cli)
     printf '%s\n' "--features webui-v2-beta,slack-v2-host-beta"
     ;;

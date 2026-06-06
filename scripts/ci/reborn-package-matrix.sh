@@ -8,8 +8,11 @@ cargo metadata --no-deps --format-version 1 \
         | select(
             (.name | startswith("ironclaw_reborn"))
             or (.name | startswith("ironclaw_product"))
+            or (.name == "ironclaw")
             or (.name == "ironclaw_architecture")
             or (.name == "ironclaw_conversations")
+            or (.name == "ironclaw_event_streams")
+            or (.name == "ironclaw_host_runtime")
             or (.name == "ironclaw_outbound")
             or (.name == "ironclaw_slack_v2_adapter")
             or (.name == "ironclaw_telegram_v2_adapter")
