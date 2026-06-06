@@ -32,7 +32,7 @@ async fn mounted_routes_fail_closed_until_product_workflow_is_wired() {
 
         assert_eq!(
             response.status(),
-            http::StatusCode::SERVICE_UNAVAILABLE,
+            http::StatusCode::NOT_IMPLEMENTED,
             "{path}"
         );
         let bytes = response

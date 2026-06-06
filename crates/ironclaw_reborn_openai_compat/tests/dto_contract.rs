@@ -1,6 +1,7 @@
 use ironclaw_reborn_openai_compat::{
     OpenAiChatCompletionChunk, OpenAiChatCompletionRequest, OpenAiChatCompletionResponse,
-    OpenAiChatFinishReason, OpenAiChatMessageRole, OpenAiResponseObject, OpenAiResponseOutputItem,
+    OpenAiChatFinishReason, OpenAiChatMessageRole, OpenAiCompatErrorCode, OpenAiCompatErrorKind,
+    OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,
     OpenAiResponseOutputItemStatus, OpenAiResponseStatus, OpenAiResponseUsage,
     OpenAiResponsesCreateRequest, OpenAiResponsesInput, OpenAiResponsesInputItem,
     OpenAiResponsesMessageRole,
@@ -79,7 +80,7 @@ fn responses_create_request_accepts_text_or_item_input() {
 }
 
 #[test]
-fn responses_items_are_tagged_and_reject_contradictory_fields() {
+fn responses_items_are_tagged_and_tolerate_future_request_fields() {
     let function_call: OpenAiResponsesInputItem = serde_json::from_value(json!({
         "type": "function_call",
         "call_id": "call_1",
@@ -92,14 +93,40 @@ fn responses_items_are_tagged_and_reject_contradictory_fields() {
         OpenAiResponsesInputItem::FunctionCall { .. }
     ));
 
-    let invalid = serde_json::from_value::<OpenAiResponsesInputItem>(json!({
+    let message = serde_json::from_value::<OpenAiResponsesInputItem>(json!({
         "type": "message",
         "role": "user",
         "content": "hello",
-        "arguments": "{}"
+        "future_openai_item_field": {"ignored": true}
     }))
-    .expect_err("typed item must reject fields from another variant");
-    assert!(invalid.to_string().contains("unknown field"));
+    .expect("future request fields must not break deserialization");
+    assert!(matches!(
+        message,
+        OpenAiResponsesInputItem::Message {
+            role: OpenAiResponsesMessageRole::User,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn request_dtos_reject_missing_required_fields() {
+    serde_json::from_value::<OpenAiChatCompletionRequest>(json!({
+        "messages": [{"role": "user", "content": "hi"}]
+    }))
+    .expect_err("missing chat model must reject");
+    serde_json::from_value::<OpenAiChatCompletionRequest>(json!({
+        "model": "gpt-reborn"
+    }))
+    .expect_err("missing chat messages must reject");
+    serde_json::from_value::<OpenAiResponsesCreateRequest>(json!({
+        "input": "hello"
+    }))
+    .expect_err("missing responses model must reject");
+    serde_json::from_value::<OpenAiResponsesCreateRequest>(json!({
+        "model": "gpt-reborn"
+    }))
+    .expect_err("missing responses input must reject");
 }
 
 #[test]
@@ -209,4 +236,43 @@ fn response_dtos_serialize_openai_shapes() {
     assert_eq!(response_json["output"][2]["type"], "function_call_output");
     assert_eq!(response_json["usage"]["input_tokens"], 3);
     assert!(response_json["usage"].get("prompt_tokens").is_none());
+
+    let queued = OpenAiResponseObject {
+        id: "resp_queued".to_string(),
+        object: "response".to_string(),
+        created_at: 1_777_777_778,
+        status: OpenAiResponseStatus::Queued,
+        model: "gpt-reborn".to_string(),
+        output: vec![],
+        error: None,
+        incomplete_details: None,
+        usage: None,
+    };
+    let queued_json = serde_json::to_value(queued).expect("queued response json");
+    assert_eq!(queued_json["output"], json!([]));
+}
+
+#[test]
+fn response_error_object_uses_sanitized_vocabulary() {
+    let error = OpenAiResponseErrorObject::from_kind(OpenAiCompatErrorKind::ServiceUnavailable);
+    assert_eq!(error.code(), OpenAiCompatErrorCode::ServiceUnavailable);
+    assert_eq!(error.message(), "The service is temporarily unavailable.");
+
+    let serialized = serde_json::to_value(&error).expect("serialize response error");
+    assert_eq!(serialized["code"], "service_unavailable");
+    assert_eq!(
+        serialized["message"],
+        "The service is temporarily unavailable."
+    );
+
+    let injected = serde_json::from_value::<OpenAiResponseErrorObject>(json!({
+        "code": "service_unavailable",
+        "message": "provider stack /Users/alice secret-token"
+    }))
+    .expect_err("arbitrary response error messages must reject");
+    assert!(
+        injected
+            .to_string()
+            .contains("response error message must match sanitized error code")
+    );
 }

@@ -1,5 +1,5 @@
 use ironclaw_product_adapters::{
-    ProductAdapterError, ProductWorkflowRejectionKind, RedactedString,
+    ProductAdapterError, ProductWorkflowRejectionKind, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_reborn_openai_compat::{
     OpenAiCompatErrorCode, OpenAiCompatErrorKind, OpenAiCompatErrorResponse, OpenAiCompatErrorType,
@@ -61,8 +61,14 @@ fn busy_and_transient_failures_keep_retryable_status_mapping() {
 }
 
 #[test]
-fn server_status_codes_collapse_to_service_unavailable() {
-    for status in [500, 501, 502, 503, 504, 599, 200] {
+fn server_status_codes_preserve_stable_server_contracts() {
+    for status in [500, 501, 503] {
+        let error =
+            OpenAiCompatHttpError::from_kind(status, false, OpenAiCompatErrorKind::Internal, None);
+        assert_eq!(error.status_code(), status, "{status}");
+    }
+
+    for status in [200, 502, 504, 599] {
         let error = OpenAiCompatHttpError::from_kind(
             status,
             true,
@@ -99,13 +105,208 @@ fn error_mapping_does_not_serialize_backend_or_secret_details() {
 
 #[test]
 fn suspicious_error_params_are_dropped_instead_of_normalized() {
-    let error = OpenAiCompatHttpError::from_kind(
-        400,
-        false,
-        OpenAiCompatErrorKind::Validation,
-        Some(" RAW_PROMPT_SENTINEL ".to_string()),
-    );
-    assert_eq!(error.body().error.param(), None);
+    let mut invalid = vec![
+        "".to_string(),
+        " response_id".to_string(),
+        "response_id ".to_string(),
+        "messages[0].content\n".to_string(),
+        "RAW_PROMPT_SENTINEL".to_string(),
+        "secret-token".to_string(),
+        "/host/path".to_string(),
+        "/Users/alice".to_string(),
+        "sk-live".to_string(),
+        "secret_token".to_string(),
+        "messages[-1].content".to_string(),
+        "messages[].content".to_string(),
+        "model[0]".to_string(),
+        "messages[0].Content".to_string(),
+    ];
+    invalid.push("x".repeat(129));
+    for param in invalid {
+        let error = OpenAiCompatHttpError::from_kind(
+            400,
+            false,
+            OpenAiCompatErrorKind::Validation,
+            Some(param.clone()),
+        );
+        assert_eq!(error.body().error.param(), None, "{param:?}");
+    }
+
+    for param in [
+        "body",
+        "model",
+        "messages",
+        "messages[0].content",
+        "input[12].content",
+        "response_id",
+        "idempotency_key",
+    ] {
+        let error = OpenAiCompatHttpError::from_kind(
+            400,
+            false,
+            OpenAiCompatErrorKind::Validation,
+            Some(param.to_string()),
+        );
+        assert_eq!(error.body().error.param(), Some(param), "{param:?}");
+    }
+}
+
+#[test]
+fn workflow_rejection_maps_each_kind_to_stable_openai_error() {
+    use ProductWorkflowRejectionKind as K;
+
+    let cases = [
+        (
+            K::ThreadBusy,
+            429,
+            true,
+            OpenAiCompatErrorType::RateLimitError,
+            OpenAiCompatErrorCode::RateLimited,
+        ),
+        (
+            K::AdmissionRejected,
+            429,
+            true,
+            OpenAiCompatErrorType::RateLimitError,
+            OpenAiCompatErrorCode::RateLimited,
+        ),
+        (
+            K::ScopeNotFound,
+            404,
+            false,
+            OpenAiCompatErrorType::NotFoundError,
+            OpenAiCompatErrorCode::NotFound,
+        ),
+        (
+            K::Unauthorized,
+            403,
+            false,
+            OpenAiCompatErrorType::PermissionError,
+            OpenAiCompatErrorCode::PermissionDenied,
+        ),
+        (
+            K::InvalidRequest,
+            400,
+            false,
+            OpenAiCompatErrorType::InvalidRequestError,
+            OpenAiCompatErrorCode::InvalidRequest,
+        ),
+        (
+            K::Unavailable,
+            503,
+            true,
+            OpenAiCompatErrorType::ServerError,
+            OpenAiCompatErrorCode::ServiceUnavailable,
+        ),
+        (
+            K::Conflict,
+            409,
+            false,
+            OpenAiCompatErrorType::ConflictError,
+            OpenAiCompatErrorCode::Conflict,
+        ),
+    ];
+
+    for (kind, status, retryable, error_type, code) in cases {
+        let error = OpenAiCompatHttpError::from_workflow_rejection(
+            kind,
+            status,
+            retryable,
+            Some("messages[0].content".to_string()),
+        );
+        assert_eq!(error.status_code(), status, "{kind:?}");
+        assert_eq!(error.retryable(), retryable, "{kind:?}");
+        assert_eq!(error.body().error.error_type(), error_type, "{kind:?}");
+        assert_eq!(error.body().error.code(), Some(code), "{kind:?}");
+        assert_eq!(error.body().error.param(), Some("messages[0].content"));
+    }
+}
+
+#[test]
+fn product_adapter_error_variants_map_to_sanitized_openai_errors() {
+    let cases = [
+        (
+            ProductAdapterError::InvalidIdentifier {
+                kind: "adapter",
+                reason: "bad /Users/alice secret-token".to_string(),
+            },
+            400,
+            false,
+            OpenAiCompatErrorCode::InvalidRequest,
+        ),
+        (
+            ProductAdapterError::MalformedInboundPayload {
+                reason: RedactedString::new("bad RAW_PROMPT_SENTINEL"),
+            },
+            400,
+            false,
+            OpenAiCompatErrorCode::InvalidRequest,
+        ),
+        (
+            ProductAdapterError::Authentication(ProtocolAuthFailure::Missing),
+            401,
+            false,
+            OpenAiCompatErrorCode::AuthenticationRequired,
+        ),
+        (
+            ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::Conflict,
+                status_code: 409,
+                retryable: false,
+                reason: RedactedString::new("duplicate"),
+            },
+            409,
+            false,
+            OpenAiCompatErrorCode::Conflict,
+        ),
+        (
+            ProductAdapterError::WorkflowTransient {
+                reason: RedactedString::new("store down"),
+            },
+            503,
+            true,
+            OpenAiCompatErrorCode::ServiceUnavailable,
+        ),
+        (
+            ProductAdapterError::EgressTransient {
+                reason: RedactedString::new("timeout"),
+            },
+            503,
+            true,
+            OpenAiCompatErrorCode::ServiceUnavailable,
+        ),
+        (
+            ProductAdapterError::EgressDenied {
+                reason: RedactedString::new("blocked secret-token"),
+            },
+            500,
+            false,
+            OpenAiCompatErrorCode::InternalError,
+        ),
+        (
+            ProductAdapterError::EgressUndeclaredHost {
+                host: "metadata.local".to_string(),
+            },
+            500,
+            false,
+            OpenAiCompatErrorCode::InternalError,
+        ),
+        (
+            ProductAdapterError::Internal {
+                detail: RedactedString::new("stack /host/path"),
+            },
+            500,
+            false,
+            OpenAiCompatErrorCode::InternalError,
+        ),
+    ];
+
+    for (adapter_error, status, retryable, code) in cases {
+        let error = OpenAiCompatHttpError::from_product_adapter_error(adapter_error);
+        assert_eq!(error.status_code(), status, "{code:?}");
+        assert_eq!(error.retryable(), retryable, "{code:?}");
+        assert_eq!(error.body().error.code(), Some(code), "{code:?}");
+    }
 }
 
 #[test]

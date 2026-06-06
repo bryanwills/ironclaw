@@ -41,6 +41,22 @@ pub enum OpenAiCompatErrorCode {
     InternalError,
 }
 
+impl OpenAiCompatErrorCode {
+    pub fn sanitized_message(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "The request is invalid.",
+            Self::AuthenticationRequired => "Authentication is required.",
+            Self::PermissionDenied => "The caller is not allowed to access this resource.",
+            Self::NotFound => "The requested resource was not found.",
+            Self::Conflict => "The request conflicts with the current resource state.",
+            Self::RateLimited => "The request is temporarily rate limited.",
+            Self::ServiceUnavailable => "The service is temporarily unavailable.",
+            Self::Unsupported => "This OpenAI-compatible Reborn route is not wired yet.",
+            Self::InternalError => "An internal error occurred.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiCompatErrorResponse {
@@ -215,47 +231,47 @@ impl ErrorSpec {
     fn for_kind(kind: OpenAiCompatErrorKind) -> Self {
         match kind {
             OpenAiCompatErrorKind::Validation => Self {
-                message: "The request is invalid.",
+                message: OpenAiCompatErrorCode::InvalidRequest.sanitized_message(),
                 error_type: OpenAiCompatErrorType::InvalidRequestError,
                 code: OpenAiCompatErrorCode::InvalidRequest,
             },
             OpenAiCompatErrorKind::Authentication => Self {
-                message: "Authentication is required.",
+                message: OpenAiCompatErrorCode::AuthenticationRequired.sanitized_message(),
                 error_type: OpenAiCompatErrorType::AuthenticationError,
                 code: OpenAiCompatErrorCode::AuthenticationRequired,
             },
             OpenAiCompatErrorKind::PermissionDenied => Self {
-                message: "The caller is not allowed to access this resource.",
+                message: OpenAiCompatErrorCode::PermissionDenied.sanitized_message(),
                 error_type: OpenAiCompatErrorType::PermissionError,
                 code: OpenAiCompatErrorCode::PermissionDenied,
             },
             OpenAiCompatErrorKind::NotFound => Self {
-                message: "The requested resource was not found.",
+                message: OpenAiCompatErrorCode::NotFound.sanitized_message(),
                 error_type: OpenAiCompatErrorType::NotFoundError,
                 code: OpenAiCompatErrorCode::NotFound,
             },
             OpenAiCompatErrorKind::Conflict => Self {
-                message: "The request conflicts with the current resource state.",
+                message: OpenAiCompatErrorCode::Conflict.sanitized_message(),
                 error_type: OpenAiCompatErrorType::ConflictError,
                 code: OpenAiCompatErrorCode::Conflict,
             },
             OpenAiCompatErrorKind::RateLimited => Self {
-                message: "The request is temporarily rate limited.",
+                message: OpenAiCompatErrorCode::RateLimited.sanitized_message(),
                 error_type: OpenAiCompatErrorType::RateLimitError,
                 code: OpenAiCompatErrorCode::RateLimited,
             },
             OpenAiCompatErrorKind::ServiceUnavailable => Self {
-                message: "The service is temporarily unavailable.",
+                message: OpenAiCompatErrorCode::ServiceUnavailable.sanitized_message(),
                 error_type: OpenAiCompatErrorType::ServerError,
                 code: OpenAiCompatErrorCode::ServiceUnavailable,
             },
             OpenAiCompatErrorKind::Unsupported => Self {
-                message: "This OpenAI-compatible Reborn route is not wired yet.",
+                message: OpenAiCompatErrorCode::Unsupported.sanitized_message(),
                 error_type: OpenAiCompatErrorType::InvalidRequestError,
                 code: OpenAiCompatErrorCode::Unsupported,
             },
             OpenAiCompatErrorKind::Internal => Self {
-                message: "An internal error occurred.",
+                message: OpenAiCompatErrorCode::InternalError.sanitized_message(),
                 error_type: OpenAiCompatErrorType::ServerError,
                 code: OpenAiCompatErrorCode::InternalError,
             },
@@ -264,10 +280,9 @@ impl ErrorSpec {
 }
 
 fn sanitize_status_code(status_code: u16) -> u16 {
-    if (400..=499).contains(&status_code) {
-        status_code
-    } else {
-        503
+    match status_code {
+        400..=499 | 500 | 501 | 503 => status_code,
+        _ => 503,
     }
 }
 
@@ -279,10 +294,74 @@ fn clean_param(param: Option<String>) -> Option<String> {
         || trimmed.len() > 128
         || trimmed.chars().any(|ch| ch == '\0' || ch.is_control())
         || contains_no_exposure_sentinel(trimmed)
+        || !is_allowed_param_path(trimmed)
     {
         return None;
     }
-    Some(value)
+    Some(trimmed.to_string())
+}
+
+fn is_allowed_param_path(value: &str) -> bool {
+    let mut segments = value.split('.');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    if !is_allowed_param_root(first) {
+        return false;
+    }
+    segments.all(is_allowed_param_segment)
+}
+
+fn is_allowed_param_root(segment: &str) -> bool {
+    let (field, index) = split_param_segment(segment);
+    matches!(
+        field,
+        "body"
+            | "idempotency_key"
+            | "input"
+            | "messages"
+            | "metadata"
+            | "model"
+            | "previous_response_id"
+            | "response_id"
+            | "stream"
+            | "tool_choice"
+            | "tools"
+    ) && index.is_none_or(is_ascii_digits)
+        && (index.is_none() || matches!(field, "input" | "messages" | "tools"))
+}
+
+fn is_allowed_param_segment(segment: &str) -> bool {
+    let (field, index) = split_param_segment(segment);
+    is_ascii_snake_field(field) && index.is_none_or(is_ascii_digits)
+}
+
+fn split_param_segment(segment: &str) -> (&str, Option<&str>) {
+    let Some(open) = segment.find('[') else {
+        return (segment, None);
+    };
+    let Some(index) = segment
+        .strip_suffix(']')
+        .and_then(|_| segment.get(open + 1..segment.len() - 1))
+    else {
+        return (segment, Some(""));
+    };
+    (&segment[..open], Some(index))
+}
+
+fn is_ascii_snake_field(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        && value
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
+}
+
+fn is_ascii_digits(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn contains_no_exposure_sentinel(value: &str) -> bool {

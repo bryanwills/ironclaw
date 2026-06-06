@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::de;
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::{OpenAiCompatError, OpenAiCompatErrorCode, OpenAiCompatErrorKind};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiResponsesCreateRequest {
@@ -26,7 +29,7 @@ pub enum OpenAiResponsesInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum OpenAiResponsesInputItem {
     Message {
         role: OpenAiResponsesMessageRole,
@@ -59,7 +62,7 @@ pub struct OpenAiResponseObject {
     pub created_at: u64,
     pub status: OpenAiResponseStatus,
     pub model: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub output: Vec<OpenAiResponseOutputItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<OpenAiResponseErrorObject>,
@@ -122,8 +125,56 @@ pub enum OpenAiResponseOutputItemStatus {
     Incomplete,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OpenAiResponseErrorObject {
-    pub code: String,
-    pub message: String,
+    code: OpenAiCompatErrorCode,
+    message: String,
+}
+
+impl OpenAiResponseErrorObject {
+    pub fn from_kind(kind: OpenAiCompatErrorKind) -> Self {
+        Self::from_compat_error(&OpenAiCompatError::from_kind(kind, None))
+    }
+
+    pub fn from_compat_error(error: &OpenAiCompatError) -> Self {
+        let code = error.code().unwrap_or(OpenAiCompatErrorCode::InternalError);
+        Self {
+            code,
+            message: code.sanitized_message().to_string(),
+        }
+    }
+
+    pub fn code(&self) -> OpenAiCompatErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAiResponseErrorObjectWire {
+    code: OpenAiCompatErrorCode,
+    message: String,
+}
+
+impl<'de> Deserialize<'de> for OpenAiResponseErrorObject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = OpenAiResponseErrorObjectWire::deserialize(deserializer)?;
+        let expected = wire.code.sanitized_message();
+        if wire.message != expected {
+            return Err(de::Error::custom(
+                "response error message must match sanitized error code",
+            ));
+        }
+        Ok(Self {
+            code: wire.code,
+            message: expected.to_string(),
+        })
+    }
 }
