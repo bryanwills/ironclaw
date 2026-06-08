@@ -12,7 +12,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{TenantId, VirtualPath};
 use ironclaw_product_workflow::{
     DeleteScopedLifecycleInstallationRequest, ProductWorkflowError, ScopedLifecycleInstallation,
-    ScopedLifecycleInstallationId, ScopedLifecycleInstallationStore,
+    ScopedLifecycleInstallationId, ScopedLifecycleInstallationStore, ScopedLifecycleOwnership,
     UpsertScopedLifecycleInstallationRequest, lifecycle_package_kind_label,
 };
 
@@ -53,11 +53,6 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
                 "updated_by must match scoped lifecycle upsert actor",
             ));
         }
-        let path = scoped_lifecycle_installation_path(
-            &self.root,
-            installation.tenant_id(),
-            &installation.installation_id,
-        )?;
         let existing = self
             .load_installation(installation.tenant_id(), &installation.installation_id)
             .await?;
@@ -77,10 +72,12 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
                         "created_by must match scoped lifecycle create actor",
                     ));
                 }
-                self.ensure_unique_package_installation(&installation)
-                    .await?;
             }
         }
+        let path = existing.as_ref().map_or_else(
+            || scoped_lifecycle_installation_path(&self.root, &installation),
+            |existing| Ok(existing.path.clone()),
+        )?;
         let cas = existing
             .as_ref()
             .map_or(CasExpectation::Absent, |existing| {
@@ -95,7 +92,13 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
             .await
             .map_err(|error| match error {
                 FilesystemError::VersionMismatch { .. } => {
-                    scoped_lifecycle_transient("scoped lifecycle installation write conflict")
+                    if existing.is_none() {
+                        scoped_lifecycle_invalid_request(
+                            "scoped lifecycle installation package already exists for ownership",
+                        )
+                    } else {
+                        scoped_lifecycle_transient("scoped lifecycle installation write conflict")
+                    }
                 }
                 error => scoped_lifecycle_filesystem_error("upsert installation", error),
             })?;
@@ -118,20 +121,15 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
         request: DeleteScopedLifecycleInstallationRequest,
     ) -> Result<(), ProductWorkflowError> {
         let Some(existing) = self
-            .get_installation(&request.tenant_id, &request.installation_id)
+            .load_installation(&request.tenant_id, &request.installation_id)
             .await?
         else {
             return Ok(());
         };
-        if !existing.can_be_mutated_by(&request.actor) {
+        if !existing.installation.can_be_mutated_by(&request.actor) {
             return Err(ProductWorkflowError::BindingAccessDenied);
         }
-        let path = scoped_lifecycle_installation_path(
-            &self.root,
-            &request.tenant_id,
-            &request.installation_id,
-        )?;
-        match self.filesystem.delete(&path).await {
+        match self.filesystem.delete(&existing.path).await {
             Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
             Err(error) => Err(scoped_lifecycle_filesystem_error(
                 "delete installation",
@@ -144,29 +142,12 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
         &self,
         tenant_id: &TenantId,
     ) -> Result<Vec<ScopedLifecycleInstallation>, ProductWorkflowError> {
-        let path = scoped_lifecycle_tenant_installations_path(&self.root, tenant_id)?;
-        let mut installations = Vec::new();
-        let mut offset = 0_u64;
-        loop {
-            let entries = self
-                .filesystem
-                .query(&path, &Filter::All, Page::new(offset, Page::MAX_LIMIT))
-                .await
-                .map_err(|error| scoped_lifecycle_filesystem_error("list installations", error))?;
-            let entry_count = entries.len();
-            for entry in entries {
-                let installation = parse_scoped_lifecycle_installation(entry)?;
-                if installation.tenant_id() == tenant_id {
-                    installations.push(installation);
-                }
-            }
-            if entry_count < Page::MAX_LIMIT as usize {
-                break;
-            }
-            offset = offset
-                .checked_add(Page::MAX_LIMIT as u64)
-                .ok_or_else(|| scoped_lifecycle_transient("scoped lifecycle list page overflow"))?;
-        }
+        let mut installations: Vec<_> = self
+            .list_versioned_installations(tenant_id)
+            .await?
+            .into_iter()
+            .map(|versioned| versioned.installation)
+            .collect();
         installations.sort_by(|left, right| {
             left.installation_id
                 .cmp(&right.installation_id)
@@ -182,52 +163,51 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
 }
 
 impl FilesystemScopedLifecycleInstallationStore {
-    async fn ensure_unique_package_installation(
-        &self,
-        installation: &ScopedLifecycleInstallation,
-    ) -> Result<(), ProductWorkflowError> {
-        let duplicate = self
-            .list_installations(installation.tenant_id())
-            .await?
-            .into_iter()
-            .any(|existing| {
-                existing.installation_id != installation.installation_id
-                    && existing.ownership == installation.ownership
-                    && existing.package_ref == installation.package_ref
-            });
-        if duplicate {
-            return Err(scoped_lifecycle_invalid_request(
-                "scoped lifecycle installation package already exists for ownership",
-            ));
-        }
-        Ok(())
-    }
-
     async fn load_installation(
         &self,
         tenant_id: &TenantId,
         installation_id: &ScopedLifecycleInstallationId,
     ) -> Result<Option<VersionedScopedLifecycleInstallation>, ProductWorkflowError> {
-        let path = scoped_lifecycle_installation_path(&self.root, tenant_id, installation_id)?;
-        let Some(entry) = self
-            .filesystem
-            .get(&path)
-            .await
-            .map_err(|error| scoped_lifecycle_filesystem_error("load installation", error))?
-        else {
-            return Ok(None);
-        };
-        let loaded = parse_versioned_scoped_lifecycle_installation(entry)?;
-        if loaded.installation.tenant_id() != tenant_id {
-            return Err(scoped_lifecycle_transient(
-                "scoped lifecycle installation tenant mismatch",
-            ));
+        Ok(self
+            .list_versioned_installations(tenant_id)
+            .await?
+            .into_iter()
+            .find(|loaded| loaded.installation.installation_id == *installation_id))
+    }
+
+    async fn list_versioned_installations(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<VersionedScopedLifecycleInstallation>, ProductWorkflowError> {
+        let path = scoped_lifecycle_tenant_installations_path(&self.root, tenant_id)?;
+        let mut installations = Vec::new();
+        let mut offset = 0_u64;
+        loop {
+            let entries = self
+                .filesystem
+                .query(&path, &Filter::All, Page::new(offset, Page::MAX_LIMIT))
+                .await
+                .map_err(|error| scoped_lifecycle_filesystem_error("list installations", error))?;
+            let entry_count = entries.len();
+            for entry in entries {
+                let loaded = parse_versioned_scoped_lifecycle_installation(entry)?;
+                if loaded.installation.tenant_id() == tenant_id {
+                    installations.push(loaded);
+                }
+            }
+            if entry_count < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset
+                .checked_add(Page::MAX_LIMIT as u64)
+                .ok_or_else(|| scoped_lifecycle_transient("scoped lifecycle list page overflow"))?;
         }
-        Ok(Some(loaded))
+        Ok(installations)
     }
 }
 
 struct VersionedScopedLifecycleInstallation {
+    path: VirtualPath,
     installation: ScopedLifecycleInstallation,
     version: RecordVersion,
 }
@@ -401,9 +381,11 @@ fn parse_scoped_lifecycle_installation(
 fn parse_versioned_scoped_lifecycle_installation(
     entry: VersionedEntry,
 ) -> Result<VersionedScopedLifecycleInstallation, ProductWorkflowError> {
+    let path = entry.path.clone();
     let version = entry.version;
     let installation = parse_scoped_lifecycle_installation(entry)?;
     Ok(VersionedScopedLifecycleInstallation {
+        path,
         installation,
         version,
     })
@@ -451,17 +433,27 @@ fn scoped_lifecycle_tenant_installations_path(
 
 fn scoped_lifecycle_installation_path(
     root: &VirtualPath,
-    tenant_id: &TenantId,
-    installation_id: &ScopedLifecycleInstallationId,
+    installation: &ScopedLifecycleInstallation,
 ) -> Result<VirtualPath, ProductWorkflowError> {
     let path = format!(
-        "{}/{}.json",
-        scoped_lifecycle_tenant_installations_path(root, tenant_id)?.as_str(),
-        hex_component(installation_id.as_str())
+        "{}/{}/{}/{}.json",
+        scoped_lifecycle_tenant_installations_path(root, installation.tenant_id())?.as_str(),
+        ownership_path_component(&installation.ownership),
+        lifecycle_package_kind_label(installation.package_ref.kind),
+        hex_component(installation.package_ref.id.as_str())
     );
     VirtualPath::new(path).map_err(|error| {
         scoped_lifecycle_durable_error("construct scoped lifecycle installation path", error)
     })
+}
+
+fn ownership_path_component(ownership: &ScopedLifecycleOwnership) -> String {
+    match ownership {
+        ScopedLifecycleOwnership::AdminShared { .. } => "admin_shared".to_string(),
+        ScopedLifecycleOwnership::UserPrivate { user_id, .. } => {
+            format!("user_private/{}", hex_component(user_id.as_str()))
+        }
+    }
 }
 
 fn index_key(value: &'static str) -> Result<IndexKey, ProductWorkflowError> {
@@ -580,7 +572,7 @@ mod tests {
             _filter: &Filter,
             _page: Page,
         ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-            Ok(Vec::new())
+            Ok(self.entry.lock().await.iter().cloned().collect())
         }
 
         async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {

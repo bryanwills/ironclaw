@@ -393,6 +393,62 @@ async fn assert_scoped_lifecycle_store_resolves_shared_and_private_after_reopen(
         ProductWorkflowError::InvalidBindingRequest { .. }
     ));
 
+    let concurrent_left_id = scoped_install_id(suffix, "private-calendar-left");
+    let concurrent_right_id = scoped_install_id(suffix, "private-calendar-right");
+    let concurrent_left = ScopedLifecycleInstallation::user_private(
+        concurrent_left_id.clone(),
+        package_ref("calendar"),
+        other_user.clone(),
+        now,
+    );
+    let concurrent_right = ScopedLifecycleInstallation::user_private(
+        concurrent_right_id.clone(),
+        package_ref("calendar"),
+        other_user.clone(),
+        now,
+    );
+    let (left_result, right_result) = tokio::join!(
+        store.upsert_installation(UpsertScopedLifecycleInstallationRequest {
+            actor: other_user.clone(),
+            installation: concurrent_left,
+        }),
+        reopened.upsert_installation(UpsertScopedLifecycleInstallationRequest {
+            actor: other_user.clone(),
+            installation: concurrent_right,
+        }),
+    );
+    let concurrent_results = [&left_result, &right_result];
+    assert_eq!(
+        concurrent_results
+            .iter()
+            .filter(|result| result.is_ok())
+            .count(),
+        1
+    );
+    assert_eq!(
+        concurrent_results
+            .iter()
+            .filter(|result| matches!(
+                result,
+                Err(ProductWorkflowError::InvalidBindingRequest { .. })
+            ))
+            .count(),
+        1
+    );
+    let concurrent_winner_id = if left_result.is_ok() {
+        concurrent_left_id
+    } else {
+        concurrent_right_id
+    };
+    store
+        .delete_installation(DeleteScopedLifecycleInstallationRequest {
+            actor: other_user.clone(),
+            tenant_id: tenant.clone(),
+            installation_id: concurrent_winner_id,
+        })
+        .await
+        .expect("delete concurrent package winner");
+
     let overwrite_as_user = store
         .upsert_installation(UpsertScopedLifecycleInstallationRequest {
             actor: user.clone(),
