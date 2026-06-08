@@ -28,6 +28,10 @@ use protocol::{
 const MAX_RESPONSE_BODY: usize = 64 * 1024;
 /// Default HTTP timeout for the onboarding POST.
 const ONBOARD_TIMEOUT_SECS: u64 = 10;
+/// Path of the upload-claim endpoint on the issuer. The policy stores the full
+/// URL (origin + this path) so that `fetch_trace_upload_claim_from_issuer` can
+/// POST to it directly without appending any path itself.
+const UPLOAD_CLAIM_PATH: &str = "/v1/trace-upload-claim";
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -241,14 +245,22 @@ async fn post_onboard_request(
             }
         };
 
-        // Terminal invite rejections: discard pending key.
+        // Terminal invite rejections: discard pending key. If discard fails, log
+        // and fall through — InviteRejected is the primary error the caller needs.
         if matches!(
             code,
             OnboardErrorCode::InviteNotValid
                 | OnboardErrorCode::InviteMalformed
                 | OnboardErrorCode::DeviceKeyMalformed
-        ) {
-            DeviceKeypair::discard_pending(dir, &invite.invite_hash())?;
+        ) && let Err(discard_err) = DeviceKeypair::discard_pending(dir, &invite.invite_hash())
+        {
+            // Log cleanup failure (no key material; path is local and low-sensitivity).
+            tracing::debug!(
+                error_kind = %discard_err,
+                "failed to discard pending device key after terminal invite rejection; \
+                 continuing to return the primary error"
+            );
+            // Fall through — the caller needs InviteRejected, not a DeviceKey error.
         }
         // RateLimited is transient. Unknown = optimistically transient (pending
         // key kept) — an unrecognized code may be a newer transient condition,
@@ -342,9 +354,12 @@ fn write_policy_at_dir(
         auth_mode: TraceUploadAuthMode::DeviceKey,
         device_key_id: Some(key.device_key_id.clone()),
         ingestion_endpoint: Some(response.ingest_url.clone()),
-        // upload_token_issuer_url is seeded from the invite-derived origin —
-        // NOT the response value — per trust-anchoring rule in spec §2.1.
-        upload_token_issuer_url: Some(invite.origin.clone()),
+        // upload_token_issuer_url must be the full claim endpoint that
+        // fetch_trace_upload_claim_from_issuer POSTs to as-is. The issuer
+        // serves upload claims at UPLOAD_CLAIM_PATH, same origin as /v1/onboard.
+        // Trust-anchoring still uses invite.origin (origin-only compare in step 5);
+        // the allowed-host check is path-independent.
+        upload_token_issuer_url: Some(format!("{}{UPLOAD_CLAIM_PATH}", invite.origin)),
         upload_token_issuer_allowed_hosts: {
             let mut s = BTreeSet::new();
             s.insert(invite.issuer_host.clone());
@@ -506,10 +521,20 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&policy_path).unwrap()).unwrap();
         assert!(policy.enabled);
         assert_eq!(policy.auth_mode, TraceUploadAuthMode::DeviceKey);
+        // upload_token_issuer_url must be the full claim endpoint, not just the origin.
+        let expected_issuer_url = format!(
+            "http://127.0.0.1:{}/v1/trace-upload-claim",
+            mock.addr.port()
+        );
         assert_eq!(
             policy.upload_token_issuer_url.as_deref(),
-            Some(format!("http://127.0.0.1:{}", mock.addr.port()).as_str())
+            Some(expected_issuer_url.as_str()),
+            "upload_token_issuer_url must be the full claim endpoint (origin + /v1/trace-upload-claim)"
         );
+        // Verify parsed path is /v1/trace-upload-claim and host matches invite.
+        let issuer_parsed = reqwest::Url::parse(expected_issuer_url.as_str()).unwrap();
+        assert_eq!(issuer_parsed.path(), "/v1/trace-upload-claim");
+        assert_eq!(issuer_parsed.host_str().unwrap(), format!("127.0.0.1"));
         assert_eq!(
             policy.ingestion_endpoint.as_deref(),
             Some("https://ingest.example.com")
@@ -891,6 +916,97 @@ mod tests {
             "expected MalformedResponse, got: {err}"
         );
         assert!(!dir.path().join("policy.json").exists());
+    }
+
+    /// The policy's upload_token_issuer_url must be the full claim endpoint
+    /// (origin + /v1/trace-upload-claim), not the bare origin.  A bare-origin
+    /// value would cause fetch_trace_upload_claim_from_issuer to POST to the
+    /// root instead of the claim endpoint.
+    #[tokio::test]
+    async fn policy_upload_token_issuer_url_is_claim_endpoint_not_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = spawn_mock_issuer(
+            |addr| ok_response(addr, "https://ingest.example.com"),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+        let invite_url = format!("http://127.0.0.1:{}/onboard#INVTEST11", mock.addr.port());
+
+        onboard_at_dir(dir.path(), &invite_url, OnboardConsents::default())
+            .await
+            .expect("onboard succeeds");
+
+        let policy: StandingTraceContributionPolicy =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("policy.json")).unwrap())
+                .unwrap();
+
+        let issuer_url = policy
+            .upload_token_issuer_url
+            .as_deref()
+            .expect("upload_token_issuer_url must be set");
+
+        // Must NOT be the bare origin.
+        assert_ne!(
+            issuer_url,
+            format!("http://127.0.0.1:{}", mock.addr.port()).as_str(),
+            "upload_token_issuer_url must not be the bare origin"
+        );
+
+        // Must be the full claim endpoint.
+        assert_eq!(
+            issuer_url,
+            format!(
+                "http://127.0.0.1:{}/v1/trace-upload-claim",
+                mock.addr.port()
+            )
+            .as_str(),
+            "upload_token_issuer_url must be origin + /v1/trace-upload-claim"
+        );
+
+        // Parse and assert path and host separately.
+        let parsed = reqwest::Url::parse(issuer_url).expect("issuer_url must be parseable");
+        assert_eq!(
+            parsed.path(),
+            "/v1/trace-upload-claim",
+            "parsed path must be /v1/trace-upload-claim"
+        );
+        assert_eq!(
+            parsed.host_str().unwrap(),
+            "127.0.0.1",
+            "host must match invite host"
+        );
+        // Note: a full end-to-end claim-fetch-path test asserting the POST hits
+        // /v1/trace-upload-claim would require a mock claim endpoint; deferred
+        // because the policy URL path assertion above captures the same invariant
+        // (fetch_trace_upload_claim_from_issuer POSTs to parsed.clone() as-is).
+    }
+
+    /// Verify that a terminal invite rejection returns InviteRejected (the
+    /// primary error), not a DeviceKey error, even if discard_pending fails.
+    /// This is the normal path — discard should succeed, and the primary error
+    /// must be returned.
+    #[tokio::test]
+    async fn terminal_rejection_returns_invite_rejected_as_primary_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = spawn_mock_issuer(
+            |_addr| serde_json::json!({ "error": "InviteMalformed" }),
+            axum::http::StatusCode::FORBIDDEN,
+        )
+        .await;
+        let invite_url = format!("http://127.0.0.1:{}/onboard#INVTEST12", mock.addr.port());
+
+        let err = onboard_at_dir(dir.path(), &invite_url, OnboardConsents::default())
+            .await
+            .expect_err("terminal rejection must fail");
+
+        // The error must be InviteRejected (the primary), not DeviceKey.
+        assert!(
+            matches!(
+                err,
+                OnboardError::InviteRejected(OnboardErrorCode::InviteMalformed)
+            ),
+            "expected InviteRejected(InviteMalformed), got: {err}"
+        );
     }
 
     #[tokio::test]

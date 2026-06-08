@@ -102,9 +102,25 @@ impl ParsedInvite {
 
 /// Returns true if `scheme`+`host_only` satisfies the https-or-loopback rule:
 /// HTTPS is always allowed; HTTP is allowed only for loopback hosts.
+/// Additionally, regardless of scheme, multicast and link-local IPs are always
+/// rejected (defense-in-depth against cloud-metadata and SSRF abuse).
+/// Private ranges (10/8, 172.16/12, 192.168/16) and loopback remain accepted.
 /// `host_only` must already be lowercased and bracket-stripped (as produced by
 /// the `host_only` helper below).
 pub(crate) fn is_https_or_loopback(scheme: &str, host_only: &str) -> bool {
+    // Block multicast and link-local IPs regardless of scheme. This covers the
+    // cloud-metadata address (169.254.169.254 is link-local) and link-local
+    // IPv6 (fe80::/10). Private ranges and loopback are NOT blocked here.
+    if let Ok(ip) = host_only.parse::<std::net::IpAddr>() {
+        let blocked = ip.is_multicast()
+            || match ip {
+                std::net::IpAddr::V4(v4) => v4.is_link_local(), // 169.254.0.0/16
+                std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80, // fe80::/10
+            };
+        if blocked {
+            return false;
+        }
+    }
     if scheme == "https" {
         return true;
     }
@@ -309,6 +325,58 @@ mod tests {
         let p = ParsedInvite::parse("http://127.0.0.2:3917/onboard#INVAAAA").unwrap();
         assert_eq!(p.origin, "http://127.0.0.2:3917");
         assert_eq!(p.issuer_host, "127.0.0.2");
+    }
+
+    // ── Finding 3: block cloud-metadata / link-local / multicast IPs ──────────
+
+    #[test]
+    fn rejects_cloud_metadata_ip_169_254_169_254() {
+        // 169.254.169.254 is the cloud-metadata address (link-local, IPv4).
+        assert!(matches!(
+            ParsedInvite::parse("https://169.254.169.254/onboard#INVAAAA"),
+            Err(InviteParseError::InsecureScheme)
+        ));
+    }
+
+    #[test]
+    fn rejects_link_local_ipv4_169_254_x_x() {
+        // Any 169.254.x.x (link-local range) must be rejected.
+        assert!(matches!(
+            ParsedInvite::parse("https://169.254.1.1/onboard#INVAAAA"),
+            Err(InviteParseError::InsecureScheme)
+        ));
+    }
+
+    #[test]
+    fn rejects_link_local_ipv6_fe80() {
+        // fe80::1 is in the link-local fe80::/10 range.
+        assert!(matches!(
+            ParsedInvite::parse("https://[fe80::1]/onboard#INVAAAA"),
+            Err(InviteParseError::InsecureScheme)
+        ));
+    }
+
+    #[test]
+    fn rejects_multicast_ipv4() {
+        // 224.0.0.1 is a multicast address.
+        assert!(matches!(
+            ParsedInvite::parse("https://224.0.0.1/onboard#INVAAAA"),
+            Err(InviteParseError::InsecureScheme)
+        ));
+    }
+
+    #[test]
+    fn allows_private_ipv4_10_x_x_x() {
+        // 10.x.x.x is a private range; must remain accepted.
+        let p = ParsedInvite::parse("https://10.0.0.5/onboard#INVAAAA").unwrap();
+        assert_eq!(p.issuer_host, "10.0.0.5");
+    }
+
+    #[test]
+    fn allows_private_ipv4_192_168_x_x() {
+        // 192.168.x.x is a private range; must remain accepted.
+        let p = ParsedInvite::parse("https://192.168.1.10/onboard#INVAAAA").unwrap();
+        assert_eq!(p.issuer_host, "192.168.1.10");
     }
 
     #[test]
