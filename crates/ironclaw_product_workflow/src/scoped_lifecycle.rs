@@ -265,7 +265,7 @@ pub fn resolve_effective_scoped_lifecycle_installations(
     let mut effective = BTreeMap::<String, ScopedLifecycleInstallation>::new();
 
     for installation in candidates {
-        if !installation.enabled || !installation_visible_to(&installation, &subject) {
+        if !installation.enabled || !installation.ownership.is_visible_to(&subject) {
             continue;
         }
         let key = package_key(&installation.package_ref);
@@ -317,13 +317,6 @@ pub trait ScopedLifecycleInstallationStore: Send + Sync {
             subject, candidates,
         ))
     }
-}
-
-fn installation_visible_to(
-    installation: &ScopedLifecycleInstallation,
-    subject: &ScopedLifecycleSubject,
-) -> bool {
-    installation.ownership.is_visible_to(subject)
 }
 
 fn package_key(package_ref: &LifecyclePackageRef) -> String {

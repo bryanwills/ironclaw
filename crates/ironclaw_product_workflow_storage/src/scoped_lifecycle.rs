@@ -105,22 +105,10 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
         tenant_id: &TenantId,
         installation_id: &ScopedLifecycleInstallationId,
     ) -> Result<Option<ScopedLifecycleInstallation>, ProductWorkflowError> {
-        let path = scoped_lifecycle_installation_path(&self.root, tenant_id, installation_id)?;
-        let Some(entry) = self
-            .filesystem
-            .get(&path)
-            .await
-            .map_err(|error| scoped_lifecycle_filesystem_error("load installation", error))?
-        else {
-            return Ok(None);
-        };
-        let installation = parse_scoped_lifecycle_installation(entry)?;
-        if installation.tenant_id() != tenant_id {
-            return Err(scoped_lifecycle_transient(
-                "scoped lifecycle installation tenant mismatch",
-            ));
-        }
-        Ok(Some(installation))
+        Ok(self
+            .load_installation(tenant_id, installation_id)
+            .await?
+            .map(|loaded| loaded.installation))
     }
 
     async fn delete_installation(
