@@ -38,6 +38,7 @@ mod tests;
 
 const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
+const MAX_CONCURRENT_OWNER_SURFACE_SCANS: usize = 4;
 
 /// Durable production implementation of the product-auth ports.
 ///
@@ -389,51 +390,59 @@ where
             thread_id: owner.thread_id.clone(),
             invocation_id: ironclaw_host_api::InvocationId::new(),
         };
-        let mut scopes = Vec::new();
-        for surface in AuthSurface::ALL {
-            scopes.push(ironclaw_auth::AuthProductScope::new(
-                resource.clone(),
-                surface,
-            ));
-            if let Some(session_id) = &owner.session_id {
-                scopes.push(
-                    ironclaw_auth::AuthProductScope::new(resource.clone(), surface)
-                        .with_session_id(session_id.clone()),
-                );
-                continue;
-            }
-            let sessions_root = surface_sessions_root(&resource, surface)?;
-            let mut entries = match self
-                .filesystem
-                .list_dir_bounded(
-                    &resource,
-                    &sessions_root,
-                    MAX_OWNER_SESSION_ROOTS_PER_SURFACE.saturating_add(1),
-                )
-                .await
-            {
-                Ok(entries) => entries,
-                Err(FilesystemError::NotFound { .. }) => continue,
-                Err(error) => return Err(fs_error(error)),
-            };
-            if entries.len() > MAX_OWNER_SESSION_ROOTS_PER_SURFACE {
-                return Err(AuthProductError::BackendUnavailable);
-            }
-            entries.sort_by(|left, right| left.name.cmp(&right.name));
-            for entry in entries {
-                if entry.file_type != FileType::Directory {
-                    continue;
+        let session_id = owner.session_id.clone();
+        let surface_scopes = stream::iter(AuthSurface::ALL.into_iter().map(|surface| {
+            let resource = resource.clone();
+            let session_id = session_id.clone();
+            async move {
+                let mut scopes = vec![ironclaw_auth::AuthProductScope::new(
+                    resource.clone(),
+                    surface,
+                )];
+                if let Some(session_id) = session_id {
+                    scopes.push(
+                        ironclaw_auth::AuthProductScope::new(resource.clone(), surface)
+                            .with_session_id(session_id),
+                    );
+                    return Ok(scopes);
                 }
-                let Ok(session_id) = AuthSessionId::new(entry.name) else {
-                    continue;
+                let sessions_root = surface_sessions_root(&resource, surface)?;
+                let mut entries = match self
+                    .filesystem
+                    .list_dir_bounded(
+                        &resource,
+                        &sessions_root,
+                        MAX_OWNER_SESSION_ROOTS_PER_SURFACE.saturating_add(1),
+                    )
+                    .await
+                {
+                    Ok(entries) => entries,
+                    Err(FilesystemError::NotFound { .. }) => return Ok(scopes),
+                    Err(error) => return Err(fs_error(error)),
                 };
-                scopes.push(
-                    ironclaw_auth::AuthProductScope::new(resource.clone(), surface)
-                        .with_session_id(session_id),
-                );
+                if entries.len() > MAX_OWNER_SESSION_ROOTS_PER_SURFACE {
+                    return Err(AuthProductError::BackendUnavailable);
+                }
+                entries.sort_by(|left, right| left.name.cmp(&right.name));
+                for entry in entries {
+                    if entry.file_type != FileType::Directory {
+                        continue;
+                    }
+                    let Ok(session_id) = AuthSessionId::new(entry.name) else {
+                        continue;
+                    };
+                    scopes.push(
+                        ironclaw_auth::AuthProductScope::new(resource.clone(), surface)
+                            .with_session_id(session_id),
+                    );
+                }
+                Ok(scopes)
             }
-        }
-        Ok(scopes)
+        }))
+        .buffered(MAX_CONCURRENT_OWNER_SURFACE_SCANS)
+        .try_collect::<Vec<_>>()
+        .await?;
+        Ok(surface_scopes.into_iter().flatten().collect())
     }
 
     async fn account_records_for_owner(

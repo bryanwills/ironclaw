@@ -59,6 +59,7 @@ slack-v2-host-beta = [
 ]
 libsql = [
     "dep:libsql",
+    "ironclaw_auth_storage/libsql",
     "ironclaw_filesystem/libsql",
     "ironclaw_host_runtime/libsql",
     "ironclaw_reborn/filesystem-goal-store",
@@ -69,6 +70,7 @@ libsql = [
 ]
 postgres = [
     "dep:deadpool-postgres",
+    "ironclaw_auth_storage/postgres",
     "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
     "ironclaw_reborn/filesystem-goal-store",

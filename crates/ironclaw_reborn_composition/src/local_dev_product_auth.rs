@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use ironclaw_auth::{AuthProviderClient, UnavailableAuthProviderClient};
+use ironclaw_auth::UnavailableAuthProviderClient;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 #[cfg(not(feature = "libsql"))]
 use ironclaw_host_api::SYSTEM_RESERVED_ID;
@@ -14,7 +14,6 @@ use crate::product_auth_providers::OAuthProviderComposition;
 use crate::{RebornBuildError, RebornProductAuthServicePorts, RebornProductAuthServices};
 use ironclaw_auth_storage::FilesystemAuthProductServices;
 
-#[cfg(feature = "libsql")]
 const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
 pub(crate) struct LocalDevProductAuthSubstrate {
@@ -43,16 +42,20 @@ pub(crate) fn compose_local_dev_default_product_auth_services(
         substrate.filesystem,
         Arc::clone(&substrate.secret_store),
     ));
-    let provider_client: Arc<dyn AuthProviderClient> = provider_composition
+    let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> = provider_composition
         .client
         .clone()
         .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient));
-    let mut services = RebornProductAuthServicePorts::from_shared_ports_with_provider(
+    let mut ports = RebornProductAuthServicePorts::from_shared_ports_with_provider(
         Arc::clone(&durable_services),
         provider_client,
-    )
-    .into_services(dispatcher)
-    .with_flow_record_source(durable_services);
+    );
+    if let Some(provider_client) = provider_composition.client {
+        ports = ports.with_provider_client(provider_client);
+    }
+    let mut services = ports
+        .into_services(dispatcher)
+        .with_flow_record_source(durable_services);
     if let Some(registry) = provider_composition.dcr_registry {
         services = services.with_dcr_oauth_registry(registry);
     }
@@ -80,41 +83,29 @@ where
 fn resolve_local_dev_secret_master_key(
     root: &Path,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
-    #[cfg(not(feature = "libsql"))]
-    {
-        let _ = root;
-        return Ok(ironclaw_secrets::SecretMaterial::from(
-            ironclaw_secrets::keychain::generate_master_key_hex(),
-        ));
-    }
-
-    #[cfg(feature = "libsql")]
-    {
-        let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
-        match std::fs::read_to_string(&key_path) {
-            Ok(existing) => {
-                return Ok(ironclaw_secrets::SecretMaterial::from(
-                    existing.trim().to_string(),
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!("local-dev secrets master key could not be read: {error}"),
-                });
-            }
+    let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+    match std::fs::read_to_string(&key_path) {
+        Ok(existing) => {
+            return Ok(ironclaw_secrets::SecretMaterial::from(
+                existing.trim().to_string(),
+            ));
         }
-
-        let key = std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(ironclaw_secrets::keychain::generate_master_key_hex);
-        write_local_dev_secret_master_key(&key_path, &key)?;
-        Ok(ironclaw_secrets::SecretMaterial::from(key))
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be read: {error}"),
+            });
+        }
     }
+
+    let key = std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(ironclaw_secrets::keychain::generate_master_key_hex);
+    write_local_dev_secret_master_key(&key_path, &key)?;
+    Ok(ironclaw_secrets::SecretMaterial::from(key))
 }
 
-#[cfg(feature = "libsql")]
 fn write_local_dev_secret_master_key(path: &Path, key: &str) -> Result<(), RebornBuildError> {
     #[cfg(unix)]
     {
@@ -231,6 +222,12 @@ fn local_dev_scope_path_segment(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use chrono::{Duration, Utc};
+    use ironclaw_auth::{
+        AuthContinuationEvent, AuthContinuationRef, AuthProductError, AuthProductScope,
+        AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountLookupRequest,
+    };
     use ironclaw_filesystem::{
         BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
         InMemoryBackend, IndexPolicy, MountDescriptor, StorageClass,
@@ -240,6 +237,19 @@ mod tests {
         VirtualPath,
     };
     use secrecy::ExposeSecret;
+
+    #[derive(Debug, Default)]
+    struct NoopContinuationDispatcher;
+
+    #[async_trait]
+    impl crate::auth::RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn local_dev_product_auth_secret_store_isolates_tenants() {
@@ -291,6 +301,123 @@ mod tests {
 
         assert_eq!(material_a.expose_secret(), "tenant-a-token");
         assert_eq!(material_b.expose_secret(), "tenant-b-token");
+    }
+
+    #[tokio::test]
+    async fn local_dev_secret_store_preserves_master_key_across_rebuilds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let filesystem = local_dev_test_root_filesystem();
+        let scoped_filesystem = local_dev_product_auth_scoped_filesystem(Arc::clone(&filesystem))
+            .expect("local-dev product-auth filesystem");
+        let secret_store = build_local_dev_secret_store(dir.path(), scoped_filesystem)
+            .expect("local-dev secret store");
+        let scope = local_dev_secret_scope("tenant-a", "alice");
+        let handle = SecretHandle::new("rebuild-runtime-token").expect("secret handle");
+
+        secret_store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                ironclaw_secrets::SecretMaterial::from("persisted-token"),
+            )
+            .await
+            .expect("put local-dev secret");
+
+        let rebuilt_store = build_local_dev_secret_store(
+            dir.path(),
+            local_dev_product_auth_scoped_filesystem(filesystem)
+                .expect("rebuilt local-dev product-auth filesystem"),
+        )
+        .expect("rebuilt local-dev secret store");
+        let lease = rebuilt_store
+            .lease_once(&scope, &handle)
+            .await
+            .expect("rebuilt lease");
+        let material = rebuilt_store
+            .consume(&scope, lease.id)
+            .await
+            .expect("rebuilt consume");
+
+        assert_eq!(material.expose_secret(), "persisted-token");
+    }
+
+    #[tokio::test]
+    async fn compose_without_oauth_provider_manual_token_flow_stages_secret_in_secret_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let substrate =
+            build_local_dev_product_auth_substrate(dir.path(), local_dev_test_root_filesystem())
+                .expect("local-dev product-auth substrate");
+        let secret_store = Arc::clone(&substrate.secret_store);
+        let product_auth = compose_local_dev_default_product_auth_services(
+            substrate,
+            Arc::new(NoopContinuationDispatcher),
+            OAuthProviderComposition {
+                client: None,
+                dcr_registry: None,
+                gate_registry: None,
+            },
+        );
+        let scope = AuthProductScope::new(
+            local_dev_secret_scope("tenant-a", "alice"),
+            AuthSurface::Web,
+        );
+        let challenge = product_auth
+            .request_manual_token_setup(crate::RebornManualTokenSetupRequest::new(
+                scope.clone(),
+                AuthProviderId::new("github").expect("provider id"),
+                CredentialAccountLabel::new("work github").expect("account label"),
+                AuthContinuationRef::SetupOnly,
+                Utc::now() + Duration::minutes(5),
+            ))
+            .await
+            .expect("manual-token challenge");
+
+        let submitted = product_auth
+            .submit_manual_token(crate::RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                challenge.interaction_id,
+                secrecy::SecretString::from("ghp_no_provider_local_dev"),
+            ))
+            .await
+            .expect("manual-token submit");
+        let account = product_auth
+            .credential_account_service()
+            .get_account(CredentialAccountLookupRequest::new(
+                scope.clone(),
+                submitted.account_id,
+            ))
+            .await
+            .expect("account lookup")
+            .expect("submitted account");
+        let access_secret = account.access_secret.expect("access secret");
+        let lease = secret_store
+            .lease_once(&scope.resource, &access_secret)
+            .await
+            .expect("secret lease");
+        let material = secret_store
+            .consume(&scope.resource, lease.id)
+            .await
+            .expect("secret consume");
+
+        assert_eq!(material.expose_secret(), "ghp_no_provider_local_dev");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn resolve_master_key_returns_invalid_config_on_non_notfound_io_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH))
+            .expect("key path directory");
+
+        let error = resolve_local_dev_secret_master_key(dir.path())
+            .expect_err("directory at key path should fail as a read error");
+
+        match error {
+            RebornBuildError::InvalidConfig { reason } => {
+                assert!(reason.contains("local-dev secrets master key could not be read"));
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
     }
 
     fn local_dev_test_root_filesystem() -> Arc<LocalDevRootFilesystem> {
