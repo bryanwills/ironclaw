@@ -7,8 +7,11 @@
 //! reasoning-field names, arg-parse policy) stay in each provider file.
 //!
 //! Current invariants:
-//! - If response.tool_calls is non-empty and finish_reason is not ToolUse,
-//!   set finish_reason = ToolUse. Closes audit RC1/M1 universally.
+//! - If response.tool_calls is non-empty and finish_reason is one of the
+//!   ambiguous-but-tool-using variants (`Unknown` or `Stop`), upgrade
+//!   finish_reason to `ToolUse`. `Length` (truncation) and `ContentFilter`
+//!   (policy stop) are deliberately preserved — they carry meaningful error
+//!   classification that downstream callers rely on. Closes audit RC1/M1.
 
 use std::sync::Arc;
 
@@ -40,12 +43,25 @@ impl NormalizingProvider {
 
 /// Enforce Class A shape invariants on a decoded `ToolCompletionResponse`.
 ///
-/// Invariant RC1/M1: if tool_calls is non-empty and finish_reason is not
-/// `ToolUse`, force it to `ToolUse`. Some providers (notably Bedrock) drop
-/// the tool-use stop reason on certain response shapes; this closes the gap
-/// universally once rather than in each individual provider.
+/// Invariant RC1/M1: if `tool_calls` is non-empty AND `finish_reason` is one
+/// of the ambiguous-but-tool-using variants (`Unknown` or `Stop`), upgrade
+/// `finish_reason` to `ToolUse`. `Length` (truncation) and `ContentFilter`
+/// (policy stop) are deliberately preserved — they carry meaningful error
+/// classification that downstream callers (e.g. `agentic_loop`,
+/// `model_gateway`) rely on to discard malformed truncated tool args or
+/// surface policy-denied calls.
 fn normalize_shape(resp: &mut ToolCompletionResponse) {
-    if !resp.tool_calls.is_empty() && resp.finish_reason != FinishReason::ToolUse {
+    if !resp.tool_calls.is_empty()
+        && matches!(
+            resp.finish_reason,
+            FinishReason::Unknown | FinishReason::Stop
+        )
+    {
+        tracing::debug!(
+            tool_call_count = resp.tool_calls.len(),
+            "NormalizingProvider rewrote finish_reason to ToolUse (was {:?})",
+            resp.finish_reason,
+        );
         resp.finish_reason = FinishReason::ToolUse;
     }
 }
@@ -298,5 +314,89 @@ mod tests {
             "complete_with_tools must not be called"
         );
         assert_eq!(resp.content, "delegated");
+    }
+
+    /// FinishReason::Length carries token-cap-truncation semantics. The
+    /// normalizer must preserve it even with non-empty tool_calls, because
+    /// truncated args are likely incomplete and downstream callers
+    /// (agentic_loop.rs:317, model_gateway.rs:1033) need the original finish
+    /// to discard the call or surface BudgetExceeded.
+    #[tokio::test]
+    async fn does_not_rewrite_length_finish_with_calls() {
+        let stub = Arc::new(StubProvider::new(
+            FinishReason::Length,
+            vec![make_tool_call()],
+        ));
+        let provider = NormalizingProvider::new(stub);
+
+        let resp = provider
+            .complete_with_tools(make_tool_request())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.finish_reason, FinishReason::Length);
+        assert_eq!(resp.tool_calls.len(), 1);
+    }
+
+    /// FinishReason::ContentFilter means a safety stop. The normalizer must
+    /// preserve it so policy-denied tool calls surface through the right
+    /// downstream branch instead of being executed.
+    #[tokio::test]
+    async fn does_not_rewrite_content_filter_finish_with_calls() {
+        let stub = Arc::new(StubProvider::new(
+            FinishReason::ContentFilter,
+            vec![make_tool_call()],
+        ));
+        let provider = NormalizingProvider::new(stub);
+
+        let resp = provider
+            .complete_with_tools(make_tool_request())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.finish_reason, FinishReason::ContentFilter);
+        assert_eq!(resp.tool_calls.len(), 1);
+    }
+
+    /// `?` on inner.complete_with_tools must forward Err unchanged — the
+    /// normalizer is a shape-fixup, not an error interceptor.
+    #[tokio::test]
+    async fn propagates_inner_error_on_complete_with_tools() {
+        struct ErrorStub;
+
+        #[async_trait]
+        impl LlmProvider for ErrorStub {
+            fn model_name(&self) -> &str {
+                "error-stub"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+                unimplemented!()
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                Err(LlmError::RequestFailed {
+                    provider: "error-stub".to_string(),
+                    reason: "synthetic test failure".to_string(),
+                })
+            }
+        }
+
+        let provider = NormalizingProvider::new(Arc::new(ErrorStub));
+        let err = provider
+            .complete_with_tools(make_tool_request())
+            .await
+            .expect_err("expected synthetic RequestFailed");
+        assert!(
+            matches!(err, LlmError::RequestFailed { .. }),
+            "expected RequestFailed, got {err:?}"
+        );
     }
 }

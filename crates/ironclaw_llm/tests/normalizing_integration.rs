@@ -12,8 +12,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
+use ironclaw_llm::NormalizingProvider;
 use ironclaw_llm::error::LlmError;
-use ironclaw_llm::normalizing::NormalizingProvider;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
