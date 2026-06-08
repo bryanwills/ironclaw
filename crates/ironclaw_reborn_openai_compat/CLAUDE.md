@@ -1,23 +1,24 @@
 # ironclaw_reborn_openai_compat
 
 Reborn-native OpenAI-compatible API contract surface for #3283 / #4442 /
-#4443 / #4444.
+#4443 / #4444 / #4445 / #4446 / #4447.
 ## Boundary
 
 This crate is a product/API route surface, not a host runtime:
 
 - It may define DTOs, route descriptors, sanitized error envelopes, and
-  feature-gated axum route fragments for host composition.- It must not bind sockets, call `axum::serve`, read v1 gateway state, or proxy
+  feature-gated axum route fragments for host composition.
+- It must not bind sockets, call `axum::serve`, read v1 gateway state, or proxy
   directly to `ironclaw_llm`.
 - Host composition owns listener binding, bearer/session auth, CORS/origin,
   body/rate limits, mounting, audit, and product workflow wiring.
-- Later slices should route through the channel-neutral `ProductWorkflow`
-  surface rather than recreating v1 `/v1/chat/completions` LLM proxy behavior.
+- Chat, Responses, and streaming paths route through the channel-neutral
+  `ProductWorkflow` plus projection-reader/streamer ports rather than
+  recreating v1 `/v1/chat/completions` LLM proxy behavior.
 
 ## Opaque Refs and Idempotency
 
-The `refs` module owns the OpenAI-compatible identity contract used before
-routes are wired to ProductWorkflow:
+The `refs` module owns the OpenAI-compatible identity contract:
 
 - Public ids are typed opaque refs: `chatcmpl-*` for Chat Completions and
   `resp_*` for Responses.
@@ -39,13 +40,13 @@ routes are wired to ProductWorkflow:
 
 With `openai-compat-beta`, the default router remains fail-closed unless host
 composition injects `OpenAiCompatRouterState::with_chat_completions(...)`.
-The injected `OpenAiChatCompletionsWorkflow` is the non-streaming Chat
-Completions slice:
+The injected `OpenAiChatCompletionsWorkflow` handles Chat Completions create
+and optional projection-backed SSE streaming:
 
 - `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an
   opaque `chatcmpl-*` ref with actor-scoped idempotency, and submits the user
   message through the channel-neutral `ProductWorkflow` surface.
-- The route waits through a composition-supplied `OpenAiChatCompletionWaiter`.
+- Non-streaming create waits through a composition-supplied `OpenAiChatCompletionWaiter`.
   Timeout returns a retryable sanitized API error and does not cancel or detach
   the underlying product turn.
 - The requested public model string is carried as a composition/policy hint for
@@ -56,9 +57,12 @@ Completions slice:
 - The route requires a verified `OpenAiCompatAuthenticatedCaller` extension
   minted by host auth middleware. Do not mint auth evidence in this crate's
   production feature set.
-- This crate still must not call v1 gateway handlers, `ironclaw_llm`,
-  `TurnCoordinator`, projection internals, listener APIs, secrets, DBs, or the
-  host runtime directly.
+- Streaming create consumes a composition-supplied projection streamer and must
+  suppress keepalive/control frames, internal refs, projection cursors, and
+  sanitized backend details.
+- This crate still must not call v1 gateway handlers, raw `SseManager`/
+  `AppEvent` streams, `ironclaw_llm`, `TurnCoordinator`, projection internals,
+  listener APIs, secrets, DBs, or the host runtime directly.
 
 ## DTO Policy
 
