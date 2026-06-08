@@ -13,9 +13,10 @@ use crate::{
     OpenAiChatCompletionResponse, OpenAiChatFinishReason, OpenAiChatMessage, OpenAiChatMessageRole,
     OpenAiChatProjectionStreamRequest, OpenAiChatTool, OpenAiChatToolCall, OpenAiCompatActorScope,
     OpenAiCompatBindInternalRefs, OpenAiCompatHttpError, OpenAiCompatIdempotencyKey,
-    OpenAiCompatInternalRefs, OpenAiCompatProjectionStreamer, OpenAiCompatPublicId,
-    OpenAiCompatRecordAcceptedAck, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
-    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatRouteSurface, OpenAiUsage,
+    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionStreamer,
+    OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefReservation,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatResourceMapping, OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiUsage,
 };
 use async_trait::async_trait;
 use axum::response::Response;
@@ -309,10 +310,16 @@ impl OpenAiChatCompletionsWorkflow {
                 (mapping, accepted_ack)
             }
             OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
-                let accepted_ack = mapping
-                    .accepted_ack
-                    .clone()
-                    .unwrap_or(ProductInboundAck::NoOp);
+                let OpenAiCompatPublicId::ChatCompletion(public_id) = &mapping.public_id else {
+                    return Err(OpenAiCompatHttpError::internal());
+                };
+                let accepted_ack = match mapping.accepted_ack.clone() {
+                    Some(accepted_ack) => accepted_ack,
+                    None => {
+                        self.submit_chat_and_record_ack(&caller, public_id, user_message_payload)
+                            .await?
+                    }
+                };
                 (mapping, accepted_ack)
             }
             OpenAiCompatRefReservationOutcome::Conflict(_) => {
@@ -324,6 +331,10 @@ impl OpenAiChatCompletionsWorkflow {
         let OpenAiCompatPublicId::ChatCompletion(public_id) = mapping.public_id.clone() else {
             return Err(OpenAiCompatHttpError::internal());
         };
+        let mapping = self
+            .bind_base_internal_refs(caller.scope().clone(), public_id.clone(), &accepted_ack)
+            .await?
+            .unwrap_or(mapping);
 
         Ok(crate::streaming::chat_sse_response(
             projection_streamer,
@@ -357,6 +368,35 @@ impl OpenAiChatCompletionsWorkflow {
             .await?
             .ok_or_else(OpenAiCompatHttpError::internal)?;
         Ok(accepted_ack)
+    }
+
+    async fn bind_base_internal_refs(
+        &self,
+        owner: OpenAiCompatActorScope,
+        public_id: OpenAiChatCompletionId,
+        accepted_ack: &ProductInboundAck,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatHttpError> {
+        let internal_refs = internal_refs_from_ack(accepted_ack)?;
+        match tokio::time::timeout(
+            DEFAULT_BIND_INTERNAL_REFS_TIMEOUT,
+            self.ref_store
+                .bind_internal_refs(OpenAiCompatBindInternalRefs::new(
+                    owner,
+                    OpenAiCompatPublicId::ChatCompletion(public_id.clone()),
+                    internal_refs,
+                )),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(Into::into),
+            Err(_) => {
+                tracing::warn!(
+                    public_id = public_id.as_str(),
+                    "bind_internal_refs timed out; continuing without binding"
+                );
+                Ok(None)
+            }
+        }
     }
 
     fn chat_product_envelope(
@@ -474,6 +514,33 @@ fn accepted_ack_from_ack(
             ProductInboundAck::CommandResult { .. } | ProductInboundAck::NoOp => {
                 return Err(OpenAiCompatHttpError::internal());
             }
+        }
+    }
+}
+
+fn internal_refs_from_ack(
+    ack: &ProductInboundAck,
+) -> Result<OpenAiCompatInternalRefs, OpenAiCompatHttpError> {
+    let mut ack = ack;
+    loop {
+        match ack {
+            ProductInboundAck::Accepted {
+                accepted_message_ref,
+                submitted_run_id,
+            } => {
+                return Ok(
+                    OpenAiCompatInternalRefs::new(OpenAiCompatProductActionRef::new(format!(
+                        "accepted:{}",
+                        accepted_message_ref.as_str()
+                    ))?)
+                    .with_turn_run_ref(OpenAiCompatTurnRunRef::new(submitted_run_id.to_string())?),
+                );
+            }
+            ProductInboundAck::Duplicate { prior } => ack = prior,
+            ProductInboundAck::DeferredBusy { .. }
+            | ProductInboundAck::Rejected(_)
+            | ProductInboundAck::CommandResult { .. }
+            | ProductInboundAck::NoOp => return Err(OpenAiCompatHttpError::internal()),
         }
     }
 }

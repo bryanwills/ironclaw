@@ -11,10 +11,10 @@ use crate::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatBindInternalRefs,
     OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
     OpenAiCompatProductActionRef, OpenAiCompatProjectionStreamer, OpenAiCompatPublicId,
-    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
-    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
-    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
-    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiCompatRecordAcceptedAck, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
+    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
+    OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding, OpenAiCompatResourceMapping,
+    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
     OpenAiResponseProjectionStreamRequest, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
     OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
 };
@@ -158,13 +158,10 @@ impl OpenAiResponsesWorkflow {
         )?;
         let ack = self.product_workflow.submit_inbound(envelope).await?;
         let accepted_ack = accepted_ack_from_ack(ack)?;
-        let base_internal_refs = internal_refs_from_ack(&accepted_ack)?;
+        self.record_response_accepted_ack(&caller, &public_id, &accepted_ack)
+            .await?;
         let mapping = self
-            .bind_internal_refs(
-                caller.scope().clone(),
-                public_id.clone(),
-                base_internal_refs.clone(),
-            )
+            .bind_base_internal_refs(caller.scope().clone(), public_id.clone(), &accepted_ack)
             .await?
             .unwrap_or(mapping);
 
@@ -258,18 +255,36 @@ impl OpenAiResponsesWorkflow {
                 )?;
                 let ack = self.product_workflow.submit_inbound(envelope).await?;
                 let accepted_ack = accepted_ack_from_ack(ack)?;
-                let base_internal_refs = internal_refs_from_ack(&accepted_ack)?;
+                self.record_response_accepted_ack(&caller, &public_id, &accepted_ack)
+                    .await?;
                 let mapping = self
-                    .bind_internal_refs(caller.scope().clone(), public_id, base_internal_refs)
+                    .bind_base_internal_refs(caller.scope().clone(), public_id, &accepted_ack)
                     .await?
                     .unwrap_or(mapping);
                 (mapping, accepted_ack)
             }
             OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
-                let accepted_ack = mapping
-                    .accepted_ack
-                    .clone()
-                    .unwrap_or(ProductInboundAck::NoOp);
+                let public_id = response_public_id(&mapping)?;
+                let accepted_ack = match mapping.accepted_ack.clone() {
+                    Some(accepted_ack) => accepted_ack,
+                    None => {
+                        let envelope = self.response_product_envelope(
+                            &caller,
+                            &public_id,
+                            previous_mapping.as_ref(),
+                            user_message_payload,
+                        )?;
+                        let ack = self.product_workflow.submit_inbound(envelope).await?;
+                        let accepted_ack = accepted_ack_from_ack(ack)?;
+                        self.record_response_accepted_ack(&caller, &public_id, &accepted_ack)
+                            .await?;
+                        accepted_ack
+                    }
+                };
+                let mapping = self
+                    .bind_base_internal_refs(caller.scope().clone(), public_id, &accepted_ack)
+                    .await?
+                    .unwrap_or(mapping);
                 (mapping, accepted_ack)
             }
             OpenAiCompatRefReservationOutcome::Conflict(_) => {
@@ -354,6 +369,33 @@ impl OpenAiResponsesWorkflow {
             ))
             .await?
             .ok_or_else(|| OpenAiCompatHttpError::not_found(Some("response_id".to_string())))
+    }
+
+    async fn record_response_accepted_ack(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        public_id: &OpenAiResponseId,
+        accepted_ack: &ProductInboundAck,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        self.ref_store
+            .record_accepted_ack(OpenAiCompatRecordAcceptedAck::new(
+                caller.scope().clone(),
+                OpenAiCompatPublicId::Response(public_id.clone()),
+                accepted_ack.clone(),
+            ))
+            .await?
+            .ok_or_else(OpenAiCompatHttpError::internal)?;
+        Ok(())
+    }
+
+    async fn bind_base_internal_refs(
+        &self,
+        owner: OpenAiCompatActorScope,
+        public_id: OpenAiResponseId,
+        accepted_ack: &ProductInboundAck,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatHttpError> {
+        self.bind_internal_refs(owner, public_id, internal_refs_from_ack(accepted_ack)?)
+            .await
     }
 
     async fn bind_internal_refs(
