@@ -1,9 +1,8 @@
 //! ProductWorkflow-backed Responses route service.
 //!
-//! This non-streaming slice routes Responses create/cancel through the
-//! ProductWorkflow facade and resolves retrieve through a composition-supplied
-//! projection reader. Streaming translation remains a later EventStreamManager
-//! slice.
+//! This slice routes Responses create/cancel through the ProductWorkflow facade,
+//! resolves retrieve through a composition-supplied projection reader, and
+//! translates projection-backed streaming creates into OpenAI-compatible SSE.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,14 +10,16 @@ use std::time::Duration;
 use crate::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatBindInternalRefs,
     OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
-    OpenAiCompatProductActionRef, OpenAiCompatPublicId, OpenAiCompatRefLookup,
-    OpenAiCompatRefOperation, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
-    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding,
-    OpenAiCompatResourceMapping, OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef,
-    OpenAiResponseId, OpenAiResponseObject, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
+    OpenAiCompatProductActionRef, OpenAiCompatProjectionStreamer, OpenAiCompatPublicId,
+    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
+    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponseProjectionStreamRequest, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
     OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
 };
 use async_trait::async_trait;
+use axum::response::Response;
 use chrono::Utc;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -41,6 +42,7 @@ pub struct OpenAiResponsesWorkflow {
     product_workflow: Arc<dyn ProductWorkflow>,
     ref_store: Arc<dyn OpenAiCompatRefStore>,
     projection_reader: Arc<dyn OpenAiResponsesProjectionReader>,
+    projection_streamer: Option<Arc<dyn OpenAiCompatProjectionStreamer>>,
     wait_timeout: Duration,
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
@@ -56,6 +58,7 @@ impl OpenAiResponsesWorkflow {
             product_workflow,
             ref_store,
             projection_reader,
+            projection_streamer: None,
             wait_timeout: DEFAULT_RESPONSES_WAIT_TIMEOUT,
             adapter_id: ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID)
                 .expect("OPENAI_COMPAT_ADAPTER_ID is valid"), // safety: hard-coded non-empty product adapter id literal.
@@ -69,6 +72,18 @@ impl OpenAiResponsesWorkflow {
         self
     }
 
+    pub fn with_projection_streamer(
+        mut self,
+        projection_streamer: Arc<dyn OpenAiCompatProjectionStreamer>,
+    ) -> Self {
+        self.projection_streamer = Some(projection_streamer);
+        self
+    }
+
+    pub(crate) fn can_stream(&self) -> bool {
+        self.projection_streamer.is_some()
+    }
+
     pub async fn create_response(
         &self,
         caller: OpenAiCompatAuthenticatedCaller,
@@ -77,6 +92,18 @@ impl OpenAiResponsesWorkflow {
         surface: OpenAiCompatRouteSurface,
     ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
         let request = parse_response_create_request(raw_body)?;
+        self.create_response_request(caller, request, raw_body, idempotency_key, surface)
+            .await
+    }
+
+    pub(crate) async fn create_response_request(
+        &self,
+        caller: OpenAiCompatAuthenticatedCaller,
+        request: OpenAiResponsesCreateRequest,
+        raw_body: &[u8],
+        idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+        surface: OpenAiCompatRouteSurface,
+    ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
         validate_responses_request(&request)?;
 
         let previous_mapping = if let Some(previous_response_id) = &request.previous_response_id {
@@ -168,6 +195,99 @@ impl OpenAiResponsesWorkflow {
         }
 
         Ok(wait_result.response)
+    }
+
+    pub async fn stream_response(
+        &self,
+        caller: OpenAiCompatAuthenticatedCaller,
+        raw_body: &[u8],
+        idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+        surface: OpenAiCompatRouteSurface,
+    ) -> Result<Response, OpenAiCompatHttpError> {
+        let request = parse_response_create_request(raw_body)?;
+        self.stream_response_request(caller, request, raw_body, idempotency_key, surface)
+            .await
+    }
+
+    pub(crate) async fn stream_response_request(
+        &self,
+        caller: OpenAiCompatAuthenticatedCaller,
+        request: OpenAiResponsesCreateRequest,
+        raw_body: &[u8],
+        idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+        surface: OpenAiCompatRouteSurface,
+    ) -> Result<Response, OpenAiCompatHttpError> {
+        let projection_streamer = self
+            .projection_streamer
+            .clone()
+            .ok_or_else(OpenAiCompatHttpError::not_wired)?;
+        validate_responses_stream_request(&request)?;
+
+        let previous_mapping = if let Some(previous_response_id) = &request.previous_response_id {
+            Some(
+                self.lookup_response_mapping(
+                    caller.scope(),
+                    previous_response_id.clone(),
+                    OpenAiCompatRefOperation::Retrieve,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        let user_message_payload = responses_user_message_payload(&request)?;
+        let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
+        let reservation = self
+            .ref_store
+            .reserve(OpenAiCompatRefReservation::new(
+                caller.scope().clone(),
+                surface,
+                request_fingerprint,
+                idempotency_key,
+            ))
+            .await?;
+        let (mapping, accepted_ack) = match reservation {
+            OpenAiCompatRefReservationOutcome::Created(mapping) => {
+                let public_id = response_public_id(&mapping)?;
+                let envelope = self.response_product_envelope(
+                    &caller,
+                    &public_id,
+                    previous_mapping.as_ref(),
+                    user_message_payload,
+                )?;
+                let ack = self.product_workflow.submit_inbound(envelope).await?;
+                let accepted_ack = accepted_ack_from_ack(ack)?;
+                let base_internal_refs = internal_refs_from_ack(&accepted_ack)?;
+                let mapping = self
+                    .bind_internal_refs(caller.scope().clone(), public_id, base_internal_refs)
+                    .await?
+                    .unwrap_or(mapping);
+                (mapping, accepted_ack)
+            }
+            OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
+                let accepted_ack = mapping.accepted_ack.clone().unwrap_or(ProductInboundAck::NoOp);
+                (mapping, accepted_ack)
+            }
+            OpenAiCompatRefReservationOutcome::Conflict(_) => {
+                return Err(OpenAiCompatHttpError::conflict(Some(
+                    "idempotency_key".to_string(),
+                )));
+            }
+        };
+        let public_id = response_public_id(&mapping)?;
+
+        Ok(crate::streaming::response_sse_response(
+            projection_streamer,
+            OpenAiResponseProjectionStreamRequest {
+                public_id,
+                actor_scope: caller.scope().clone(),
+                accepted_ack,
+                requested_model: request.model,
+                mapping,
+                after_cursor: None,
+            },
+        ))
     }
 
     pub async fn retrieve_response(
@@ -381,6 +501,12 @@ fn validate_responses_request(
             "stream".to_string(),
         )));
     }
+    validate_responses_stream_request(request)
+}
+
+fn validate_responses_stream_request(
+    request: &OpenAiResponsesCreateRequest,
+) -> Result<(), OpenAiCompatHttpError> {
     if request.tools.is_some() {
         return Err(OpenAiCompatHttpError::invalid_request(Some(
             "tools".to_string(),
@@ -515,7 +641,7 @@ fn response_public_id(
     Ok(public_id.clone())
 }
 
-fn parse_response_create_request(
+pub(crate) fn parse_response_create_request(
     raw_body: &[u8],
 ) -> Result<OpenAiResponsesCreateRequest, OpenAiCompatHttpError> {
     serde_json::from_slice(raw_body)

@@ -2,13 +2,13 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
 use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 
 const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
 
 use crate::{
-    OpenAiChatCompletionResponse, OpenAiCompatAuthenticatedCaller, OpenAiCompatHttpError,
-    OpenAiCompatIdempotencyKey, OpenAiCompatRouteSurface, OpenAiCompatRouterState,
-    OpenAiResponseId, OpenAiResponseObject,
+    OpenAiCompatAuthenticatedCaller, OpenAiCompatHttpError, OpenAiCompatIdempotencyKey,
+    OpenAiCompatRouteSurface, OpenAiCompatRouterState, OpenAiResponseId, OpenAiResponseObject,
 };
 
 pub async fn chat_completions(
@@ -16,7 +16,7 @@ pub async fn chat_completions(
     caller: Option<Extension<OpenAiCompatAuthenticatedCaller>>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<OpenAiChatCompletionResponse>, OpenAiCompatHttpError> {
+) -> Result<Response, OpenAiCompatHttpError> {
     let Some(Extension(caller)) = caller else {
         return Err(OpenAiCompatHttpError::from_kind(
             401,
@@ -29,10 +29,16 @@ pub async fn chat_completions(
         return Err(OpenAiCompatHttpError::not_wired());
     };
     let idempotency_key = idempotency_key_from_headers(&headers)?;
+    let request = crate::chat_workflow::parse_chat_request(&body)?;
+    if request.stream.unwrap_or(false) && workflow.can_stream() {
+        return workflow
+            .stream_chat_request(caller, request, &body, idempotency_key)
+            .await;
+    }
     workflow
-        .complete_chat(caller, &body, idempotency_key)
+        .complete_chat_request(caller, request, &body, idempotency_key)
         .await
-        .map(Json)
+        .map(|response| Json(response).into_response())
 }
 
 pub async fn responses_api_create(
@@ -40,7 +46,7 @@ pub async fn responses_api_create(
     caller: Option<Extension<OpenAiCompatAuthenticatedCaller>>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<OpenAiResponseObject>, OpenAiCompatHttpError> {
+) -> Result<Response, OpenAiCompatHttpError> {
     create_response(
         state,
         caller,
@@ -56,7 +62,7 @@ pub async fn responses_v1_create(
     caller: Option<Extension<OpenAiCompatAuthenticatedCaller>>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<OpenAiResponseObject>, OpenAiCompatHttpError> {
+) -> Result<Response, OpenAiCompatHttpError> {
     create_response(
         state,
         caller,
@@ -118,16 +124,22 @@ async fn create_response(
     headers: HeaderMap,
     body: Bytes,
     surface: OpenAiCompatRouteSurface,
-) -> Result<Json<OpenAiResponseObject>, OpenAiCompatHttpError> {
+) -> Result<Response, OpenAiCompatHttpError> {
     let Some(workflow) = state.responses() else {
         return Err(OpenAiCompatHttpError::not_wired());
     };
     let caller = require_caller(caller)?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
+    let request = crate::responses_workflow::parse_response_create_request(&body)?;
+    if request.stream.unwrap_or(false) && workflow.can_stream() {
+        return workflow
+            .stream_response_request(caller, request, &body, idempotency_key, surface)
+            .await;
+    }
     workflow
-        .create_response(caller, &body, idempotency_key, surface)
+        .create_response_request(caller, request, &body, idempotency_key, surface)
         .await
-        .map(Json)
+        .map(|response| Json(response).into_response())
 }
 
 async fn retrieve_response(
