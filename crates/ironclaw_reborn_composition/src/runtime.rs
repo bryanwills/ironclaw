@@ -3434,7 +3434,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_SEND_TIMEOUT,
         })
         .with_model_gateway_override(gateway)
         .with_model_cost_table_override(Arc::new(cost_table));
@@ -3731,7 +3731,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_SEND_TIMEOUT,
         })
         .with_skill_context_source(skill_context_source_for_input)
         .with_model_gateway_override(gateway);
@@ -3780,7 +3780,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_SEND_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
@@ -4402,7 +4402,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.execute_skill_message(&conversation, "$marker-helper"),
         )
         .await
