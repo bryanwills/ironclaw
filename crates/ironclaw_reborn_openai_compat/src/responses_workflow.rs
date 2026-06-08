@@ -27,7 +27,6 @@ use ironclaw_product_adapters::{
     ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind, TrustedInboundContext,
     UserMessagePayload,
 };
-use ironclaw_turns::TurnRunId;
 
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -204,8 +203,8 @@ impl OpenAiResponsesWorkflow {
                 OpenAiCompatRefOperation::Cancel,
             )
             .await?;
-        let run_id = response_turn_run_id(&mapping)?;
-        let envelope = self.cancel_product_envelope(&caller, &response_id, run_id)?;
+        let run_ref = response_turn_run_ref(&mapping)?;
+        let envelope = self.cancel_product_envelope(&caller, &response_id, &run_ref)?;
         let ack = self.product_workflow.submit_inbound(envelope).await?;
         accepted_cancel_ack_from_ack(ack)?;
 
@@ -284,13 +283,17 @@ impl OpenAiResponsesWorkflow {
         &self,
         caller: &OpenAiCompatAuthenticatedCaller,
         public_id: &OpenAiResponseId,
-        run_id: TurnRunId,
+        run_ref: &OpenAiCompatTurnRunRef,
     ) -> Result<ProductInboundEnvelope, OpenAiCompatHttpError> {
         self.product_envelope(
             caller,
             ExternalEventId::new(format!("{}:cancel", public_id.as_str()))?,
             format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{}", public_id.as_str()),
-            ProductInboundPayload::ControlAction(ProductControlActionPayload::CancelRun { run_id }),
+            ProductInboundPayload::ControlAction(
+                ProductControlActionPayload::cancel_run(run_ref.as_str()).map_err(|_| {
+                    OpenAiCompatHttpError::not_found(Some("response_id".to_string()))
+                })?,
+            ),
         )
     }
 
@@ -487,9 +490,9 @@ fn internal_refs_from_ack(
     }
 }
 
-fn response_turn_run_id(
+fn response_turn_run_ref(
     mapping: &OpenAiCompatResourceMapping,
-) -> Result<TurnRunId, OpenAiCompatHttpError> {
+) -> Result<OpenAiCompatTurnRunRef, OpenAiCompatHttpError> {
     let OpenAiCompatResourceBinding::Bound { internal_refs } = &mapping.binding else {
         return Err(OpenAiCompatHttpError::not_found(Some(
             "response_id".to_string(),
@@ -500,8 +503,7 @@ fn response_turn_run_id(
             "response_id".to_string(),
         )));
     };
-    TurnRunId::parse(turn_run_ref.as_str())
-        .map_err(|_| OpenAiCompatHttpError::not_found(Some("response_id".to_string())))
+    Ok(turn_run_ref.clone())
 }
 
 fn response_public_id(
