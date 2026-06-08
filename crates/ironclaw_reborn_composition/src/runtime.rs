@@ -2542,10 +2542,11 @@ mod tests {
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use ironclaw_turns::{
-        AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
-        IdempotencyKey, LoopResultRef, ReplyTargetBindingRef, SanitizedCancelReason,
-        SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-        TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+        AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GateRef,
+        GetRunStateRequest, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
+        SanitizedCancelReason, SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest,
+        SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId,
+        TurnRunnerId, TurnScope, TurnStatus,
         run_profile::{
             InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
             ModelProfileId, ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver,
@@ -2561,7 +2562,7 @@ mod tests {
     use crate::runtime_input::{
         PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
         TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
-        TriggerPollerSettings,
+        TriggerPollerSettings, TurnRunnerSettings,
     };
     use crate::webui::build_webui_services;
 
@@ -3540,6 +3541,10 @@ mod tests {
             source_binding_id: "runtime-cancel-child-source".to_string(),
             reply_target_binding_id: "runtime-cancel-child-reply".to_string(),
         })
+        .with_runner_settings(TurnRunnerSettings {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_secs(60),
+        })
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
@@ -3602,6 +3607,38 @@ mod tests {
             run_id: child_run_id,
             ..
         } = child;
+        let local_runtime = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("runtime should use local-dev RebornServices substrate");
+        let child_runner_id = TurnRunnerId::new();
+        let child_lease_token = TurnLeaseToken::new();
+        let claimed_child = local_runtime
+            .turn_state
+            .claim_next_run(ClaimRunRequest {
+                runner_id: child_runner_id,
+                lease_token: child_lease_token,
+                scope_filter: Some(child_scope.clone()),
+            })
+            .await
+            .expect("claim child run")
+            .expect("child run should be queued");
+        assert_eq!(claimed_child.state.run_id, child_run_id);
+        local_runtime
+            .turn_state
+            .block_run(BlockRunRequest {
+                run_id: child_run_id,
+                runner_id: child_runner_id,
+                lease_token: child_lease_token,
+                checkpoint_id: TurnCheckpointId::new(),
+                state_ref: LoopCheckpointStateRef::new("checkpoint:runtime-cancel-child").unwrap(),
+                reason: BlockedReason::AwaitDependentRun {
+                    gate_ref: GateRef::new("gate:runtime-cancel-child").unwrap(),
+                },
+            })
+            .await
+            .expect("block child run");
         let result_ref = LoopResultRef::new("result:runtime-cancel-child").unwrap();
         runtime
             .thread_service
