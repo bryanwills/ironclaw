@@ -180,6 +180,16 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
                 }
                 error => scoped_lifecycle_filesystem_error("mark installation deleted", error),
             })?;
+        let reservation_path = scoped_lifecycle_installation_id_path(
+            &self.root,
+            &request.tenant_id,
+            &request.installation_id,
+        )?;
+        self.tombstone_installation_id_reservation_if_current(
+            &reservation_path,
+            &existing.installation,
+        )
+        .await?;
         Ok(())
     }
 
@@ -217,7 +227,7 @@ impl FilesystemScopedLifecycleInstallationStore {
         let cas = match self.installation_id_state(path).await? {
             InstallationIdState::Absent => CasExpectation::Absent,
             InstallationIdState::Tombstone(version) => CasExpectation::Version(version),
-            InstallationIdState::Reserved(existing) => {
+            InstallationIdState::Reserved(existing, _) => {
                 if existing.matches_installation(installation) {
                     return Ok(None);
                 }
@@ -258,6 +268,35 @@ impl FilesystemScopedLifecycleInstallationStore {
             .await;
     }
 
+    async fn tombstone_installation_id_reservation_if_current(
+        &self,
+        path: &VirtualPath,
+        installation: &ScopedLifecycleInstallation,
+    ) -> Result<(), ProductWorkflowError> {
+        let InstallationIdState::Reserved(reservation, version) =
+            self.installation_id_state(path).await?
+        else {
+            return Ok(());
+        };
+        if !reservation.matches_installation(installation) {
+            return Ok(());
+        }
+        self.filesystem
+            .put(
+                path,
+                tombstone_entry_for_installation_id_reservation(&reservation)?,
+                CasExpectation::Version(version),
+            )
+            .await
+            .map_err(|error| match error {
+                FilesystemError::VersionMismatch { .. } => {
+                    scoped_lifecycle_transient("scoped lifecycle installation id delete conflict")
+                }
+                error => scoped_lifecycle_filesystem_error("delete installation id", error),
+            })?;
+        Ok(())
+    }
+
     async fn installation_id_state(
         &self,
         path: &VirtualPath,
@@ -273,7 +312,7 @@ impl FilesystemScopedLifecycleInstallationStore {
             return Ok(InstallationIdState::Tombstone(entry.version));
         }
         let reservation = parse_installation_id_reservation(entry.entry)?;
-        Ok(InstallationIdState::Reserved(reservation))
+        Ok(InstallationIdState::Reserved(reservation, entry.version))
     }
 
     async fn package_path_state(
@@ -301,18 +340,10 @@ impl FilesystemScopedLifecycleInstallationStore {
     ) -> Result<Option<VersionedScopedLifecycleInstallation>, ProductWorkflowError> {
         let reservation_path =
             scoped_lifecycle_installation_id_path(&self.root, tenant_id, installation_id)?;
-        let Some(reservation_entry) = self
-            .filesystem
-            .get(&reservation_path)
-            .await
-            .map_err(|error| scoped_lifecycle_filesystem_error("load installation id", error))?
-        else {
-            return Ok(None);
+        let reservation = match self.installation_id_state(&reservation_path).await? {
+            InstallationIdState::Absent | InstallationIdState::Tombstone(_) => return Ok(None),
+            InstallationIdState::Reserved(reservation, _) => reservation,
         };
-        if is_installation_id_tombstone(&reservation_entry.entry) {
-            return Ok(None);
-        }
-        let reservation = parse_installation_id_reservation(reservation_entry.entry)?;
         let package_path =
             scoped_lifecycle_installation_path_for_reservation(&self.root, &reservation)?;
         let Some(package_entry) = self
@@ -328,9 +359,7 @@ impl FilesystemScopedLifecycleInstallationStore {
         }
         let loaded = parse_versioned_scoped_lifecycle_installation(package_entry)?;
         if loaded.installation.installation_id != *installation_id {
-            return Err(scoped_lifecycle_transient(
-                "scoped lifecycle installation id reservation mismatch",
-            ));
+            return Ok(None);
         }
         Ok(Some(loaded))
     }
@@ -378,7 +407,7 @@ enum PackagePathState {
 enum InstallationIdState {
     Absent,
     Tombstone(RecordVersion),
-    Reserved(ScopedLifecycleInstallationIdReservation),
+    Reserved(ScopedLifecycleInstallationIdReservation, RecordVersion),
 }
 
 struct VersionedScopedLifecycleInstallation {
@@ -1060,7 +1089,10 @@ mod tests {
 
         assert_eq!(
             filesystem.observed_cas().await,
-            vec![CasExpectation::Version(version)]
+            vec![
+                CasExpectation::Version(version),
+                CasExpectation::Version(version)
+            ]
         );
         assert_eq!(filesystem.delete_count().await, 0);
     }

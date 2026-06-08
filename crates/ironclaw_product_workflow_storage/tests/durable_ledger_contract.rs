@@ -490,6 +490,7 @@ async fn assert_scoped_lifecycle_store_resolves_shared_and_private_after_reopen(
     } else {
         concurrent_right_id
     };
+    let deleted_calendar_id = concurrent_winner_id.clone();
     store
         .delete_installation(DeleteScopedLifecycleInstallationRequest {
             actor: other_user.clone(),
@@ -512,6 +513,13 @@ async fn assert_scoped_lifecycle_store_resolves_shared_and_private_after_reopen(
         })
         .await
         .expect("recreate package after tombstone delete");
+    assert!(
+        reopened
+            .get_installation(&tenant, &deleted_calendar_id)
+            .await
+            .expect("load deleted installation id after package replacement")
+            .is_none()
+    );
     store
         .delete_installation(DeleteScopedLifecycleInstallationRequest {
             actor: other_user.clone(),
