@@ -145,7 +145,7 @@ impl OpenAiChatCompletionsWorkflow {
         };
 
         let envelope = self.chat_product_envelope(&caller, &public_id, &request)?;
-        let ack = self.product_workflow.accept_inbound(envelope).await?;
+        let ack = self.product_workflow.submit_inbound(envelope).await?;
         let accepted_ack = accepted_ack_from_ack(ack)?;
         let wait_request = OpenAiChatCompletionWaitRequest {
             public_id: public_id.clone(),
