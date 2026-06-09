@@ -51,6 +51,25 @@ use self::surface_snapshot::{
 // existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
+
+/// Observes a capability invocation's resolved input (arguments) and result
+/// (output) as the host loop executes it, for trajectory capture by downstream
+/// consumers (benchmark harnesses, debuggers, UI). `call_id` is the capability
+/// input ref and correlates the two callbacks. Best-effort and side-effect-free:
+/// implementations must never block or fail the run.
+pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
+    /// A model tool call resolved to a capability invocation: `capability_id` is
+    /// the resolved capability (e.g. `builtin.shell`), `arguments` the resolved
+    /// input JSON the capability runs with.
+    fn on_capability_input(
+        &self,
+        call_id: &str,
+        capability_id: &str,
+        arguments: &serde_json::Value,
+    );
+    /// The capability completed; `output` is the result JSON staged for the model.
+    fn on_capability_result(&self, call_id: &str, capability_id: &str, output: &serde_json::Value);
+}
 const MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS: usize = 128;
 
 #[async_trait]
@@ -239,6 +258,7 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     execution_mounts: MountView,
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
+    trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
 impl HostRuntimeLoopCapabilityPortFactory {
@@ -257,7 +277,18 @@ impl HostRuntimeLoopCapabilityPortFactory {
             milestone_sink,
             execution_mounts: MountView::default(),
             capability_execution_mounts: HashMap::new(),
+            trajectory_observer: None,
         }
+    }
+
+    /// Attach a [`CapabilityTrajectoryObserver`] that every port built by this
+    /// factory forwards capability inputs to. No-op when unset.
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    ) -> Self {
+        self.trajectory_observer = observer;
+        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -290,6 +321,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
         )
         .with_execution_mounts(self.execution_mounts.clone())
         .with_capability_execution_mounts(self.capability_execution_mounts.clone())
+        .with_trajectory_observer(self.trajectory_observer.clone())
     }
 }
 
@@ -558,6 +590,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
     provider_tool_call_effective_capability_ids: Mutex<ProviderToolCallEffectiveCapabilityIdStore>,
+    trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -602,7 +635,18 @@ impl HostRuntimeLoopCapabilityPort {
             provider_tool_call_effective_capability_ids: Mutex::new(
                 ProviderToolCallEffectiveCapabilityIdStore::default(),
             ),
+            trajectory_observer: None,
         }
+    }
+
+    /// Attach a [`CapabilityTrajectoryObserver`] notified of each capability's
+    /// resolved input as this port executes it. No-op when unset.
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    ) -> Self {
+        self.trajectory_observer = observer;
+        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -1222,6 +1266,16 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
+        // Trajectory capture: the resolved input is the model's tool arguments,
+        // and this is the one place they are visible (the provider tool-call
+        // decorator stages them upstream and bypasses the input resolver hook).
+        if let Some(observer) = &self.trajectory_observer {
+            observer.on_capability_input(
+                request.input_ref.as_str(),
+                request.capability_id.as_str(),
+                &input,
+            );
+        }
         let input = match prepare_provider_arguments_with_detail(
             &input,
             &capability.parameters_schema,

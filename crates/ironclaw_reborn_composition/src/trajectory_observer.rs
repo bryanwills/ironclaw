@@ -8,24 +8,10 @@
 //! [`RebornTrajectoryObserver`] via
 //! [`RebornRuntimeInput::with_trajectory_observer`](crate::RebornRuntimeInput::with_trajectory_observer)
 //! to receive those events live.
+//!
+//! The observer trait itself lives in `ironclaw_loop_support` (next to the
+//! capability port that drives it, so both the input hook on the host port and
+//! the result hook on the local-dev capability IO can reference one type). It is
+//! re-exported here under the reborn-facing name for the composition's API.
 
-use serde_json::Value;
-
-/// Receives capability/tool invocations and their results during a run.
-///
-/// `call_id` correlates an `on_capability_input` with its matching
-/// `on_capability_result` (it is the capability input ref). Implementations must
-/// be cheap and non-blocking; this is best-effort observation and must not affect
-/// the run outcome.
-pub trait RebornTrajectoryObserver: std::fmt::Debug + Send + Sync {
-    /// A capability/tool was invoked with `tool_name` and `arguments`. Not every
-    /// runtime staging path surfaces inputs here (provider tool calls are staged
-    /// by a lower decorator), so consumers must also handle a result arriving for
-    /// a `call_id` they never saw an input for — see [`Self::on_capability_result`].
-    fn on_capability_input(&self, call_id: &str, tool_name: &str, arguments: &Value);
-
-    /// The capability keyed by `call_id` (capability id `capability_id`, e.g.
-    /// `builtin.shell`) produced `output`. This fires for every completed
-    /// capability, so it is the reliable spine of the trajectory.
-    fn on_capability_result(&self, call_id: &str, capability_id: &str, output: &Value);
-}
+pub use ironclaw_loop_support::CapabilityTrajectoryObserver as RebornTrajectoryObserver;

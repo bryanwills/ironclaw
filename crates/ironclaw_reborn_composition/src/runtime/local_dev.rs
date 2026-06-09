@@ -90,7 +90,7 @@ pub(super) fn capability_wiring(
             thread_service,
             thread_scope,
         )
-        .with_observer(trajectory_observer),
+        .with_observer(trajectory_observer.clone()),
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -106,6 +106,7 @@ pub(super) fn capability_wiring(
             result_writer: Arc::clone(&capability_result_writer),
             milestone_sink,
             skill_activation_source,
+            trajectory_observer,
         });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -132,6 +133,7 @@ struct LocalDevLoopCapabilityPortFactory {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 }
 
 #[async_trait::async_trait]
@@ -169,7 +171,8 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             Arc::clone(&self.result_writer),
             Arc::clone(&self.milestone_sink),
         )
-        .with_execution_mounts(workspace_mounts);
+        .with_execution_mounts(workspace_mounts)
+        .with_trajectory_observer(self.trajectory_observer.clone());
         for capability_id in self.policy.skill_management_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), skill_mounts.clone());
