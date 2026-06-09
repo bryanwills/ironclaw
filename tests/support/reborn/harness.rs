@@ -50,9 +50,11 @@ use ironclaw_host_runtime::{
     MEMORY_WRITE_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCredentialAccessSecret,
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, SHELL_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_package,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
@@ -541,6 +543,20 @@ impl RebornBinaryE2EHarness {
     ) -> HarnessResult<Self> {
         let host_runtime =
             Arc::new(HostRuntimeCapabilityHarness::trigger_management_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_trace_commons_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::trace_commons_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -1591,6 +1607,33 @@ impl HostRuntimeCapabilityHarness {
             MountView::default(),
         )
         .await
+    }
+
+    async fn trace_commons_tools() -> HarnessResult<Self> {
+        let mut harness = Self::new_with_mounts(
+            "reborn-e2e-trace-commons-tools",
+            vec![
+                CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID)?,
+                CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID)?,
+                CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID)?,
+            ],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::Network,
+                EffectKind::ExternalWrite,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-trace-commons-user")?,
+            MountView::default(),
+        )
+        .await?;
+        // onboard declares EffectKind::Network, so the lease must carry a
+        // non-empty network policy or the obligation check rejects dispatch
+        // before the consent gate runs.
+        harness.network_policy = http_test_policy();
+        Ok(harness)
     }
 
     async fn new(

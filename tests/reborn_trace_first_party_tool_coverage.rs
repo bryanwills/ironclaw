@@ -12,9 +12,10 @@ use ironclaw_host_runtime::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
     MEMORY_WRITE_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_package,
+    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
 };
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
@@ -49,6 +50,9 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRIGGER_CREATE_CAPABILITY_ID,
     TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID,
 ];
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
@@ -471,6 +475,113 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
     );
     assert_eq!(results[2].capability_id, trigger_remove);
     assert_eq!(results[2].output["removed"], serde_json::json!(false));
+
+    let requests = harness.model_requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(tool_result_count(&requests[1]), 1);
+    assert_eq!(tool_result_count(&requests[2]), 2);
+    assert_eq!(tool_result_count(&requests[3]), 3);
+    assert_milestone_order(
+        &harness.milestones(),
+        |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),
+        |kind| matches!(kind, LoopHostMilestoneKind::AssistantReplyFinalized { .. }),
+    );
+    harness.assert_model_exhausted();
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn reborn_trace_trace_commons_first_party_tools_parity() {
+    let onboard = CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).expect("capability id");
+    let status = CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID).expect("capability id");
+    let credits = CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID).expect("capability id");
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        // confirmed=false hits the consent gate before any egress wiring is
+        // consulted, so the onboard step is deterministic with no network.
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                onboard.clone(),
+                "call_trace_commons_onboard_unconfirmed",
+                serde_json::json!({
+                    "invite_url": "https://tc.example.test/onboard#REBORN-E2E-CODE",
+                    "confirmed": false
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                status.clone(),
+                "call_trace_commons_status",
+                serde_json::json!({}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                credits.clone(),
+                "call_trace_commons_credits",
+                serde_json::json!({}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply(
+                "trace commons tools trace complete",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_host_runtime_trace_commons_capabilities(
+        "room-trace-trace-commons-first-party-tools",
+        model_gateway,
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-trace-trace-commons-first-party-tools",
+            "exercise trace commons first-party tools",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("completed run");
+    harness
+        .assert_final_reply("trace commons tools trace complete")
+        .await
+        .expect("final reply");
+
+    let invocations = harness.capability_invocations();
+    assert_eq!(invocations.len(), 3);
+    assert_eq!(invocations[0].capability_id, onboard);
+    assert_eq!(invocations[1].capability_id, status);
+    assert_eq!(invocations[2].capability_id, credits);
+
+    let results = harness.capability_results();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].capability_id, onboard);
+    assert_eq!(results[0].output["enrolled"], serde_json::json!(false));
+    assert_eq!(
+        results[0].output["consent_required"],
+        serde_json::json!(true)
+    );
+    assert_eq!(results[1].capability_id, status);
+    assert_eq!(results[1].output["enrolled"], serde_json::json!(false));
+    assert_eq!(results[2].capability_id, credits);
+    assert_eq!(results[2].output["submissions_total"], serde_json::json!(0));
+    // Serialized f32 zero can carry a negative sign; compare numerically.
+    assert_eq!(
+        results[2].output["pending_credit"]
+            .as_f64()
+            .expect("pending_credit is a number"),
+        0.0
+    );
 
     let requests = harness.model_requests();
     assert_eq!(requests.len(), 4);
