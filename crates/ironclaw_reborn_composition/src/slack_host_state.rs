@@ -1339,11 +1339,12 @@ fn stored_personal_dm_target(
     record: StoredSlackPersonalDmTarget,
 ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
     let key = SlackPersonalDmTargetKey::new(
-        TenantId::new(record.tenant_id).map_err(|_| SlackPersonalDmTargetError::InvalidTarget)?,
+        TenantId::new(record.tenant_id)
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
         AdapterInstallationId::new(record.installation_id)
-            .map_err(|_| SlackPersonalDmTargetError::InvalidTarget)?,
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
         record.team_id,
-        UserId::new(record.user_id).map_err(|_| SlackPersonalDmTargetError::InvalidTarget)?,
+        UserId::new(record.user_id).map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
     )?;
     SlackPersonalDmTarget::new(
         key,
@@ -1737,6 +1738,40 @@ mod tests {
                 .expect("foreign tenant load fails closed"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reports_corrupt_personal_dm_target_as_unavailable() {
+        let state = state();
+        let key = SlackPersonalDmTargetKey::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            installation(),
+            "T123".to_string(),
+            user("user:alice"),
+        )
+        .unwrap();
+        let path =
+            FilesystemSlackHostState::<InMemoryBackend>::personal_dm_target_path(&key).unwrap();
+        let record = StoredSlackPersonalDmTarget {
+            tenant_id: String::new(),
+            installation_id: installation().as_str().to_string(),
+            team_id: "T123".to_string(),
+            user_id: "user:alice".to_string(),
+            slack_user_id: "U123".to_string(),
+            dm_channel_id: "D123".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        state
+            .write_record(&path, &record, CasExpectation::Any)
+            .await
+            .expect("write corrupt personal DM record");
+
+        assert!(matches!(
+            state.load_personal_dm_target(&key).await,
+            Err(SlackPersonalDmTargetError::StoreUnavailable)
+        ));
     }
 
     #[tokio::test]

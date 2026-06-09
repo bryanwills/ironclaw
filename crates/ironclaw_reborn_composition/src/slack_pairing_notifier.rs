@@ -9,14 +9,15 @@ use ironclaw_product_adapters::{
 use ironclaw_slack_v2_adapter::SLACK_API_HOST;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::slack_dm_open::open_slack_dm_channel;
+use crate::slack_dm_open::{
+    SLACK_API_RESPONSE_LIMIT, open_slack_dm_channel, validate_slack_dm_channel_id,
+};
 use crate::slack_personal_binding_pairing::{
     SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
     SlackPersonalBindingPairingNotifier,
 };
 
 const SLACK_POST_MESSAGE_PATH: &str = "/api/chat.postMessage";
-const SLACK_API_RESPONSE_LIMIT: usize = 64 * 1024;
 
 pub(crate) struct SlackPairingChallengeHttpNotifier {
     egress: Arc<dyn ProtocolHttpEgress>,
@@ -66,13 +67,16 @@ impl SlackPairingChallengeHttpNotifier {
         &self,
         slack_user_id: &str,
     ) -> Result<String, SlackPersonalBindingPairingError> {
-        open_slack_dm_channel(
+        let channel_id = open_slack_dm_channel(
             self.egress.as_ref(),
             self.credential_handle.clone(),
             slack_user_id,
         )
         .await
-        .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))
+        .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))?;
+        validate_slack_dm_channel_id(&channel_id)
+            .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))?;
+        Ok(channel_id)
     }
 
     async fn send_slack_request(
@@ -241,6 +245,22 @@ mod tests {
                 Err(SlackPersonalBindingPairingError::Backend(_))
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn slack_pairing_notifier_rejects_non_dm_channel_from_open_response() {
+        let notifier = SlackPairingChallengeHttpNotifier::new(
+            Arc::new(ScriptedEgress::new([EgressResponse::new(
+                200,
+                br#"{"ok":true,"channel":{"id":"G123"}}"#.to_vec(),
+            )])),
+            EgressCredentialHandle::new("slack_bot_token").unwrap(),
+        );
+
+        assert!(matches!(
+            notifier.send_pairing_challenge(notification()).await,
+            Err(SlackPersonalBindingPairingError::Backend(_))
+        ));
     }
 
     #[tokio::test]

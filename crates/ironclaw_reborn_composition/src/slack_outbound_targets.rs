@@ -27,6 +27,7 @@ use crate::outbound_preferences::{OutboundDeliveryTargetEntry, OutboundDeliveryT
 use crate::slack_channel_routes::{
     SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
 };
+use crate::slack_dm_open::validate_slack_dm_channel_id;
 #[cfg(test)]
 use crate::slack_dm_open::{SlackDmOpenError, open_slack_dm_channel};
 use crate::slack_serve::{SlackTeamId, SlackUserId};
@@ -97,7 +98,8 @@ impl SlackPersonalDmTarget {
         dm_channel_id: String,
     ) -> Result<Self, SlackPersonalDmTargetError> {
         validate_slack_id("slack user", slack_user_id.as_str())?;
-        validate_slack_dm_channel_id(&dm_channel_id)?;
+        validate_slack_dm_channel_id(&dm_channel_id)
+            .map_err(|_| SlackPersonalDmTargetError::InvalidTarget)?;
         Ok(Self {
             key,
             slack_user_id,
@@ -113,6 +115,7 @@ pub(crate) enum SlackPersonalDmTargetError {
     #[error("Slack personal DM target store unavailable")]
     StoreUnavailable,
     #[error("Slack personal DM provisioning failed: {0}")]
+    // arch-exempt: dead_code, reserved for explicit Slack DM provisioning product route, plan #4600
     #[allow(dead_code)]
     ProvisioningFailed(String),
 }
@@ -124,6 +127,7 @@ pub(crate) trait SlackPersonalDmTargetStore: Send + Sync + std::fmt::Debug {
         key: &SlackPersonalDmTargetKey,
     ) -> Result<Option<SlackPersonalDmTarget>, SlackPersonalDmTargetError>;
 
+    // arch-exempt: dead_code, reserved for explicit Slack DM provisioning product route, plan #4600
     #[allow(dead_code)]
     async fn upsert_personal_dm_target(
         &self,
@@ -216,7 +220,6 @@ impl SlackPersonalDmTargetProvisioner {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn provision_for_user(
         &self,
         user_id: UserId,
@@ -233,7 +236,6 @@ impl SlackPersonalDmTargetProvisioner {
         self.store.upsert_personal_dm_target(target).await
     }
 
-    #[allow(dead_code)]
     async fn open_dm_channel(
         &self,
         slack_user_id: &str,
@@ -245,12 +247,15 @@ impl SlackPersonalDmTargetProvisioner {
         )
         .await
         .map_err(|error| match error {
-            SlackDmOpenError::MissingChannel => SlackPersonalDmTargetError::InvalidTarget,
+            SlackDmOpenError::InvalidChannel | SlackDmOpenError::MissingChannel => {
+                SlackPersonalDmTargetError::InvalidTarget
+            }
             SlackDmOpenError::Backend(reason) => {
                 SlackPersonalDmTargetError::ProvisioningFailed(reason)
             }
         })?;
-        validate_slack_dm_channel_id(&channel_id)?;
+        validate_slack_dm_channel_id(&channel_id)
+            .map_err(|_| SlackPersonalDmTargetError::InvalidTarget)?;
         Ok(channel_id)
     }
 }
@@ -386,7 +391,7 @@ impl SlackHostBetaOutboundTargetProvider {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn channel_id_for_reply_target_binding_ref(
         &self,
         target: &ReplyTargetBindingRef,
@@ -629,13 +634,21 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
             .into_iter()
             .map(|route| self.entry_for_shared_channel_route(&route))
             .collect::<Result<Vec<_>, _>>()?;
-        let key = SlackPersonalDmTargetKey::new(
+        let key = match SlackPersonalDmTargetKey::new(
             self.tenant_id.clone(),
             self.installation_id.clone(),
             self.team_id.as_str().to_string(),
             caller.user_id.clone(),
-        )
-        .map_err(map_slack_personal_dm_target_error)?;
+        ) {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Slack personal DM target key could not be built while listing outbound targets"
+                );
+                return Ok(targets);
+            }
+        };
         match self
             .personal_dm_target_store
             .load_personal_dm_target(&key)
@@ -818,14 +831,6 @@ fn validate_slack_id(field: &'static str, value: &str) -> Result<(), SlackPerson
         })
     {
         tracing::debug!(field, "invalid Slack id for personal DM target");
-        return Err(SlackPersonalDmTargetError::InvalidTarget);
-    }
-    Ok(())
-}
-
-fn validate_slack_dm_channel_id(value: &str) -> Result<(), SlackPersonalDmTargetError> {
-    validate_slack_id("slack dm channel", value)?;
-    if !value.starts_with('D') {
         return Err(SlackPersonalDmTargetError::InvalidTarget);
     }
     Ok(())

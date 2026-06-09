@@ -669,7 +669,8 @@ mod tests {
     };
     use crate::slack_outbound_targets::{
         InMemorySlackPersonalDmTargetStore, SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
-        SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
+        SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetKey,
+        SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
         slack_reply_target_binding_ref_from_raw, slack_shared_channel_reply_target_binding_ref,
     };
     use crate::slack_personal_binding_pairing_serve::{
@@ -1955,6 +1956,47 @@ mod tests {
             Some("slack:personal-dm:T0HOST:user:slack-host")
         );
         runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_personal_dm_reply_target_binding_ref_round_trips_authorized_dm() {
+        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let key = SlackPersonalDmTargetKey::new(
+            TenantId::new(TENANT).expect("tenant"),
+            AdapterInstallationId::new(INSTALLATION).expect("installation"),
+            TEAM.to_string(),
+            UserId::new(USER).expect("user"),
+        )
+        .expect("personal target key");
+        let target =
+            SlackPersonalDmTarget::new(key, SlackUserId::new(SLACK_USER), "D0HOST".to_string())
+                .expect("personal DM target");
+        store
+            .upsert_personal_dm_target(target)
+            .await
+            .expect("personal DM target stores");
+        let provider = SlackHostBetaOutboundTargetProvider::new(
+            outbound_target_provider_config(config_without_channel_routes()),
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            store,
+        );
+        let listed = provider
+            .list_outbound_delivery_targets(&operator_caller())
+            .await
+            .expect("target list");
+        let binding_ref = listed[0].reply_target_binding_ref.clone();
+
+        let resolved = provider
+            .resolve_reply_target_binding(&operator_caller(), &binding_ref)
+            .await
+            .expect("binding resolves")
+            .expect("personal DM binding is authorized");
+
+        assert_eq!(
+            resolved.summary.target_id.as_str(),
+            "slack:personal-dm:T0HOST:user:slack-host"
+        );
+        assert_eq!(resolved.reply_target_binding_ref, binding_ref);
     }
 
     #[tokio::test]
