@@ -104,6 +104,10 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         self.inner.model_name()
     }
 
+    fn provider_name(&self) -> &str {
+        self.inner.provider_name()
+    }
+
     fn max_input_length(&self) -> usize {
         self.inner.max_input_length()
     }

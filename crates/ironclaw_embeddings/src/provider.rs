@@ -41,6 +41,15 @@ pub trait EmbeddingProvider: Send + Sync {
     /// Get the model name.
     fn model_name(&self) -> &str;
 
+    /// Provider family identifier — `"openai"`, `"nearai"`, `"ollama"`, or
+    /// `"bedrock"`. Used to tailor operator-facing hints (e.g. which credential
+    /// to check on an auth failure). All four production providers override
+    /// this; the `"unknown"` default is only reached by test doubles and maps
+    /// to the generic OpenAI-flavored hint.
+    fn provider_name(&self) -> &str {
+        "unknown"
+    }
+
     /// Maximum input length in **bytes** (matches `str::len()` semantics).
     ///
     /// Provider implementations enforce this against `text.len()`, which
@@ -63,4 +72,25 @@ pub trait EmbeddingProvider: Send + Sync {
         }
         Ok(embeddings)
     }
+}
+
+/// Enforce `max` (bytes) for every item in a batch.
+///
+/// The `embed_batch` overrides (OpenAI, NEAR AI, Ollama) issue a single
+/// batched request, so — unlike the per-item `embed` path — they must validate
+/// each input themselves before hitting the provider. Shared here so the three
+/// overrides stay in lockstep (#3752).
+pub(crate) fn ensure_batch_within_limit(
+    texts: &[String],
+    max: usize,
+) -> Result<(), EmbeddingError> {
+    for text in texts {
+        if text.len() > max {
+            return Err(EmbeddingError::TextTooLong {
+                length: text.len(),
+                max,
+            });
+        }
+    }
+    Ok(())
 }

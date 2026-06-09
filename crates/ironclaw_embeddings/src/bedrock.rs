@@ -113,6 +113,10 @@ mod imp {
             &self.model
         }
 
+        fn provider_name(&self) -> &str {
+            "bedrock"
+        }
+
         fn max_input_length(&self) -> usize {
             32_000
         }
