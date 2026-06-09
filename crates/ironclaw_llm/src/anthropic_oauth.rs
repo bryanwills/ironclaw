@@ -290,6 +290,10 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
+        // Opus 4.7/4.8 reject an explicit temperature, and Anthropic also serves
+        // models that accept it, so drop it per resolved model rather than via a
+        // provider-wide flag (#4334).
+        req.temperature = crate::reasoning_models::effective_temperature(&model, req.temperature);
         let (system, messages) = convert_messages(req.messages);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
@@ -333,6 +337,8 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
+        // See `complete`: drop temperature for Opus 4.7/4.8 per resolved model (#4334).
+        req.temperature = crate::reasoning_models::effective_temperature(&model, req.temperature);
         let (system, messages) = convert_messages(req.messages);
 
         let tools: Vec<AnthropicTool> = req

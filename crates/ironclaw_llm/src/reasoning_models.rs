@@ -80,6 +80,50 @@ pub fn supports_openai_reasoning(model: &str) -> bool {
     OPENAI_REASONING_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// Returns `true` when *model* rejects an explicit `temperature` (the caller
+/// must omit it, not just clamp it).
+///
+/// Two families 400 on a non-default temperature: OpenAI's reasoning models
+/// (`o1`/`o3`/`o4`, `gpt-5`) and Anthropic's Claude Opus 4.7/4.8 (temperature is
+/// deprecated there). `gpt-4.1` is deliberately excluded — it accepts temperature
+/// even though it supports the reasoning field.
+///
+/// This is model-aware rather than a provider-level `unsupported_params` flag
+/// because multi-model gateways (NEAR AI, OpenRouter, Bedrock) route to a mix of
+/// models where most still honor temperature (#4334, #4535).
+///
+/// The short o-series names are anchored at the start of the final path segment,
+/// so a gateway prefix like `openai/o3-mini` still matches but an unrelated
+/// `vendor/sora4` does not; the longer names are specific enough to match
+/// anywhere in the segment.
+pub fn model_rejects_temperature(model: &str) -> bool {
+    let name = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    const O_SERIES: &[&str] = &["o1", "o3", "o4"];
+    if O_SERIES.iter().any(|p| {
+        name.strip_prefix(p)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    }) {
+        return true;
+    }
+    const SPECIFIC: &[&str] = &["gpt-5", "claude-opus-4-7", "claude-opus-4-8"];
+    SPECIFIC.iter().any(|p| name.contains(p))
+}
+
+/// The temperature to actually send for `model`: the requested value, or `None`
+/// when the model rejects an explicit temperature (#4334, #4535). Convenience
+/// over [`model_rejects_temperature`] for callers that build a request directly.
+pub fn effective_temperature(model: &str, requested: Option<f32>) -> Option<f32> {
+    if model_rejects_temperature(model) {
+        None
+    } else {
+        requested
+    }
+}
+
 /// Anthropic models that use the `adaptive` thinking mode (4.6+/4.7+).
 ///
 /// These models accept `{type: "adaptive"}` and do not require a
@@ -226,5 +270,63 @@ mod tests {
         assert!(!has_native_thinking("glm-4-air"));
         assert!(!has_native_thinking("glm-4v"));
         assert!(!has_native_thinking("step-3-mini"));
+    }
+
+    // ── model_rejects_temperature tests ──
+
+    #[test]
+    fn temperature_rejected_for_reasoning_and_opus_47_48() {
+        for m in [
+            "o1",
+            "o1-mini",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+            "gpt-5",
+            "gpt-5.5",
+            "openai/gpt-5.5",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "anthropic.claude-opus-4-8-v1:0",
+        ] {
+            assert!(
+                model_rejects_temperature(m),
+                "{m} should reject an explicit temperature"
+            );
+        }
+    }
+
+    #[test]
+    fn temperature_allowed_for_other_models() {
+        for m in [
+            "gpt-4o",
+            "gpt-4.1",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "llama-3.3-70b",
+            "qwen3-30b",
+            "",
+            // Anti-false-positive: "o3"/"o4" appear mid-segment but must not
+            // match the anchored o-series patterns.
+            "vendor/sora4",
+            "audio3-preview",
+        ] {
+            assert!(
+                !model_rejects_temperature(m),
+                "{m} should keep an explicit temperature"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_temperature_drops_only_for_rejecting_models() {
+        assert_eq!(effective_temperature("openai/gpt-5.5", Some(0.7)), None);
+        assert_eq!(effective_temperature("claude-opus-4-8", Some(0.2)), None);
+        assert_eq!(
+            effective_temperature("claude-sonnet-4-6", Some(0.2)),
+            Some(0.2)
+        );
+        assert_eq!(effective_temperature("gpt-4o", None), None);
     }
 }

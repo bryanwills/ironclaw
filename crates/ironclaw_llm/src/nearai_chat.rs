@@ -519,10 +519,14 @@ impl LlmProvider for NearAiChatProvider {
             raw
         };
 
+        // NEAR AI routes to a mix of models, so temperature support is decided
+        // per-model rather than provider-wide (#4535).
+        let temperature = crate::reasoning_models::effective_temperature(&model, req.temperature);
+
         let request = ChatCompletionRequest {
             model,
             messages,
-            temperature: req.temperature,
+            temperature,
             max_tokens: req.max_tokens,
             stop: req.stop_sequences,
             tools: None,
@@ -595,11 +599,15 @@ impl LlmProvider for NearAiChatProvider {
             messages
         };
 
+        // Model-aware temperature: NEAR AI routes to many models, some of which
+        // reject an explicit temperature (#4535).
+        let temperature = crate::reasoning_models::effective_temperature(&model, req.temperature);
+
         let request = build_chat_completion_request(
             model,
             messages,
             req.tools,
-            req.temperature,
+            temperature,
             req.max_tokens,
             req.stop_sequences,
             req.tool_choice,
