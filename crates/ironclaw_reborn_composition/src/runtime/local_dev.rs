@@ -90,11 +90,7 @@ pub(super) fn capability_wiring(
             thread_service,
             thread_scope,
         )
-        .with_observer(trajectory_observer.clone()),
-    );
-    eprintln!(
-        "[OBS-DEBUG] capability_wiring: observer set = {}",
-        trajectory_observer.is_some()
+        .with_observer(trajectory_observer),
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -483,12 +479,10 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
             &tool_call.name,
             &tool_call.arguments,
         );
-        eprintln!(
-            "[OBS-DEBUG] register_provider_tool_call_input: name={} ref={} observer={}",
-            tool_call.name,
-            input_ref.as_str(),
-            self.observer.is_some()
-        );
+        // NOTE: provider tool calls are staged by a lower decorator
+        // (`ProviderToolCallInputResolver`) that does not delegate here, so this
+        // path does not fire for them. Input args capture is a follow-up; the
+        // reliable spine is `on_capability_result`. Kept for non-provider inputs.
         if let Some(observer) = &self.observer {
             observer.on_capability_input(
                 input_ref.as_str(),
@@ -539,14 +533,8 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             },
             display_preview.as_ref(),
         );
-        eprintln!(
-            "[OBS-DEBUG] write_capability_result: cap={:?} ref={} observer={}",
-            capability_id,
-            input_ref.as_str(),
-            self.observer.is_some()
-        );
         if let Some(observer) = &self.observer {
-            observer.on_capability_result(input_ref.as_str(), &output);
+            observer.on_capability_result(input_ref.as_str(), capability_id.as_str(), &output);
         }
         if let Some(message_id) = self
             .try_append_durable_display_preview(run_context, invocation_id, capability_id)

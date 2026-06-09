@@ -18,9 +18,14 @@ use serde_json::Value;
 /// be cheap and non-blocking; this is best-effort observation and must not affect
 /// the run outcome.
 pub trait RebornTrajectoryObserver: std::fmt::Debug + Send + Sync {
-    /// A capability/tool was invoked with `tool_name` and `arguments`.
+    /// A capability/tool was invoked with `tool_name` and `arguments`. Not every
+    /// runtime staging path surfaces inputs here (provider tool calls are staged
+    /// by a lower decorator), so consumers must also handle a result arriving for
+    /// a `call_id` they never saw an input for — see [`Self::on_capability_result`].
     fn on_capability_input(&self, call_id: &str, tool_name: &str, arguments: &Value);
 
-    /// The capability/tool keyed by `call_id` produced `output`.
-    fn on_capability_result(&self, call_id: &str, output: &Value);
+    /// The capability keyed by `call_id` (capability id `capability_id`, e.g.
+    /// `builtin.shell`) produced `output`. This fires for every completed
+    /// capability, so it is the reliable spine of the trajectory.
+    fn on_capability_result(&self, call_id: &str, capability_id: &str, output: &Value);
 }
