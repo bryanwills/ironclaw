@@ -110,6 +110,14 @@ CREATE INDEX IF NOT EXISTS idx_sgdq_scope
 -- Replaces per-spawn SELECT COUNT(*) on the hot path.
 -- libSQL uses BEGIN IMMEDIATE for serialization (no per-row locking).
 -- No GREATEST() in libSQL: use MAX(undelivered - 1, 0) for floor-at-zero.
+--
+-- No declared PRIMARY KEY because SQLite treats NULL as distinct in composite
+-- PKs: each agentless spawn would create a NEW counter row for the same
+-- (tenant_id, user_id, bucket), drifting capacity upward. Instead we use a
+-- COALESCE expression index (mirroring the Postgres migration) so that all
+-- rows for agent_id IS NULL map to the same unique (tenant, user, '', bucket)
+-- tuple. Conflict target for INSERT must use the COALESCE expression:
+--   ON CONFLICT (tenant_id, user_id, COALESCE(agent_id, ''), bucket)
 
 CREATE TABLE IF NOT EXISTS subagent_gate_capacity_counter (
     tenant_id    TEXT    NOT NULL,
@@ -117,9 +125,11 @@ CREATE TABLE IF NOT EXISTS subagent_gate_capacity_counter (
     agent_id     TEXT,
     bucket       INTEGER NOT NULL,
     undelivered  INTEGER NOT NULL DEFAULT 0
-        CHECK (undelivered >= 0),
-    PRIMARY KEY (tenant_id, user_id, agent_id, bucket)
+        CHECK (undelivered >= 0)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sgcc_pk
+    ON subagent_gate_capacity_counter
+       (tenant_id, user_id, COALESCE(agent_id, ''), bucket);
 CREATE INDEX IF NOT EXISTS idx_sgcc_scope
     ON subagent_gate_capacity_counter (tenant_id, user_id, agent_id);
 

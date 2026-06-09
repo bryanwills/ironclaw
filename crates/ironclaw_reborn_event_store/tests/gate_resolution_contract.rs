@@ -615,4 +615,495 @@ mod libsql_tests {
             "null agent_id scope must not match agent-scoped rows"
         );
     }
+
+    // ── F8a: capacity_exceeded_after_max_records ─────────────────────────────
+
+    /// Fill to the (injected) capacity limit, then assert the next
+    /// `record_awaited_child` fails with `CapacityExceeded`.
+    ///
+    /// Uses `new_with_limit` to set max_records = 3 so the test avoids
+    /// inserting 4096 rows. The production default (MAX_GATE_RECORDS = 4096) is
+    /// not changed.
+    #[tokio::test]
+    async fn capacity_exceeded_after_max_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("cap_exceed.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(&db_path)
+                .build()
+                .await
+                .expect("build libsql db"),
+        );
+        run_libsql_gate_migrations(&db)
+            .await
+            .expect("run gate migrations");
+        // Limit = 3 so the test only needs 4 inserts total.
+        let store = LibSqlGateResolutionStore::new_with_limit(db, 16, 3);
+
+        let scope = scope_with_agent("tenant-capx", "agent-capx", "thread-capx");
+        let gate_ref = GateRef::new("gate:capx-001").unwrap();
+        let parent_id = "00000000-0000-0000-0000-0000000000d0";
+
+        // Insert exactly `max_records` children — all must succeed.
+        for i in 0u32..3 {
+            // Produce UUIDs that hash to different buckets for variety, but
+            // correctness doesn't depend on bucket distribution here.
+            let child_id_str = format!("0000{i:04x}-0000-0000-0000-0000000000d0");
+            let record = make_record(gate_ref.as_str(), &child_id_str, parent_id);
+            store
+                .record_awaited_child(&scope, record)
+                .await
+                .unwrap_or_else(|e| panic!("insert {i} failed: {e}"));
+        }
+
+        // One more must fail with CapacityExceeded.
+        let over_child = "0000ffff-0000-0000-0000-0000000000d0";
+        let record = make_record(gate_ref.as_str(), over_child, parent_id);
+        let result = store.record_awaited_child(&scope, record).await;
+        assert!(
+            matches!(result, Err(GateResolutionStoreError::CapacityExceeded)),
+            "expected CapacityExceeded, got: {result:?}"
+        );
+    }
+
+    // ── F8b: duplicate_record_awaited_child_does_not_inflate_capacity ────────
+
+    /// Regression for F2: recording the same (gate_ref, child_run_id) twice
+    /// must not increment the capacity counter a second time.
+    #[tokio::test]
+    async fn duplicate_record_awaited_child_does_not_inflate_capacity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("dup_cap.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(&db_path)
+                .build()
+                .await
+                .expect("build libsql db"),
+        );
+        run_libsql_gate_migrations(&db)
+            .await
+            .expect("run gate migrations");
+        // Limit = 2 so we can distinguish "1 slot used" from "2 slots used".
+        let store = LibSqlGateResolutionStore::new_with_limit(db, 16, 2);
+
+        let scope = scope_with_agent("tenant-dup", "agent-dup", "thread-dup");
+        let gate_ref = GateRef::new("gate:dup-001").unwrap();
+        let child_id = "00000000-0000-0000-0000-0000000000e0";
+        let parent_id = "00000000-0000-0000-0000-0000000000e1";
+        let record = make_record(gate_ref.as_str(), child_id, parent_id);
+
+        // First insert: succeeds and consumes 1 slot.
+        store
+            .record_awaited_child(&scope, record.clone())
+            .await
+            .unwrap();
+
+        // Second insert of the same identity: silently ignored (INSERT OR IGNORE),
+        // counter must NOT increment again.
+        store.record_awaited_child(&scope, record).await.unwrap();
+
+        // If counter drifted to 2, this second unique child would fail.
+        let child_id2 = "00000001-0000-0000-0000-0000000000e0";
+        let record2 = make_record(gate_ref.as_str(), child_id2, parent_id);
+        store
+            .record_awaited_child(&scope, record2)
+            .await
+            .expect("second unique child must succeed — counter must still be 1, not 2");
+    }
+
+    // ── F8c: repeated_delivery_does_not_deflate_capacity ────────────────────
+
+    /// Regression for F3: delivering the same child twice must decrement the
+    /// capacity counter exactly once.
+    #[tokio::test]
+    async fn repeated_delivery_does_not_deflate_capacity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("rep_del.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(&db_path)
+                .build()
+                .await
+                .expect("build libsql db"),
+        );
+        run_libsql_gate_migrations(&db)
+            .await
+            .expect("run gate migrations");
+        // Limit = 2: insert 2, deliver one twice, insert a third — if counter
+        // under-counts, the third insert would fail.
+        let store = LibSqlGateResolutionStore::new_with_limit(db, 16, 2);
+
+        let scope = scope_with_agent("tenant-repd", "agent-repd", "thread-repd");
+        let gate_ref = GateRef::new("gate:repd-001").unwrap();
+        let child_id = TurnRunId::parse("00000000-0000-0000-0000-0000000000f0").unwrap();
+        let parent_id = "00000000-0000-0000-0000-0000000000f1";
+
+        let record = make_record(gate_ref.as_str(), &child_id.to_string(), parent_id);
+        store.record_awaited_child(&scope, record).await.unwrap();
+
+        // Settle the child.
+        store
+            .record_child_terminal(
+                &scope,
+                gate_ref.clone(),
+                child_id,
+                terminal_event(TurnStatus::Completed),
+            )
+            .await
+            .unwrap();
+
+        // Deliver once: counter goes 1 → 0.
+        store
+            .mark_child_delivered(&scope, &gate_ref, child_id)
+            .await
+            .unwrap();
+
+        // Deliver again (retry / replay): counter must stay at 0, not go to -1
+        // (saturating at 0 via MAX). This is idempotent by the
+        // delivered_to_parent = 0 guard.
+        store
+            .mark_child_delivered(&scope, &gate_ref, child_id)
+            .await
+            .unwrap();
+
+        // If counter under-counted (went to -1 and wrapped), inserting a second
+        // child might either fail (CHECK constraint) or succeed incorrectly.
+        // With the correct guard, counter is 0 — we can insert one more child.
+        let child_id2 = TurnRunId::parse("00000001-0000-0000-0000-0000000000f0").unwrap();
+        let record2 = make_record(gate_ref.as_str(), &child_id2.to_string(), parent_id);
+        store
+            .record_awaited_child(&scope, record2)
+            .await
+            .expect("counter must be 0 after one delivery, allowing one more spawn");
+    }
+
+    // ── F8d: mark_terminal_result_written_is_once_only ───────────────────────
+
+    /// `mark_terminal_result_written` must be idempotent: first call persists
+    /// `terminal_byte_len`, second call is a no-op (does not overwrite).
+    #[tokio::test]
+    async fn mark_terminal_result_written_is_once_only() {
+        let (store, _dir) = build_store().await;
+        let scope = scope_with_agent("tenant-trw", "agent-trw", "thread-trw");
+        let gate_ref = GateRef::new("gate:trw-001").unwrap();
+        let child_id = TurnRunId::parse("00000000-0000-0000-0000-000000000100").unwrap();
+        let parent_id = "00000000-0000-0000-0000-000000000101";
+
+        let record = make_record(gate_ref.as_str(), &child_id.to_string(), parent_id);
+        store.record_awaited_child(&scope, record).await.unwrap();
+
+        // First write: byte_len = 42.
+        store
+            .mark_terminal_result_written(&scope, &gate_ref, child_id, 42)
+            .await
+            .unwrap();
+
+        // Second write with a different byte_len: must be ignored
+        // (terminal_result_written = 0 guard prevents overwrite).
+        store
+            .mark_terminal_result_written(&scope, &gate_ref, child_id, 999)
+            .await
+            .unwrap();
+
+        // Claim the row and verify terminal_byte_len == 42 (first write wins).
+        // We need to settle the child first to make it claimable.
+        store
+            .record_child_terminal(
+                &scope,
+                gate_ref.clone(),
+                child_id,
+                terminal_event(TurnStatus::Completed),
+            )
+            .await
+            .unwrap();
+        let rows = store
+            .claim_all_terminal_states_for_child(&scope, child_id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one settled row expected");
+        assert_eq!(
+            rows[0].terminal_byte_len, 42,
+            "terminal_byte_len must be 42 (first write), not 999 (second write)"
+        );
+        assert!(
+            rows[0].terminal_result_written,
+            "terminal_result_written must be true"
+        );
+    }
+
+    // ── F8e: delete_awaited_child_cleans_all_tables ──────────────────────────
+
+    /// After `delete_awaited_child`, the awaited-child row, queue row, child-
+    /// index row, and capacity counter must all be cleaned up consistently.
+    #[tokio::test]
+    async fn delete_awaited_child_cleans_all_tables() {
+        let (store, _dir) = build_store().await;
+        let scope = scope_with_agent("tenant-del", "agent-del", "thread-del");
+
+        let gate_ref_a = GateRef::new("gate:del-001").unwrap();
+        let gate_ref_b = GateRef::new("gate:del-002").unwrap();
+        let child_a = TurnRunId::parse("00000000-0000-0000-0000-000000000110").unwrap();
+        let child_b = TurnRunId::parse("00000000-0000-0000-0000-000000000111").unwrap();
+        let parent_id = "00000000-0000-0000-0000-000000000112";
+
+        // Record two children under different gates.
+        store
+            .record_awaited_child(
+                &scope,
+                make_record(gate_ref_a.as_str(), &child_a.to_string(), parent_id),
+            )
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(
+                &scope,
+                make_record(gate_ref_b.as_str(), &child_b.to_string(), parent_id),
+            )
+            .await
+            .unwrap();
+
+        // Settle child_a so it has a queue entry.
+        store
+            .record_child_terminal(
+                &scope,
+                gate_ref_a.clone(),
+                child_a,
+                terminal_event(TurnStatus::Completed),
+            )
+            .await
+            .unwrap();
+
+        // Delete gate_ref_a — should remove awaited row, queue row, index row,
+        // and decrement capacity counter.
+        store
+            .delete_awaited_child(&scope, &gate_ref_a)
+            .await
+            .unwrap();
+
+        // gate_ref_a must no longer exist for this scope.
+        let found = store
+            .gates_exist_batch(&scope, vec![gate_ref_a.clone()])
+            .await
+            .unwrap();
+        assert!(
+            !found.contains(&gate_ref_a),
+            "deleted gate must not appear in gates_exist_batch"
+        );
+
+        // gate_ref_b must still exist.
+        let found_b = store
+            .gates_exist_batch(&scope, vec![gate_ref_b.clone()])
+            .await
+            .unwrap();
+        assert!(
+            found_b.contains(&gate_ref_b),
+            "non-deleted gate must still appear in gates_exist_batch"
+        );
+
+        // Claiming child_a after deletion must return empty (queue cleared).
+        let claimed = store
+            .claim_all_terminal_states_for_child(&scope, child_a)
+            .await
+            .unwrap();
+        assert!(
+            claimed.is_empty(),
+            "claim must return empty after gate deletion"
+        );
+    }
+
+    // ── F8f: concurrent_spawns_respect_first_writer_wins ────────────────────
+
+    /// Concurrent `record_awaited_child` calls with the same identity (duplicate)
+    /// and different identities must not drift capacity — first-writer-wins on
+    /// duplicates, each unique identity counted exactly once.
+    #[tokio::test]
+    async fn concurrent_spawns_respect_first_writer_wins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("concurrent.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(&db_path)
+                .build()
+                .await
+                .expect("build libsql db"),
+        );
+        run_libsql_gate_migrations(&db)
+            .await
+            .expect("run gate migrations");
+        // Limit = 4: we'll issue 2 unique + 2 duplicates concurrently.
+        let store = LibSqlGateResolutionStore::new_with_limit(db, 16, 4);
+
+        let scope = scope_with_agent("tenant-conc", "agent-conc", "thread-conc");
+        let gate_ref = GateRef::new("gate:conc-001").unwrap();
+        let parent_id = "00000000-0000-0000-0000-000000000120";
+
+        // Two unique child IDs.
+        let child_x = "00000000-0000-0000-0000-000000000121";
+        let child_y = "00000000-0000-0000-0000-000000000122";
+
+        let store_a = store.clone();
+        let store_b = store.clone();
+        let store_c = store.clone();
+        let store_d = store.clone();
+        let scope_a = scope.clone();
+        let scope_b = scope.clone();
+        let scope_c = scope.clone();
+        let scope_d = scope.clone();
+        let gate_a = gate_ref.clone();
+        let gate_b = gate_ref.clone();
+        let gate_c = gate_ref.clone();
+        let gate_d = gate_ref.clone();
+
+        // Run 4 concurrent inserts: child_x twice, child_y twice.
+        let (r1, r2, r3, r4) = tokio::join!(
+            async move {
+                store_a
+                    .record_awaited_child(
+                        &scope_a,
+                        make_record(gate_a.as_str(), child_x, parent_id),
+                    )
+                    .await
+            },
+            async move {
+                store_b
+                    .record_awaited_child(
+                        &scope_b,
+                        make_record(gate_b.as_str(), child_x, parent_id),
+                    )
+                    .await
+            },
+            async move {
+                store_c
+                    .record_awaited_child(
+                        &scope_c,
+                        make_record(gate_c.as_str(), child_y, parent_id),
+                    )
+                    .await
+            },
+            async move {
+                store_d
+                    .record_awaited_child(
+                        &scope_d,
+                        make_record(gate_d.as_str(), child_y, parent_id),
+                    )
+                    .await
+            },
+        );
+
+        // All four calls must succeed (duplicates are silently ignored).
+        r1.expect("child_x first insert must succeed");
+        r2.expect("child_x duplicate insert must succeed (INSERT OR IGNORE)");
+        r3.expect("child_y first insert must succeed");
+        r4.expect("child_y duplicate insert must succeed (INSERT OR IGNORE)");
+
+        // Capacity must be exactly 2 (child_x + child_y), not 4.
+        // Verify by checking that the gate still appears (not over-cap) and
+        // that we can add 2 more without hitting the limit of 4.
+        let scope_e = scope.clone();
+        let scope_f = scope.clone();
+        let gate_e = gate_ref.clone();
+        let gate_f = gate_ref.clone();
+        store
+            .record_awaited_child(
+                &scope_e,
+                make_record(
+                    gate_e.as_str(),
+                    "00000000-0000-0000-0000-000000000123",
+                    parent_id,
+                ),
+            )
+            .await
+            .expect("3rd unique child must fit within limit=4");
+        store
+            .record_awaited_child(
+                &scope_f,
+                make_record(
+                    gate_f.as_str(),
+                    "00000000-0000-0000-0000-000000000124",
+                    parent_id,
+                ),
+            )
+            .await
+            .expect("4th unique child must fit within limit=4");
+    }
+
+    // ── F8g: scoped redelivery/claim security (F4 regression) ────────────────
+
+    /// A caller with a different (tenant, user, agent) scope must NOT be able to
+    /// redeliver or claim a (gate_ref, child_run_id) pair that belongs to
+    /// another scope.
+    ///
+    /// Regression test for F4: ensures that `redeliver_settled_child` and
+    /// `claim_all_terminal_states_for_child` scope the existence check AND the
+    /// queue insert AND the join to the caller's full (tenant_id, user_id,
+    /// agent_id) predicate.
+    #[tokio::test]
+    async fn scoped_redeliver_and_claim_cannot_touch_foreign_scope() {
+        let (store, _dir) = build_store().await;
+
+        let scope_owner = scope_with_agent("tenant-f4", "agent-f4-owner", "thread-f4-owner");
+        let scope_attacker =
+            scope_with_agent("tenant-f4", "agent-f4-attacker", "thread-f4-attacker");
+
+        let gate_ref = GateRef::new("gate:f4-001").unwrap();
+        let child_id = TurnRunId::parse("00000000-0000-0000-0000-000000000130").unwrap();
+        let parent_id = "00000000-0000-0000-0000-000000000131";
+        let result_ref = LoopResultRef::new("result:f4.001").unwrap();
+
+        // Owner registers a child.
+        store
+            .record_awaited_child(
+                &scope_owner,
+                make_record(gate_ref.as_str(), &child_id.to_string(), parent_id),
+            )
+            .await
+            .unwrap();
+
+        // Attacker attempts to redeliver the owner's pair into its own queue.
+        // Must return false (not found in attacker's scope).
+        let redelivered = store
+            .redeliver_settled_child(
+                &scope_attacker,
+                gate_ref.clone(),
+                child_id,
+                TurnStatus::Completed,
+                result_ref,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !redelivered,
+            "redeliver_settled_child must return false for a foreign scope's pair"
+        );
+
+        // Settle the child under the owner's scope.
+        store
+            .record_child_terminal(
+                &scope_owner,
+                gate_ref.clone(),
+                child_id,
+                terminal_event(TurnStatus::Completed),
+            )
+            .await
+            .unwrap();
+
+        // Attacker attempts to claim the settled child — must return empty.
+        let claimed = store
+            .claim_all_terminal_states_for_child(&scope_attacker, child_id)
+            .await
+            .unwrap();
+        assert!(
+            claimed.is_empty(),
+            "claim_all_terminal_states_for_child must not return rows belonging to a foreign scope"
+        );
+
+        // Owner can still claim their own row.
+        let owner_claimed = store
+            .claim_all_terminal_states_for_child(&scope_owner, child_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner_claimed.len(),
+            1,
+            "owner must still be able to claim their own row after attacker's failed attempt"
+        );
+    }
 }

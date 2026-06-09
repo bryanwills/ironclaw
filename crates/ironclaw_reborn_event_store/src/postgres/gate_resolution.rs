@@ -314,7 +314,9 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
         }
         .map_err(|e| GateResolutionStoreError::io("pg_cap_check", e.to_string()))?;
 
-        let total: i64 = sum_row.try_get::<_, i64>(0).unwrap_or(0);
+        let total: i64 = sum_row
+            .try_get::<_, i64>(0)
+            .map_err(|e| GateResolutionStoreError::io("pg_cap_check_decode", e.to_string()))?;
 
         if total >= MAX_GATE_RECORDS as i64 {
             transaction.rollback().await.ok();
@@ -353,7 +355,7 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
         let child_run_id_str = record.child_run_id.to_string();
         let result_ref_str = record.result_ref.as_str().to_string();
 
-        {
+        let rows_inserted = {
             let p: &[&(dyn tokio_postgres::types::ToSql + Sync)] = if let Some(ref aid) = agent_id {
                 &[
                     &tenant_id,
@@ -396,8 +398,8 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
             };
             transaction.execute(insert_sql, p).await.map_err(|e| {
                 GateResolutionStoreError::io("pg_insert_awaited_child", e.to_string())
-            })?;
-        }
+            })?
+        };
 
         // INSERT ON CONFLICT DO NOTHING reverse-index row.
         let idx_sql = if agent_id.is_some() {
@@ -428,26 +430,27 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
         }
         .map_err(|e| GateResolutionStoreError::io("pg_insert_child_index", e.to_string()))?;
 
-        // Increment the specific bucket only.
-        let incr_sql = if agent_id.is_some() {
-            "UPDATE subagent_gate_capacity_counter \
-               SET undelivered = undelivered + 1 \
-             WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND bucket = $4"
-        } else {
-            "UPDATE subagent_gate_capacity_counter \
-               SET undelivered = undelivered + 1 \
-             WHERE tenant_id = $1 AND user_id = $2 AND agent_id IS NULL AND bucket = $3"
-        };
-        {
-            let p: &[&(dyn tokio_postgres::types::ToSql + Sync)] = if let Some(ref aid) = agent_id {
-                &[&tenant_id, &user_id, aid, &bucket]
+        // F2: only increment the counter when a NEW row was actually inserted.
+        // Replayed / duplicate calls skip the INSERT (0 rows affected) and must
+        // NOT touch the counter — otherwise each replay inflates capacity.
+        if rows_inserted > 0 {
+            let incr_sql = if agent_id.is_some() {
+                "UPDATE subagent_gate_capacity_counter                    SET undelivered = undelivered + 1                  WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND bucket = $4"
             } else {
-                &[&tenant_id, &user_id, &bucket]
+                "UPDATE subagent_gate_capacity_counter                    SET undelivered = undelivered + 1                  WHERE tenant_id = $1 AND user_id = $2 AND agent_id IS NULL AND bucket = $3"
             };
-            transaction
-                .execute(incr_sql, p)
-                .await
-                .map_err(|e| GateResolutionStoreError::io("pg_incr_bucket", e.to_string()))?;
+            {
+                let p: &[&(dyn tokio_postgres::types::ToSql + Sync)] =
+                    if let Some(ref aid) = agent_id {
+                        &[&tenant_id, &user_id, aid, &bucket]
+                    } else {
+                        &[&tenant_id, &user_id, &bucket]
+                    };
+                transaction
+                    .execute(incr_sql, p)
+                    .await
+                    .map_err(|e| GateResolutionStoreError::io("pg_incr_bucket", e.to_string()))?;
+            }
         }
 
         transaction
@@ -711,7 +714,9 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
             .await
             .map_err(|e| GateResolutionStoreError::io("pg_fetch_bucket", e.to_string()))?;
         let bucket: i16 = match bucket_row {
-            Some(r) => r.try_get::<_, i16>(0).unwrap_or(0),
+            Some(r) => r
+                .try_get::<_, i16>(0)
+                .map_err(|e| GateResolutionStoreError::io("pg_decode_bucket", e.to_string()))?,
             None => {
                 transaction.rollback().await.ok();
                 return Ok(false);
@@ -730,7 +735,7 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
              WHERE gate_ref = $1 AND child_run_id = $2 AND delivered_to_parent = FALSE \
                AND tenant_id = $3 AND user_id = $4 AND agent_id IS NULL"
         };
-        if let Some(ref aid) = agent_id {
+        let delivered_rows = if let Some(ref aid) = agent_id {
             transaction
                 .execute(
                     upd_sql,
@@ -747,53 +752,50 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
         }
         .map_err(|e| GateResolutionStoreError::io("pg_mark_delivered_update", e.to_string()))?;
 
-        // Decrement the capacity bucket (GREATEST floor-at-zero).
-        let decr_sql = if agent_id.is_some() {
-            "UPDATE subagent_gate_capacity_counter \
-               SET undelivered = GREATEST(undelivered - 1, 0) \
-             WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND bucket = $4"
-        } else {
-            "UPDATE subagent_gate_capacity_counter \
-               SET undelivered = GREATEST(undelivered - 1, 0) \
-             WHERE tenant_id = $1 AND user_id = $2 AND agent_id IS NULL AND bucket = $3"
-        };
-        if let Some(ref aid) = agent_id {
-            transaction
-                .execute(decr_sql, &[&tenant_id, &user_id, aid, &bucket])
-                .await
-        } else {
-            transaction
-                .execute(decr_sql, &[&tenant_id, &user_id, &bucket])
-                .await
-        }
-        .map_err(|e| GateResolutionStoreError::io("pg_decr_bucket", e.to_string()))?;
+        // F3: only decrement the counter and remove the queue entry when the
+        // guarding UPDATE actually flipped the row (delivered_to_parent FALSE -> TRUE).
+        // Retries / replays that observe 0 rows affected must NOT double-decrement.
+        if delivered_rows > 0 {
+            // Decrement the capacity bucket (GREATEST floor-at-zero).
+            let decr_sql = if agent_id.is_some() {
+                "UPDATE subagent_gate_capacity_counter                    SET undelivered = GREATEST(undelivered - 1, 0)                  WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND bucket = $4"
+            } else {
+                "UPDATE subagent_gate_capacity_counter                    SET undelivered = GREATEST(undelivered - 1, 0)                  WHERE tenant_id = $1 AND user_id = $2 AND agent_id IS NULL AND bucket = $3"
+            };
+            if let Some(ref aid) = agent_id {
+                transaction
+                    .execute(decr_sql, &[&tenant_id, &user_id, aid, &bucket])
+                    .await
+            } else {
+                transaction
+                    .execute(decr_sql, &[&tenant_id, &user_id, &bucket])
+                    .await
+            }
+            .map_err(|e| GateResolutionStoreError::io("pg_decr_bucket", e.to_string()))?;
 
-        // Delete the specific child's queue entry.
-        let del_queue_sql = if agent_id.is_some() {
-            "DELETE FROM subagent_gate_deliverable_queue \
-              WHERE gate_ref = $1 AND child_run_id = $2 \
-                AND tenant_id = $3 AND user_id = $4 AND agent_id = $5"
-        } else {
-            "DELETE FROM subagent_gate_deliverable_queue \
-              WHERE gate_ref = $1 AND child_run_id = $2 \
-                AND tenant_id = $3 AND user_id = $4 AND agent_id IS NULL"
-        };
-        if let Some(ref aid) = agent_id {
-            transaction
-                .execute(
-                    del_queue_sql,
-                    &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id, aid],
-                )
-                .await
-        } else {
-            transaction
-                .execute(
-                    del_queue_sql,
-                    &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id],
-                )
-                .await
+            // Delete the specific child's queue entry.
+            let del_queue_sql = if agent_id.is_some() {
+                "DELETE FROM subagent_gate_deliverable_queue                   WHERE gate_ref = $1 AND child_run_id = $2                     AND tenant_id = $3 AND user_id = $4 AND agent_id = $5"
+            } else {
+                "DELETE FROM subagent_gate_deliverable_queue                   WHERE gate_ref = $1 AND child_run_id = $2                     AND tenant_id = $3 AND user_id = $4 AND agent_id IS NULL"
+            };
+            if let Some(ref aid) = agent_id {
+                transaction
+                    .execute(
+                        del_queue_sql,
+                        &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id, aid],
+                    )
+                    .await
+            } else {
+                transaction
+                    .execute(
+                        del_queue_sql,
+                        &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id],
+                    )
+                    .await
+            }
+            .map_err(|e| GateResolutionStoreError::io("pg_del_queue_entry", e.to_string()))?;
         }
-        .map_err(|e| GateResolutionStoreError::io("pg_del_queue_entry", e.to_string()))?;
 
         // Check if ALL children under this gate are now delivered.
         let all_row = transaction
@@ -804,7 +806,9 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
             )
             .await
             .map_err(|e| GateResolutionStoreError::io("pg_all_delivered_check", e.to_string()))?;
-        let remaining: i64 = all_row.try_get::<_, i64>(0).unwrap_or(0);
+        let remaining: i64 = all_row
+            .try_get::<_, i64>(0)
+            .map_err(|e| GateResolutionStoreError::io("pg_all_delivered_decode", e.to_string()))?;
 
         transaction
             .commit()
@@ -835,6 +839,10 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
         let agent_id: Option<String> = scope.agent_id.as_ref().map(|a| a.as_str().to_string());
         let child_run_id_str = child_run_id.to_string();
 
+        // F4: scope BOTH the queue row (q) AND the child row (c) to the caller's
+        // (tenant_id, user_id, agent_id).  Without scoping c, a caller who somehow
+        // held a queue row pointing at a foreign (gate_ref, child_run_id) pair could
+        // read that row's parent_run_context_json / terminal_event_json.
         let select_sql = if agent_id.is_some() {
             "SELECT c.gate_ref, c.child_run_id, c.parent_run_id, c.tree_root_run_id, \
                     c.child_scope_json, c.parent_run_context_json, c.source_binding_ref, \
@@ -847,6 +855,7 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
                  ON c.gate_ref = q.gate_ref AND c.child_run_id = q.child_run_id \
               WHERE q.child_run_id = $1 \
                 AND q.tenant_id = $2 AND q.user_id = $3 AND q.agent_id = $4 \
+                AND c.tenant_id = $2 AND c.user_id = $3 AND c.agent_id = $4 \
                 AND c.delivered_to_parent = FALSE AND c.terminal_status IS NOT NULL"
         } else {
             "SELECT c.gate_ref, c.child_run_id, c.parent_run_id, c.tree_root_run_id, \
@@ -860,6 +869,7 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
                  ON c.gate_ref = q.gate_ref AND c.child_run_id = q.child_run_id \
               WHERE q.child_run_id = $1 \
                 AND q.tenant_id = $2 AND q.user_id = $3 AND q.agent_id IS NULL \
+                AND c.tenant_id = $2 AND c.user_id = $3 AND c.agent_id IS NULL \
                 AND c.delivered_to_parent = FALSE AND c.terminal_status IS NOT NULL"
         };
 
@@ -919,8 +929,12 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
 
         let mut bucket_counts: Vec<(i16, i64)> = Vec::new();
         for row in &count_rows {
-            let b: i16 = row.try_get::<_, i16>(0).unwrap_or(0);
-            let n: i64 = row.try_get::<_, i64>(1).unwrap_or(0);
+            let b: i16 = row.try_get::<_, i16>(0).map_err(|e| {
+                GateResolutionStoreError::io("pg_delete_decode_bucket", e.to_string())
+            })?;
+            let n: i64 = row.try_get::<_, i64>(1).map_err(|e| {
+                GateResolutionStoreError::io("pg_delete_decode_count", e.to_string())
+            })?;
             bucket_counts.push((b, n));
         }
 
@@ -1096,18 +1110,33 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
             .await
             .map_err(|e| GateResolutionStoreError::unavailable(e.to_string()))?;
 
-        // Check existence.
-        let exists_row = transaction
-            .query_opt(
-                "SELECT 1 FROM subagent_gate_awaited_children \
-                  WHERE gate_ref = $1 AND child_run_id = $2 LIMIT 1",
-                &[&gate_ref_str, &child_run_id_str],
-            )
-            .await
-            .map_err(|e| GateResolutionStoreError::io("pg_redeliver_check", e.to_string()))?;
+        // Check existence — scoped to the caller's (tenant_id, user_id, agent_id)
+        // so a foreign (gate_ref, child_run_id) pair cannot be rebound into
+        // this caller's deliverable queue (F4 security fix).
+        let exists_sql = if agent_id.is_some() {
+            "SELECT 1 FROM subagent_gate_awaited_children               WHERE gate_ref = $1 AND child_run_id = $2                 AND tenant_id = $3 AND user_id = $4 AND agent_id = $5 LIMIT 1"
+        } else {
+            "SELECT 1 FROM subagent_gate_awaited_children               WHERE gate_ref = $1 AND child_run_id = $2                 AND tenant_id = $3 AND user_id = $4 AND agent_id IS NULL LIMIT 1"
+        };
+        let exists_row = if let Some(ref aid) = agent_id {
+            transaction
+                .query_opt(
+                    exists_sql,
+                    &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id, aid],
+                )
+                .await
+        } else {
+            transaction
+                .query_opt(
+                    exists_sql,
+                    &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id],
+                )
+                .await
+        }
+        .map_err(|e| GateResolutionStoreError::io("pg_redeliver_check", e.to_string()))?;
         if exists_row.is_none() {
             transaction.rollback().await.ok();
-            return Ok(false); // gate row vanished (orphan)
+            return Ok(false); // gate row vanished or belongs to a different scope
         }
 
         // Set terminal flags (idempotent: WHERE terminal_status IS NULL).
@@ -1200,12 +1229,109 @@ impl DurableSubagentGateResolutionStore for PostgresGateResolutionStore {
         if rows.is_empty() {
             return Ok(());
         }
+
+        // F5: apply the whole batch in ONE transaction — one BEGIN/COMMIT, N
+        // per-row statements inside. This avoids partial commits on mid-batch
+        // failure and N round trips.
+        let mut client = self.client().await?;
+        let tenant_id = scope.tenant_id.as_str().to_string();
+        let user_id = user_id_str(scope);
+        let agent_id: Option<String> = scope.agent_id.as_ref().map(|a| a.as_str().to_string());
+
+        let transaction = client
+            .build_transaction()
+            .start()
+            .await
+            .map_err(|e| GateResolutionStoreError::unavailable(e.to_string()))?;
+
         for (gate_ref, child_run_id) in rows {
-            // Reuse mark_child_delivered per row (same delivery-claim transaction).
-            // Idempotent via delivered_to_parent = FALSE guard.
-            self.mark_child_delivered(scope, &gate_ref, child_run_id)
-                .await?;
+            let gate_ref_str = gate_ref.as_str().to_string();
+            let child_run_id_str = child_run_id.to_string();
+
+            // Look up the counter_bucket for this row.
+            let bucket_row = transaction
+                .query_opt(
+                    "SELECT counter_bucket FROM subagent_gate_awaited_children                       WHERE gate_ref = $1 AND child_run_id = $2",
+                    &[&gate_ref_str, &child_run_id_str],
+                )
+                .await
+                .map_err(|e| GateResolutionStoreError::io("pg_rub_fetch_bucket", e.to_string()))?;
+            let bucket: i16 = match bucket_row {
+                Some(r) => r.try_get::<_, i16>(0).map_err(|e| {
+                    GateResolutionStoreError::io("pg_rub_decode_bucket", e.to_string())
+                })?,
+                None => continue, // row already gone — skip
+            };
+
+            // Flip delivered flags (guard: delivered_to_parent = FALSE).
+            let upd_sql = if agent_id.is_some() {
+                "UPDATE subagent_gate_awaited_children                    SET delivery_claimed = TRUE, delivered_to_parent = TRUE                  WHERE gate_ref = $1 AND child_run_id = $2 AND delivered_to_parent = FALSE                    AND tenant_id = $3 AND user_id = $4 AND agent_id = $5"
+            } else {
+                "UPDATE subagent_gate_awaited_children                    SET delivery_claimed = TRUE, delivered_to_parent = TRUE                  WHERE gate_ref = $1 AND child_run_id = $2 AND delivered_to_parent = FALSE                    AND tenant_id = $3 AND user_id = $4 AND agent_id IS NULL"
+            };
+            let delivered_rows = if let Some(ref aid) = agent_id {
+                transaction
+                    .execute(
+                        upd_sql,
+                        &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id, aid],
+                    )
+                    .await
+            } else {
+                transaction
+                    .execute(
+                        upd_sql,
+                        &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id],
+                    )
+                    .await
+            }
+            .map_err(|e| GateResolutionStoreError::io("pg_rub_mark_delivered", e.to_string()))?;
+
+            // F3: only decrement + delete queue if the UPDATE actually flipped the row.
+            if delivered_rows > 0 {
+                let decr_sql = if agent_id.is_some() {
+                    "UPDATE subagent_gate_capacity_counter                        SET undelivered = GREATEST(undelivered - 1, 0)                      WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND bucket = $4"
+                } else {
+                    "UPDATE subagent_gate_capacity_counter                        SET undelivered = GREATEST(undelivered - 1, 0)                      WHERE tenant_id = $1 AND user_id = $2 AND agent_id IS NULL AND bucket = $3"
+                };
+                if let Some(ref aid) = agent_id {
+                    transaction
+                        .execute(decr_sql, &[&tenant_id, &user_id, aid, &bucket])
+                        .await
+                } else {
+                    transaction
+                        .execute(decr_sql, &[&tenant_id, &user_id, &bucket])
+                        .await
+                }
+                .map_err(|e| GateResolutionStoreError::io("pg_rub_decr_bucket", e.to_string()))?;
+
+                let del_queue_sql = if agent_id.is_some() {
+                    "DELETE FROM subagent_gate_deliverable_queue                       WHERE gate_ref = $1 AND child_run_id = $2                         AND tenant_id = $3 AND user_id = $4 AND agent_id = $5"
+                } else {
+                    "DELETE FROM subagent_gate_deliverable_queue                       WHERE gate_ref = $1 AND child_run_id = $2                         AND tenant_id = $3 AND user_id = $4 AND agent_id IS NULL"
+                };
+                if let Some(ref aid) = agent_id {
+                    transaction
+                        .execute(
+                            del_queue_sql,
+                            &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id, aid],
+                        )
+                        .await
+                } else {
+                    transaction
+                        .execute(
+                            del_queue_sql,
+                            &[&gate_ref_str, &child_run_id_str, &tenant_id, &user_id],
+                        )
+                        .await
+                }
+                .map_err(|e| GateResolutionStoreError::io("pg_rub_del_queue", e.to_string()))?;
+            }
         }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|e| GateResolutionStoreError::unavailable(e.to_string()))?;
         Ok(())
     }
 }

@@ -47,6 +47,10 @@ type LibSqlDb = Arc<libsql::Database>;
 pub struct LibSqlGateResolutionStore {
     db: LibSqlDb,
     k_buckets: u32,
+    /// Per-scope cap; defaults to `MAX_GATE_RECORDS`. Tests may inject a
+    /// smaller value via [`Self::new_with_limit`] to avoid inserting thousands
+    /// of rows. The production default is never changed.
+    max_records: u32,
 }
 
 impl LibSqlGateResolutionStore {
@@ -55,7 +59,24 @@ impl LibSqlGateResolutionStore {
     /// `k_buckets` is the number of capacity-counter buckets; pass
     /// `effective_capacity_counter_buckets()` for the operator-tunable value.
     pub fn new(db: LibSqlDb, k_buckets: u32) -> Self {
-        Self { db, k_buckets }
+        Self {
+            db,
+            k_buckets,
+            max_records: MAX_GATE_RECORDS,
+        }
+    }
+
+    /// Build a new store with an overridden per-scope capacity limit.
+    ///
+    /// **For tests only.** The production default (`MAX_GATE_RECORDS`) is not
+    /// changed by this constructor. Use this to avoid inserting thousands of
+    /// rows in capacity-limit tests.
+    pub fn new_with_limit(db: LibSqlDb, k_buckets: u32, max_records: u32) -> Self {
+        Self {
+            db,
+            k_buckets,
+            max_records,
+        }
     }
 
     async fn conn(&self) -> Result<libsql::Connection, GateResolutionStoreError> {
@@ -208,9 +229,12 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
             .await
             .map_err(|e| GateResolutionStoreError::unavailable(format!("BEGIN IMMEDIATE: {e}")))?;
 
-        // Initialize bucket row if missing (INSERT OR IGNORE).
-        let init_sql = "INSERT OR IGNORE INTO subagent_gate_capacity_counter \
-            (tenant_id, user_id, agent_id, bucket, undelivered) VALUES (?, ?, ?, ?, 0)";
+        // Initialize bucket row if missing.
+        // Use ON CONFLICT targeting the COALESCE expression index so that
+        // NULL agent_id rows share the same unique (tenant, user, '', bucket) key.
+        // Plain INSERT OR IGNORE with the former composite PK would treat each
+        // NULL agent_id as distinct, creating a new counter row per agentless spawn.
+        let init_sql = "INSERT INTO subagent_gate_capacity_counter             (tenant_id, user_id, agent_id, bucket, undelivered) VALUES (?, ?, ?, ?, 0)             ON CONFLICT (tenant_id, user_id, COALESCE(agent_id, ''), bucket) DO NOTHING";
         conn.execute(
             init_sql,
             libsql::params![tenant_id.clone(), user_id.clone(), agent_id.clone(), bucket],
@@ -243,9 +267,23 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
             .next()
             .await
             .map_err(|e| GateResolutionStoreError::io("cap_check_row", e.to_string()))?;
-        let total: i64 = cap_row.map(|r| r.get::<i64>(0).unwrap_or(0)).unwrap_or(0);
+        // COALESCE in the SQL already returns 0 for an empty scope, so a missing
+        // row is a hard error (not a legitimate zero). Decode failure maps to Io.
+        let total: i64 = match cap_row {
+            Some(r) => r
+                .get::<i64>(0)
+                .map_err(|e| GateResolutionStoreError::io("cap_check_decode", e.to_string()))?,
+            None => {
+                // The COALESCE always returns a row even when there are no counter
+                // rows; None here indicates a backend error.
+                return Err(GateResolutionStoreError::io(
+                    "cap_check_decode",
+                    "SUM query returned no row",
+                ));
+            }
+        };
 
-        if total >= MAX_GATE_RECORDS as i64 {
+        if total >= self.max_records as i64 {
             conn.execute("ROLLBACK", ()).await.ok();
             return Err(GateResolutionStoreError::CapacityExceeded);
         }
@@ -257,30 +295,31 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
              source_binding_ref, reply_target_binding_ref, subagent_kind, spawn_capability_id, \
              result_ref, spawn_mode, counter_bucket) \
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        conn.execute(
-            insert_sql,
-            libsql::params![
-                tenant_id.clone(),
-                user_id.clone(),
-                agent_id.clone(),
-                record.gate_ref.as_str().to_string(),
-                record.parent_run_id.to_string(),
-                record.tree_root_run_id.to_string(),
-                record.child_run_id.to_string(),
-                record.child_thread_id.clone(),
-                record.child_scope_json.clone(),
-                record.parent_run_context_json.clone(),
-                record.source_binding_ref.clone(),
-                record.reply_target_binding_ref.clone(),
-                record.subagent_kind.clone(),
-                record.spawn_capability_id.clone(),
-                record.result_ref.as_str().to_string(),
-                record.spawn_mode.clone(),
-                bucket
-            ],
-        )
-        .await
-        .map_err(|e| GateResolutionStoreError::io("insert_awaited_child", e.to_string()))?;
+        let rows_inserted = conn
+            .execute(
+                insert_sql,
+                libsql::params![
+                    tenant_id.clone(),
+                    user_id.clone(),
+                    agent_id.clone(),
+                    record.gate_ref.as_str().to_string(),
+                    record.parent_run_id.to_string(),
+                    record.tree_root_run_id.to_string(),
+                    record.child_run_id.to_string(),
+                    record.child_thread_id.clone(),
+                    record.child_scope_json.clone(),
+                    record.parent_run_context_json.clone(),
+                    record.source_binding_ref.clone(),
+                    record.reply_target_binding_ref.clone(),
+                    record.subagent_kind.clone(),
+                    record.spawn_capability_id.clone(),
+                    record.result_ref.as_str().to_string(),
+                    record.spawn_mode.clone(),
+                    bucket
+                ],
+            )
+            .await
+            .map_err(|e| GateResolutionStoreError::io("insert_awaited_child", e.to_string()))?;
 
         // INSERT OR IGNORE reverse-index row.
         let idx_sql = "INSERT OR IGNORE INTO subagent_gate_child_index \
@@ -298,30 +337,30 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
         .await
         .map_err(|e| GateResolutionStoreError::io("insert_child_index", e.to_string()))?;
 
-        // Increment the specific bucket (only touches one row).
-        let incr_sql = if agent_id.is_some() {
-            "UPDATE subagent_gate_capacity_counter \
-              SET undelivered = undelivered + 1 \
-            WHERE tenant_id = ? AND user_id = ? AND agent_id = ? AND bucket = ?"
-        } else {
-            "UPDATE subagent_gate_capacity_counter \
-              SET undelivered = undelivered + 1 \
-            WHERE tenant_id = ? AND user_id = ? AND agent_id IS NULL AND bucket = ?"
-        };
-        if let Some(ref aid) = agent_id {
-            conn.execute(
-                incr_sql,
-                libsql::params![tenant_id.clone(), user_id.clone(), aid.clone(), bucket],
-            )
-            .await
-        } else {
-            conn.execute(
-                incr_sql,
-                libsql::params![tenant_id.clone(), user_id.clone(), bucket],
-            )
-            .await
+        // F2: only increment the counter when a NEW row was actually inserted.
+        // Replayed / duplicate calls skip the INSERT (0 rows affected) and must
+        // NOT touch the counter — otherwise each replay inflates capacity.
+        if rows_inserted > 0 {
+            let incr_sql = if agent_id.is_some() {
+                "UPDATE subagent_gate_capacity_counter                   SET undelivered = undelivered + 1                 WHERE tenant_id = ? AND user_id = ? AND agent_id = ? AND bucket = ?"
+            } else {
+                "UPDATE subagent_gate_capacity_counter                   SET undelivered = undelivered + 1                 WHERE tenant_id = ? AND user_id = ? AND agent_id IS NULL AND bucket = ?"
+            };
+            if let Some(ref aid) = agent_id {
+                conn.execute(
+                    incr_sql,
+                    libsql::params![tenant_id.clone(), user_id.clone(), aid.clone(), bucket],
+                )
+                .await
+            } else {
+                conn.execute(
+                    incr_sql,
+                    libsql::params![tenant_id.clone(), user_id.clone(), bucket],
+                )
+                .await
+            }
+            .map_err(|e| GateResolutionStoreError::io("incr_bucket", e.to_string()))?;
         }
-        .map_err(|e| GateResolutionStoreError::io("incr_bucket", e.to_string()))?;
 
         conn.execute("COMMIT", ())
             .await
@@ -527,7 +566,9 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
             .await
             .map_err(|e| GateResolutionStoreError::io("fetch_bucket_row", e.to_string()))?
         {
-            Some(r) => r.get::<i64>(0).unwrap_or(0),
+            Some(r) => r
+                .get::<i64>(0)
+                .map_err(|e| GateResolutionStoreError::io("fetch_bucket_col", e.to_string()))?,
             None => {
                 conn.execute("ROLLBACK", ()).await.ok();
                 return Ok(false);
@@ -542,7 +583,7 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
               AND tenant_id = ? AND user_id = ? AND",
             agent_id.is_some(),
         );
-        if let Some(ref aid) = agent_id {
+        let delivered_rows = if let Some(ref aid) = agent_id {
             conn.execute(
                 &upd_sql,
                 libsql::params![
@@ -568,61 +609,64 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
         }
         .map_err(|e| GateResolutionStoreError::io("mark_delivered_update", e.to_string()))?;
 
-        // Decrement the capacity bucket (floor-at-zero via MAX).
-        // libSQL has no GREATEST() — use MAX(undelivered - 1, 0).
-        let decr_sql = build_agent_predicate_update(
-            "UPDATE subagent_gate_capacity_counter \
-              SET undelivered = MAX(undelivered - 1, 0) \
-            WHERE tenant_id = ? AND user_id = ? AND bucket = ? AND",
-            agent_id.is_some(),
-        );
-        // Note: for this query the positional params are tenant_id, user_id, bucket, [agent_id]
-        if let Some(ref aid) = agent_id {
-            conn.execute(
-                &decr_sql,
-                libsql::params![tenant_id.clone(), user_id.clone(), bucket, aid.clone()],
-            )
-            .await
-        } else {
-            conn.execute(
-                &decr_sql,
-                libsql::params![tenant_id.clone(), user_id.clone(), bucket],
-            )
-            .await
-        }
-        .map_err(|e| GateResolutionStoreError::io("decr_bucket", e.to_string()))?;
+        // F3: only decrement the counter and remove the queue entry when the
+        // guarding UPDATE actually flipped the row (delivered_to_parent 0 -> 1).
+        // If 0 rows were updated, the row was already delivered (retry / replay)
+        // and we must NOT double-decrement capacity.
+        if delivered_rows > 0 {
+            // Decrement the capacity bucket (floor-at-zero via MAX).
+            // libSQL has no GREATEST() — use MAX(undelivered - 1, 0).
+            let decr_sql = build_agent_predicate_update(
+                "UPDATE subagent_gate_capacity_counter                   SET undelivered = MAX(undelivered - 1, 0)                 WHERE tenant_id = ? AND user_id = ? AND bucket = ? AND",
+                agent_id.is_some(),
+            );
+            // Note: for this query the positional params are tenant_id, user_id, bucket, [agent_id]
+            if let Some(ref aid) = agent_id {
+                conn.execute(
+                    &decr_sql,
+                    libsql::params![tenant_id.clone(), user_id.clone(), bucket, aid.clone()],
+                )
+                .await
+            } else {
+                conn.execute(
+                    &decr_sql,
+                    libsql::params![tenant_id.clone(), user_id.clone(), bucket],
+                )
+                .await
+            }
+            .map_err(|e| GateResolutionStoreError::io("decr_bucket", e.to_string()))?;
 
-        // Delete the specific child's queue entry.
-        let del_queue_sql = build_agent_predicate_update(
-            "DELETE FROM subagent_gate_deliverable_queue \
-            WHERE gate_ref = ? AND child_run_id = ? AND tenant_id = ? AND user_id = ? AND",
-            agent_id.is_some(),
-        );
-        if let Some(ref aid) = agent_id {
-            conn.execute(
-                &del_queue_sql,
-                libsql::params![
-                    gate_ref.as_str().to_string(),
-                    child_run_id.to_string(),
-                    tenant_id.clone(),
-                    user_id.clone(),
-                    aid.clone()
-                ],
-            )
-            .await
-        } else {
-            conn.execute(
-                &del_queue_sql,
-                libsql::params![
-                    gate_ref.as_str().to_string(),
-                    child_run_id.to_string(),
-                    tenant_id.clone(),
-                    user_id.clone()
-                ],
-            )
-            .await
+            // Delete the specific child's queue entry.
+            let del_queue_sql = build_agent_predicate_update(
+                "DELETE FROM subagent_gate_deliverable_queue                 WHERE gate_ref = ? AND child_run_id = ? AND tenant_id = ? AND user_id = ? AND",
+                agent_id.is_some(),
+            );
+            if let Some(ref aid) = agent_id {
+                conn.execute(
+                    &del_queue_sql,
+                    libsql::params![
+                        gate_ref.as_str().to_string(),
+                        child_run_id.to_string(),
+                        tenant_id.clone(),
+                        user_id.clone(),
+                        aid.clone()
+                    ],
+                )
+                .await
+            } else {
+                conn.execute(
+                    &del_queue_sql,
+                    libsql::params![
+                        gate_ref.as_str().to_string(),
+                        child_run_id.to_string(),
+                        tenant_id.clone(),
+                        user_id.clone()
+                    ],
+                )
+                .await
+            }
+            .map_err(|e| GateResolutionStoreError::io("del_queue_entry", e.to_string()))?;
         }
-        .map_err(|e| GateResolutionStoreError::io("del_queue_entry", e.to_string()))?;
 
         // Check if ALL children under this gate are now delivered.
         let all_sql = "SELECT COUNT(*) FROM subagent_gate_awaited_children \
@@ -631,12 +675,22 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
             .query(all_sql, libsql::params![gate_ref.as_str().to_string()])
             .await
             .map_err(|e| GateResolutionStoreError::io("all_delivered_check", e.to_string()))?;
-        let remaining: i64 = check_rows
+        let remaining: i64 = match check_rows
             .next()
             .await
             .map_err(|e| GateResolutionStoreError::io("all_delivered_row", e.to_string()))?
-            .map(|r| r.get::<i64>(0).unwrap_or(0))
-            .unwrap_or(0);
+        {
+            Some(r) => r
+                .get::<i64>(0)
+                .map_err(|e| GateResolutionStoreError::io("all_delivered_col", e.to_string()))?,
+            // COUNT(*) always returns a row; None here is a backend error.
+            None => {
+                return Err(GateResolutionStoreError::io(
+                    "all_delivered_col",
+                    "COUNT query returned no row",
+                ));
+            }
+        };
 
         conn.execute("COMMIT", ())
             .await
@@ -771,8 +825,12 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
             .await
             .map_err(|e| GateResolutionStoreError::io("delete_count_row", e.to_string()))?
         {
-            let b: i64 = row.get::<i64>(0).unwrap_or(0);
-            let n: i64 = row.get::<i64>(1).unwrap_or(0);
+            let b: i64 = row.get::<i64>(0).map_err(|e| {
+                GateResolutionStoreError::io("delete_count_bucket_col", e.to_string())
+            })?;
+            let n: i64 = row
+                .get::<i64>(1)
+                .map_err(|e| GateResolutionStoreError::io("delete_count_n_col", e.to_string()))?;
             bucket_counts.push((b, n));
         }
 
@@ -970,16 +1028,39 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
             .await
             .map_err(|e| GateResolutionStoreError::unavailable(format!("BEGIN: {e}")))?;
 
-        // Check existence.
-        let exists_sql = "SELECT 1 FROM subagent_gate_awaited_children \
-            WHERE gate_ref = ? AND child_run_id = ? LIMIT 1";
-        let mut exists_rows = conn
-            .query(
+        // Check existence — scoped to the caller's (tenant_id, user_id, agent_id)
+        // so a foreign (gate_ref, child_run_id) pair cannot be rebound into
+        // this caller's deliverable queue (F4 security fix).
+        let exists_sql = if agent_id.is_some() {
+            "SELECT 1 FROM subagent_gate_awaited_children                 WHERE gate_ref = ? AND child_run_id = ?                   AND tenant_id = ? AND user_id = ? AND agent_id = ? LIMIT 1"
+        } else {
+            "SELECT 1 FROM subagent_gate_awaited_children                 WHERE gate_ref = ? AND child_run_id = ?                   AND tenant_id = ? AND user_id = ? AND agent_id IS NULL LIMIT 1"
+        };
+        let mut exists_rows = if let Some(ref aid) = agent_id {
+            conn.query(
                 exists_sql,
-                libsql::params![gate_ref.as_str().to_string(), child_run_id.to_string()],
+                libsql::params![
+                    gate_ref.as_str().to_string(),
+                    child_run_id.to_string(),
+                    tenant_id.clone(),
+                    user_id.clone(),
+                    aid.clone()
+                ],
             )
             .await
-            .map_err(|e| GateResolutionStoreError::io("redeliver_check", e.to_string()))?;
+        } else {
+            conn.query(
+                exists_sql,
+                libsql::params![
+                    gate_ref.as_str().to_string(),
+                    child_run_id.to_string(),
+                    tenant_id.clone(),
+                    user_id.clone()
+                ],
+            )
+            .await
+        }
+        .map_err(|e| GateResolutionStoreError::io("redeliver_check", e.to_string()))?;
         if exists_rows
             .next()
             .await
@@ -987,7 +1068,7 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
             .is_none()
         {
             conn.execute("ROLLBACK", ()).await.ok();
-            return Ok(false); // gate row vanished (orphan)
+            return Ok(false); // gate row vanished or belongs to a different scope
         }
 
         // Set terminal flags (UPDATE WHERE terminal_status IS NULL = idempotent).
@@ -1059,12 +1140,126 @@ impl DurableSubagentGateResolutionStore for LibSqlGateResolutionStore {
         if rows.is_empty() {
             return Ok(());
         }
+
+        // F5: apply the whole batch in ONE transaction — one BEGIN/COMMIT, N
+        // per-row statements inside. This avoids partial commits on mid-batch
+        // failure and N round trips.
+        let conn = self.conn().await?;
+        let tenant_id = scope.tenant_id.as_str().to_string();
+        let user_id = user_id_str(scope);
+        let agent_id: Option<String> = scope.agent_id.as_ref().map(|a| a.as_str().to_string());
+
+        conn.execute("BEGIN", ())
+            .await
+            .map_err(|e| GateResolutionStoreError::unavailable(format!("BEGIN: {e}")))?;
+
         for (gate_ref, child_run_id) in rows {
-            // Reuse mark_child_delivered per row (same delivery-claim transaction).
-            // Idempotent via delivered_to_parent = 0 guard.
-            self.mark_child_delivered(scope, &gate_ref, child_run_id)
-                .await?;
+            // Look up the counter_bucket for this row.
+            let bucket_sql = "SELECT counter_bucket FROM subagent_gate_awaited_children                 WHERE gate_ref = ? AND child_run_id = ?";
+            let mut bucket_rows = conn
+                .query(
+                    bucket_sql,
+                    libsql::params![gate_ref.as_str().to_string(), child_run_id.to_string()],
+                )
+                .await
+                .map_err(|e| GateResolutionStoreError::io("rub_fetch_bucket", e.to_string()))?;
+            let bucket: i64 =
+                match bucket_rows.next().await.map_err(|e| {
+                    GateResolutionStoreError::io("rub_fetch_bucket_row", e.to_string())
+                })? {
+                    Some(r) => r.get::<i64>(0).map_err(|e| {
+                        GateResolutionStoreError::io("rub_fetch_bucket_col", e.to_string())
+                    })?,
+                    None => continue, // row already gone — skip
+                };
+
+            // Flip delivered flags (guard: delivered_to_parent = 0).
+            let upd_sql = build_agent_predicate_update(
+                "UPDATE subagent_gate_awaited_children                   SET delivery_claimed = 1, delivered_to_parent = 1                 WHERE gate_ref = ? AND child_run_id = ? AND delivered_to_parent = 0                   AND tenant_id = ? AND user_id = ? AND",
+                agent_id.is_some(),
+            );
+            let delivered_rows = if let Some(ref aid) = agent_id {
+                conn.execute(
+                    &upd_sql,
+                    libsql::params![
+                        gate_ref.as_str().to_string(),
+                        child_run_id.to_string(),
+                        tenant_id.clone(),
+                        user_id.clone(),
+                        aid.clone()
+                    ],
+                )
+                .await
+            } else {
+                conn.execute(
+                    &upd_sql,
+                    libsql::params![
+                        gate_ref.as_str().to_string(),
+                        child_run_id.to_string(),
+                        tenant_id.clone(),
+                        user_id.clone()
+                    ],
+                )
+                .await
+            }
+            .map_err(|e| GateResolutionStoreError::io("rub_mark_delivered", e.to_string()))?;
+
+            // F3: only decrement + delete queue if the UPDATE actually flipped the row.
+            if delivered_rows > 0 {
+                let decr_sql = build_agent_predicate_update(
+                    "UPDATE subagent_gate_capacity_counter                       SET undelivered = MAX(undelivered - 1, 0)                     WHERE tenant_id = ? AND user_id = ? AND bucket = ? AND",
+                    agent_id.is_some(),
+                );
+                if let Some(ref aid) = agent_id {
+                    conn.execute(
+                        &decr_sql,
+                        libsql::params![tenant_id.clone(), user_id.clone(), bucket, aid.clone()],
+                    )
+                    .await
+                } else {
+                    conn.execute(
+                        &decr_sql,
+                        libsql::params![tenant_id.clone(), user_id.clone(), bucket],
+                    )
+                    .await
+                }
+                .map_err(|e| GateResolutionStoreError::io("rub_decr_bucket", e.to_string()))?;
+
+                let del_queue_sql = build_agent_predicate_update(
+                    "DELETE FROM subagent_gate_deliverable_queue                     WHERE gate_ref = ? AND child_run_id = ? AND tenant_id = ? AND user_id = ? AND",
+                    agent_id.is_some(),
+                );
+                if let Some(ref aid) = agent_id {
+                    conn.execute(
+                        &del_queue_sql,
+                        libsql::params![
+                            gate_ref.as_str().to_string(),
+                            child_run_id.to_string(),
+                            tenant_id.clone(),
+                            user_id.clone(),
+                            aid.clone()
+                        ],
+                    )
+                    .await
+                } else {
+                    conn.execute(
+                        &del_queue_sql,
+                        libsql::params![
+                            gate_ref.as_str().to_string(),
+                            child_run_id.to_string(),
+                            tenant_id.clone(),
+                            user_id.clone()
+                        ],
+                    )
+                    .await
+                }
+                .map_err(|e| GateResolutionStoreError::io("rub_del_queue", e.to_string()))?;
+            }
         }
+
+        conn.execute("COMMIT", ())
+            .await
+            .map_err(|e| GateResolutionStoreError::unavailable(format!("COMMIT: {e}")))?;
         Ok(())
     }
 }
