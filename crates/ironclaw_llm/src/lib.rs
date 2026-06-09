@@ -840,6 +840,14 @@ fn create_cheap_provider_for_backend(
     Ok(Some(provider))
 }
 
+/// Wrap a raw provider in `NormalizingProvider`. Single source of truth
+/// for the Layer-3 wrap — every raw provider entering the decorator
+/// stack MUST pass through this helper. Adding new raw-provider paths?
+/// Call this helper, not `NormalizingProvider::new` directly.
+fn normalized(p: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> {
+    Arc::new(NormalizingProvider::new(p))
+}
+
 /// Build the full LLM provider chain with all configured wrappers.
 ///
 /// Applies decorators in this order:
@@ -886,13 +894,8 @@ async fn build_provider_chain_components_with_options(
     };
     tracing::debug!("LLM provider initialized: {}", raw.model_name());
 
-    // 0. Normalize — Layer 3 shape-invariant decorator. Sits at the innermost
-    // position so every downstream decorator (retry, smart routing, failover,
-    // circuit breaker, cache, recording) observes a canonical
-    // `ToolCompletionResponse` regardless of which provider produced it.
-    // Closes RC1/M1 (Bedrock dropping tool calls on `FinishReason::Unknown`)
-    // universally rather than per-provider.
-    let llm: Arc<dyn LlmProvider> = Arc::new(NormalizingProvider::new(raw));
+    // 0. Normalize — Layer-3 shape-invariant decorator (see `normalized()`).
+    let llm: Arc<dyn LlmProvider> = normalized(raw);
 
     // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
     // with fallback to NEARAI_* for backward compatibility).
@@ -919,9 +922,7 @@ async fn build_provider_chain_components_with_options(
                     config.backend
                 ),
             })?;
-        // Normalize the cheap provider at the innermost position too, mirroring
-        // the primary chain — every cheap-path decorator must see canonical shape.
-        let cheap: Arc<dyn LlmProvider> = Arc::new(NormalizingProvider::new(cheap));
+        let cheap: Arc<dyn LlmProvider> = normalized(cheap);
         let cheap: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(cheap, retry_config.clone()))
         } else {
@@ -963,8 +964,7 @@ async fn build_provider_chain_components_with_options(
             fallback = %fallback.model_name(),
             "LLM failover enabled"
         );
-        // Normalize the fallback raw provider at the innermost position too.
-        let fallback: Arc<dyn LlmProvider> = Arc::new(NormalizingProvider::new(fallback));
+        let fallback: Arc<dyn LlmProvider> = normalized(fallback);
         let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(fallback, retry_config.clone()))
         } else {
@@ -1016,11 +1016,8 @@ async fn build_provider_chain_components_with_options(
     };
 
     // Standalone cheap LLM for heartbeat/evaluation (not part of the chain).
-    // Normalize at innermost position too — callers that bypass the main chain
-    // (heartbeat, evaluation) still benefit from shape-invariant tool_calls.
     let cheap_llm = if include_standalone_cheap {
-        create_cheap_llm_provider(config, session)?
-            .map(|p| Arc::new(NormalizingProvider::new(p)) as Arc<dyn LlmProvider>)
+        create_cheap_llm_provider(config, session)?.map(normalized)
     } else {
         None
     };
