@@ -16,6 +16,7 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::slack_serve::{SlackApiAppId, SlackTeamId};
 
@@ -125,6 +126,7 @@ pub(crate) struct SlackSetupService {
     operator_user_id: UserId,
     store: Arc<dyn SlackInstallationSetupStore>,
     secret_store: Arc<dyn SecretStore>,
+    save_lock: Arc<Mutex<()>>,
 }
 
 impl SlackSetupService {
@@ -143,6 +145,7 @@ impl SlackSetupService {
             operator_user_id,
             store,
             secret_store,
+            save_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -207,6 +210,7 @@ impl SlackSetupService {
         &self,
         update: SlackInstallationSetupUpdate,
     ) -> Result<SlackInstallationSetup, SlackSetupError> {
+        let _save_guard = self.save_lock.lock().await;
         let previous = self.current_setup().await?;
         let revision = previous
             .as_ref()
