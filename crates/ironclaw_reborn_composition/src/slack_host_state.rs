@@ -844,6 +844,14 @@ where
         match self.write_record(&path, &record, cas).await {
             Ok(_) => Ok(target),
             Err(FilesystemError::VersionMismatch { .. }) => {
+                // CAS lost to a concurrent writer. Read back and return the winning record.
+                // This is last-write-wins semantics: whichever writer committed first wins.
+                // This is safe today because provisioning the same (tenant, user) DM target is
+                // idempotent — both concurrent writers store the same DM channel ID for the same
+                // Slack user. If a future change makes the payload non-idempotent (e.g. storing a
+                // caller-chosen dm_channel_id that could differ between writers), this branch must
+                // be replaced with explicit conflict semantics (e.g. reject the loser with a
+                // retriable error rather than silently discarding the losing value).
                 let Some((record, _)) = self.read_personal_dm_target_record(&path).await? else {
                     return Err(SlackPersonalDmTargetError::StoreUnavailable);
                 };
@@ -1345,12 +1353,14 @@ fn stored_personal_dm_target(
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
         record.team_id,
         UserId::new(record.user_id).map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
-    )?;
+    )
+    .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
     SlackPersonalDmTarget::new(
         key,
         SlackUserId::new(record.slack_user_id),
         record.dm_channel_id,
     )
+    .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1615,7 +1625,7 @@ fn map_route_fs_error(error: FilesystemError) -> SlackChannelRouteError {
 }
 
 fn map_personal_dm_target_fs_error(error: FilesystemError) -> SlackPersonalDmTargetError {
-    tracing::error!(%error, "Slack personal DM target filesystem operation failed");
+    tracing::debug!(%error, "Slack personal DM target filesystem operation failed");
     SlackPersonalDmTargetError::StoreUnavailable
 }
 
@@ -1772,6 +1782,71 @@ mod tests {
             state.load_personal_dm_target(&key).await,
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         ));
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reports_corrupt_personal_dm_target_key_fields_as_unavailable()
+     {
+        // Regression guard: corrupt team_id (fails SlackPersonalDmTargetKey::new validation)
+        // and corrupt dm_channel_id (fails SlackPersonalDmTarget::new validation) must both map
+        // to StoreUnavailable (503), not InvalidTarget (404). A stored record that exists on disk
+        // with an invalid field is a data-integrity problem, not an absence.
+        let state = state();
+        let key = SlackPersonalDmTargetKey::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            installation(),
+            "T123".to_string(),
+            user("user:alice"),
+        )
+        .unwrap();
+        let path =
+            FilesystemSlackHostState::<InMemoryBackend>::personal_dm_target_path(&key).unwrap();
+
+        // Corrupt team_id — fails SlackPersonalDmTargetKey::new (validate_slack_id)
+        let record_bad_team = StoredSlackPersonalDmTarget {
+            tenant_id: "tenant-alpha".to_string(),
+            installation_id: installation().as_str().to_string(),
+            team_id: String::new(), // empty string fails Slack-ID validation
+            user_id: "user:alice".to_string(),
+            slack_user_id: "U123".to_string(),
+            dm_channel_id: "D123".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .write_record(&path, &record_bad_team, CasExpectation::Any)
+            .await
+            .expect("write corrupt personal DM record with bad team_id");
+        assert!(
+            matches!(
+                state.load_personal_dm_target(&key).await,
+                Err(SlackPersonalDmTargetError::StoreUnavailable)
+            ),
+            "corrupt team_id must surface as StoreUnavailable, not InvalidTarget"
+        );
+
+        // Corrupt dm_channel_id — fails SlackPersonalDmTarget::new (validate_slack_dm_channel_id)
+        let record_bad_dm = StoredSlackPersonalDmTarget {
+            tenant_id: "tenant-alpha".to_string(),
+            installation_id: installation().as_str().to_string(),
+            team_id: "T123".to_string(),
+            user_id: "user:alice".to_string(),
+            slack_user_id: "U123".to_string(),
+            dm_channel_id: "NOTADM".to_string(), // must start with "D"
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .write_record(&path, &record_bad_dm, CasExpectation::Any)
+            .await
+            .expect("write corrupt personal DM record with bad dm_channel_id");
+        assert!(
+            matches!(
+                state.load_personal_dm_target(&key).await,
+                Err(SlackPersonalDmTargetError::StoreUnavailable)
+            ),
+            "corrupt dm_channel_id must surface as StoreUnavailable, not InvalidTarget"
+        );
     }
 
     #[tokio::test]

@@ -674,7 +674,7 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
                 Ok(target) => targets.push(target),
                 Err(error) => {
                     tracing::warn!(
-                        ?error,
+                        %error,
                         "Slack personal DM target was skipped while listing outbound targets"
                     );
                 }
@@ -785,6 +785,10 @@ fn slack_personal_dm_reply_target_binding_ref(
 pub(crate) fn slack_reply_target_binding_ref_from_raw(
     raw: String,
 ) -> Result<ReplyTargetBindingRef, RebornServicesError> {
+    // Safety: all callers must pre-validate inputs via validate_slack_id /
+    // validate_slack_dm_channel_id which reject control characters (including NUL).
+    // ReplyTargetBindingRef::new enforces the 256-byte limit and rejects control chars
+    // as the primary defense — these caller-side validators are defense-in-depth.
     ReplyTargetBindingRef::new(format!("reply:{raw}")).map_err(|_| slack_target_backend_error())
 }
 
@@ -856,6 +860,83 @@ fn validate_slack_id(field: &'static str, value: &str) -> Result<(), SlackPerson
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slack_channel_routes::{
+        InMemorySlackChannelRouteStore, SlackChannelRouteError, SlackChannelRouteKey,
+        SlackChannelRouteListPage,
+    };
+
+    // ── test constants ────────────────────────────────────────────────────────
+    const TENANT: &str = "tenant:alpha";
+    const INSTALLATION: &str = "install-alpha";
+    const TEAM: &str = "T123";
+    const USER: &str = "user:alice";
+    const OTHER_TENANT: &str = "tenant:other";
+    const OTHER_USER: &str = "user:bob";
+    const SLACK_USER: &str = "U123";
+    const AGENT: &str = "agent:alpha";
+    const PROJECT: &str = "project:alpha";
+
+    // ── test helpers ──────────────────────────────────────────────────────────
+
+    fn caller() -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller::new(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new(USER).expect("user"),
+            Some(AgentId::new(AGENT).expect("agent")),
+            Some(ProjectId::new(PROJECT).expect("project")),
+        )
+    }
+
+    fn provider_config(
+        channel_routes: Vec<SlackConfiguredChannelRoute>,
+    ) -> SlackOutboundTargetProviderConfig {
+        SlackOutboundTargetProviderConfig {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            installation_id: AdapterInstallationId::new(INSTALLATION).expect("installation"),
+            team_id: SlackTeamId::new(TEAM),
+            configured_channel_routes: channel_routes,
+        }
+    }
+
+    fn empty_provider() -> SlackHostBetaOutboundTargetProvider {
+        SlackHostBetaOutboundTargetProvider::new(
+            provider_config(Vec::new()),
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+        )
+    }
+
+    async fn provider_with_provisioned_dm() -> (
+        SlackHostBetaOutboundTargetProvider,
+        Arc<InMemorySlackPersonalDmTargetStore>,
+    ) {
+        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let key = SlackPersonalDmTargetKey::new(
+            TenantId::new(TENANT).expect("tenant"),
+            AdapterInstallationId::new(INSTALLATION).expect("installation"),
+            TEAM.to_string(),
+            UserId::new(USER).expect("user"),
+        )
+        .expect("key");
+        let target =
+            SlackPersonalDmTarget::new(key, SlackUserId::new(SLACK_USER), "D0HOST".to_string())
+                .expect("target");
+        store
+            .upsert_personal_dm_target(target)
+            .await
+            .expect("stores");
+        let store_dyn: Arc<dyn SlackPersonalDmTargetStore> = Arc::clone(&store) as _;
+        let provider = SlackHostBetaOutboundTargetProvider::new(
+            provider_config(Vec::new()),
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            store_dyn,
+        );
+        (provider, store)
+    }
+
+    // ── validate_slack_id ─────────────────────────────────────────────────────
 
     #[test]
     fn validate_slack_id_accepts_128_char_id_and_rejects_129_char_id() {
@@ -876,6 +957,8 @@ mod tests {
         }
     }
 
+    // ── validate_slack_dm_channel_id ──────────────────────────────────────────
+
     #[test]
     fn slack_personal_dm_target_rejects_non_d_prefixed_channel_id() {
         let key = SlackPersonalDmTargetKey::new(
@@ -890,7 +973,345 @@ mod tests {
             SlackPersonalDmTarget::new(key.clone(), SlackUserId::new("U123"), "C123".to_string()),
             Err(SlackPersonalDmTargetError::InvalidTarget)
         ));
-        SlackPersonalDmTarget::new(key, SlackUserId::new("U123"), "D123".to_string())
+        SlackPersonalDmTarget::new(key.clone(), SlackUserId::new("U123"), "D123".to_string())
             .expect("DM-prefixed channel is valid");
+        // lowercase 'd' prefix is also invalid (must be uppercase 'D')
+        assert!(matches!(
+            SlackPersonalDmTarget::new(key.clone(), SlackUserId::new("U123"), "d123".to_string()),
+            Err(SlackPersonalDmTargetError::InvalidTarget)
+        ));
+        // empty is invalid
+        assert!(matches!(
+            SlackPersonalDmTarget::new(key, SlackUserId::new("U123"), String::new()),
+            Err(SlackPersonalDmTargetError::InvalidTarget)
+        ));
+    }
+
+    // ── slack_personal_dm_reply_target_binding_ref round-trip ────────────────
+
+    #[test]
+    fn slack_personal_dm_reply_target_binding_ref_round_trips_dm_channel_and_slack_user() {
+        let provider = empty_provider();
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        let agent_id = AgentId::new(AGENT).expect("agent");
+        let project_id = ProjectId::new(PROJECT).expect("project");
+        let team_id = SlackTeamId::new(TEAM);
+        let slack_user_id = SlackUserId::new(SLACK_USER);
+
+        let binding_ref = slack_personal_dm_reply_target_binding_ref(
+            &installation_id,
+            &agent_id,
+            Some(&project_id),
+            &team_id,
+            "D0HOST",
+            &slack_user_id,
+        )
+        .expect("binding ref builds");
+
+        // parse it back via route_for_reply_target_binding_ref
+        let parsed = provider
+            .route_for_reply_target_binding_ref(&binding_ref)
+            .expect("binding ref parses to a Slack reply target");
+
+        match parsed {
+            ParsedSlackReplyTarget::PersonalDm {
+                dm_channel_id,
+                slack_user_id: parsed_slack_user_id,
+            } => {
+                assert_eq!(dm_channel_id, "D0HOST", "dm_channel_id must round-trip");
+                assert_eq!(
+                    parsed_slack_user_id.as_str(),
+                    SLACK_USER,
+                    "slack_user_id must round-trip"
+                );
+            }
+            ParsedSlackReplyTarget::SharedChannel { .. } => {
+                panic!("personal DM binding ref must not parse as shared channel");
+            }
+        }
+    }
+
+    // ── resolve_reply_target_binding PersonalDm branch ────────────────────────
+
+    #[tokio::test]
+    async fn slack_personal_dm_reply_target_binding_resolves_to_stored_target() {
+        let (provider, _store) = provider_with_provisioned_dm().await;
+
+        let listed = provider
+            .list_outbound_delivery_targets(&caller())
+            .await
+            .expect("target list");
+        assert_eq!(listed.len(), 1, "provisioned DM target must appear");
+        let binding_ref = listed[0].reply_target_binding_ref.clone();
+
+        let resolved = provider
+            .resolve_reply_target_binding(&caller(), &binding_ref)
+            .await
+            .expect("binding resolves without error")
+            .expect("stored DM target must resolve to Some");
+
+        assert_eq!(
+            resolved.summary.target_id.as_str(),
+            format!("slack:personal-dm:{}:{}", TEAM, USER)
+        );
+        assert_eq!(resolved.reply_target_binding_ref, binding_ref);
+    }
+
+    #[tokio::test]
+    async fn slack_personal_dm_reply_target_binding_returns_none_when_no_target_stored() {
+        // Build binding ref for a user that has no provisioned DM target.
+        let provider = empty_provider();
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        let agent_id = AgentId::new(AGENT).expect("agent");
+        let project_id = ProjectId::new(PROJECT).expect("project");
+        let team_id = SlackTeamId::new(TEAM);
+        let slack_user_id = SlackUserId::new(SLACK_USER);
+
+        let binding_ref = slack_personal_dm_reply_target_binding_ref(
+            &installation_id,
+            &agent_id,
+            Some(&project_id),
+            &team_id,
+            "D0HOST",
+            &slack_user_id,
+        )
+        .expect("binding ref builds");
+
+        // No target stored → should return Ok(None) (not an error).
+        let result = provider
+            .resolve_reply_target_binding(&caller(), &binding_ref)
+            .await
+            .expect("lookup succeeds");
+        assert!(result.is_none(), "ownerless binding ref must return None");
+    }
+
+    // ── mismatch-guard: stored slack_user_id differs from binding ref ─────────
+
+    #[tokio::test]
+    async fn slack_personal_dm_resolve_binding_rejects_mismatched_slack_user_id() {
+        let (provider, _store) = provider_with_provisioned_dm().await;
+
+        // Listing gives us a real binding ref that encodes SLACK_USER + D0HOST.
+        let listed = provider
+            .list_outbound_delivery_targets(&caller())
+            .await
+            .expect("target list");
+        assert_eq!(listed.len(), 1);
+
+        // Replace the SLACK_USER segment in the raw binding ref string with a
+        // different Slack user id, keeping the dm_channel_id the same.
+        let original = listed[0].reply_target_binding_ref.as_str();
+        let tampered_raw = original.replace(SLACK_USER, "U_OTHER_USER");
+        let mismatched = ReplyTargetBindingRef::new(tampered_raw)
+            .expect("tampered ref is still syntactically valid");
+
+        let result = provider
+            .resolve_reply_target_binding(&caller(), &mismatched)
+            .await
+            .expect("lookup succeeds");
+        assert!(
+            result.is_none(),
+            "mismatched slack_user_id in binding ref must return None"
+        );
+    }
+
+    // ── cross-user: caller.user_id != requested user_id ──────────────────────
+
+    #[tokio::test]
+    async fn slack_personal_dm_resolve_personal_dm_for_user_returns_none_for_cross_user_caller() {
+        let (provider, _store) = provider_with_provisioned_dm().await;
+
+        // Target was provisioned for USER ("user:alice").  A different user
+        // ("user:bob") tries to resolve the same target_id.
+        let target_id =
+            RebornOutboundDeliveryTargetId::new(format!("slack:personal-dm:{}:{}", TEAM, USER))
+                .expect("target id");
+
+        let cross_user_caller = WebUiAuthenticatedCaller::new(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new(OTHER_USER).expect("other user"),
+            None,
+            None,
+        );
+
+        let result = provider
+            .resolve_outbound_delivery_target(&cross_user_caller, &target_id)
+            .await
+            .expect("lookup succeeds");
+        assert!(
+            result.is_none(),
+            "user B must not resolve user A's personal DM target"
+        );
+    }
+
+    // ── list: both shared-channel route AND personal DM appear together ───────
+
+    #[tokio::test]
+    async fn slack_list_outbound_delivery_targets_returns_shared_channels_and_personal_dm_together()
+    {
+        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let key = SlackPersonalDmTargetKey::new(
+            TenantId::new(TENANT).expect("tenant"),
+            AdapterInstallationId::new(INSTALLATION).expect("installation"),
+            TEAM.to_string(),
+            UserId::new(USER).expect("user"),
+        )
+        .expect("key");
+        let target =
+            SlackPersonalDmTarget::new(key, SlackUserId::new(SLACK_USER), "D0HOST".to_string())
+                .expect("target");
+        store
+            .upsert_personal_dm_target(target)
+            .await
+            .expect("stores");
+
+        // Add a static shared-channel route for the same caller.
+        let shared_route = SlackConfiguredChannelRoute::new(
+            "C0HOST".to_string(),
+            UserId::new(USER).expect("user"),
+        );
+        let provider = SlackHostBetaOutboundTargetProvider::new(
+            provider_config(vec![shared_route]),
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            store,
+        );
+
+        let listed = provider
+            .list_outbound_delivery_targets(&caller())
+            .await
+            .expect("target list");
+
+        let target_ids: Vec<&str> = listed
+            .iter()
+            .map(|e| e.summary.target_id.as_str())
+            .collect();
+        assert!(
+            target_ids.iter().any(|id| id.contains("shared-channel")),
+            "shared-channel target must appear: {:?}",
+            target_ids
+        );
+        assert!(
+            target_ids.iter().any(|id| id.contains("personal-dm")),
+            "personal-DM target must appear: {:?}",
+            target_ids
+        );
+        assert_eq!(listed.len(), 2, "exactly one shared + one DM target");
+    }
+
+    // ── shared_channel_routes cap guard ──────────────────────────────────────
+
+    #[derive(Debug)]
+    struct OversizedPageRouteStore;
+
+    #[async_trait::async_trait]
+    impl SlackChannelRouteStore for OversizedPageRouteStore {
+        async fn list_routes(
+            &self,
+            _tenant_id: &TenantId,
+            _installation_id: &AdapterInstallationId,
+            _team_id: &str,
+            _cursor: usize,
+            _limit: usize,
+        ) -> Result<SlackChannelRouteListPage, SlackChannelRouteError> {
+            // Return more routes than the cap in a single page (no next cursor,
+            // so the loop will try the cap check on this batch).
+            let routes = (0..=SLACK_OUTBOUND_TARGET_LIST_MAX_TOTAL_ROUTES)
+                .map(|i| crate::slack_channel_routes::SlackChannelRoute {
+                    tenant_id: TENANT.to_string(),
+                    installation_id: INSTALLATION.to_string(),
+                    team_id: TEAM.to_string(),
+                    channel_id: format!("C{i:05}"),
+                    subject_user_id: USER.to_string(),
+                })
+                .collect();
+            Ok(SlackChannelRouteListPage {
+                routes,
+                next_cursor: None,
+            })
+        }
+
+        async fn upsert_route(
+            &self,
+            _key: SlackChannelRouteKey,
+            _subject_user_id: UserId,
+        ) -> Result<crate::slack_channel_routes::SlackChannelRoute, SlackChannelRouteError>
+        {
+            Err(SlackChannelRouteError::StoreUnavailable)
+        }
+
+        async fn delete_route(
+            &self,
+            _key: &SlackChannelRouteKey,
+        ) -> Result<bool, SlackChannelRouteError> {
+            Err(SlackChannelRouteError::StoreUnavailable)
+        }
+
+        async fn replace_managed_routes(
+            &self,
+            _tenant_id: &TenantId,
+            _installation_id: &AdapterInstallationId,
+            _team_id: &str,
+            _assignments: Vec<crate::slack_channel_routes::SlackChannelRouteAssignment>,
+        ) -> Result<Vec<crate::slack_channel_routes::SlackChannelRoute>, SlackChannelRouteError>
+        {
+            Err(SlackChannelRouteError::StoreUnavailable)
+        }
+
+        async fn resolve_subject_user_id(
+            &self,
+            _key: &SlackChannelRouteKey,
+        ) -> Result<Option<UserId>, SlackChannelRouteError> {
+            Err(SlackChannelRouteError::StoreUnavailable)
+        }
+    }
+
+    #[tokio::test]
+    async fn slack_shared_channel_routes_fails_when_stored_batch_exceeds_max_total() {
+        let provider = SlackHostBetaOutboundTargetProvider::new(
+            provider_config(Vec::new()),
+            Arc::new(OversizedPageRouteStore),
+            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+        );
+
+        let error = provider
+            .list_outbound_delivery_targets(&caller())
+            .await
+            .expect_err("oversized batch must fail closed");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
+    }
+
+    // ── cross-tenant personal-DM resolve ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn slack_host_beta_targets_ignore_cross_tenant_personal_dm_resolve() {
+        let (provider, _store) = provider_with_provisioned_dm().await;
+
+        // Build a personal-DM target_id that matches the provisioned target.
+        let target_id =
+            RebornOutboundDeliveryTargetId::new(format!("slack:personal-dm:{}:{}", TEAM, USER))
+                .expect("target id");
+
+        // A caller from a different tenant with the same user_id.
+        let foreign_tenant_caller = WebUiAuthenticatedCaller::new(
+            TenantId::new(OTHER_TENANT).expect("other tenant"),
+            UserId::new(USER).expect("user"),
+            None,
+            None,
+        );
+
+        let result = provider
+            .resolve_outbound_delivery_target(&foreign_tenant_caller, &target_id)
+            .await
+            .expect("lookup succeeds without error");
+
+        assert!(
+            result.is_none(),
+            "cross-tenant caller must not resolve personal DM target; got: {:?}",
+            result.map(|e| e.summary.target_id.as_str().to_string())
+        );
     }
 }

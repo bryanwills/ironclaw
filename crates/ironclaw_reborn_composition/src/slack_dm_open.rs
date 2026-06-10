@@ -175,6 +175,22 @@ mod tests {
         assert!(matches!(error, SlackDmOpenError::Backend(_)));
     }
 
+    #[tokio::test]
+    async fn open_slack_dm_channel_returns_channel_id_on_success() {
+        let channel_id = open_slack_dm_channel(
+            &ScriptedEgress::new(EgressResponse::new(
+                200,
+                br#"{"ok":true,"channel":{"id":"D123ABCD"}}"#.to_vec(),
+            )),
+            credential_handle(),
+            "U123",
+        )
+        .await
+        .expect("happy path succeeds");
+
+        assert_eq!(channel_id, "D123ABCD");
+    }
+
     #[test]
     fn validate_slack_dm_channel_id_rejects_invalid_shapes() {
         for value in ["", "C123", "G123", "D 123", "D/123", "D\x01123"] {

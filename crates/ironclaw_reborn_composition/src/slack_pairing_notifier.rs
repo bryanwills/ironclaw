@@ -113,6 +113,7 @@ struct SlackApiResponse {
     error: Option<String>,
 }
 
+// TODO: consolidate slack_api_request/slack_json_response with slack_dm_open once error types are unified
 fn slack_api_request(
     path: &'static str,
     body: Vec<u8>,
