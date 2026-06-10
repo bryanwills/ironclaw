@@ -125,6 +125,10 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
         "Dockerfile.reborn must ship the opt-in production config: {dockerfile}"
     );
     assert!(
+        dockerfile.matches("COPY migrations/ migrations/").count() >= 2,
+        "Dockerfile.reborn must copy repo-level SQL migrations required by postgres include_str! builds: {dockerfile}"
+    );
+    assert!(
         !dockerfile.contains("IRONCLAW_REBORN_HOME=/data/ironclaw-reborn"),
         "Dockerfile.reborn must let the entrypoint resolve Railway volume mounts before falling back to /data: {dockerfile}"
     );
