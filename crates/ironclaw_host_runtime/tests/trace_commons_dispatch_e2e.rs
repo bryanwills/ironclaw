@@ -45,15 +45,25 @@ use tempfile::TempDir;
 
 // ── Process-wide base-dir setup ──────────────────────────────────────────────
 
-/// The temp dir is kept alive for the duration of the process.
-/// Set `IRONCLAW_BASE_DIR` **before any code that could read it**.
-fn setup_base_dir() -> TempDir {
-    let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
-    // SAFETY: single-threaded during this one-time init; LazyLock hasn't fired yet.
-    unsafe {
-        std::env::set_var("IRONCLAW_BASE_DIR", dir.path());
-    }
-    dir
+static BASE_DIR: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+
+/// Point `IRONCLAW_BASE_DIR` at a process-lifetime temp dir before any code
+/// reads it. `#[tokio::test]` uses a multi-threaded runtime and tests in this
+/// binary run concurrently, so this must be the FIRST call in every test:
+/// the `OnceLock` serializes initialization (concurrent callers block until
+/// the variable is set) and no test reads `ironclaw_base_dir()` before its
+/// own `setup_base_dir()` call returns.
+fn setup_base_dir() -> &'static TempDir {
+    BASE_DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
+        // SAFETY: executed exactly once inside `OnceLock::get_or_init`; every
+        // test calls `setup_base_dir()` before any env read, so there is no
+        // concurrent reader during this write.
+        unsafe {
+            std::env::set_var("IRONCLAW_BASE_DIR", dir.path());
+        }
+        dir
+    })
 }
 
 // ── Mock issuer helpers ──────────────────────────────────────────────────────
@@ -329,7 +339,6 @@ async fn invoke_with_context(
 ///   then `builtin.trace_commons.status` reports enrolled.
 #[tokio::test]
 async fn onboard_then_status_through_dispatch() {
-    // Set IRONCLAW_BASE_DIR FIRST, before any lazy path computation.
     let _base_dir = setup_base_dir();
 
     let (addr, received) = spawn_mock_issuer(
@@ -454,7 +463,8 @@ async fn onboard_then_status_through_dispatch() {
 /// can no longer reach private destinations through onboarding.
 #[tokio::test]
 async fn onboard_private_ip_blocked_by_network_policy() {
-    // Base dir is already set process-wide (shared with the first test).
+    let _base_dir = setup_base_dir();
+
     let (addr, received) = spawn_mock_issuer(
         |addr| {
             json!({
@@ -514,8 +524,8 @@ async fn onboard_private_ip_blocked_by_network_policy() {
 /// Verify that `confirmed=false` short-circuits before making ANY network call.
 #[tokio::test]
 async fn onboard_unconfirmed_makes_no_network_call() {
-    // Base dir is already set (same process / LazyLock as the previous test).
-    // We just need a fresh mock to count requests.
+    let _base_dir = setup_base_dir();
+
     let (addr, received) = spawn_mock_issuer(
         |addr| {
             json!({
