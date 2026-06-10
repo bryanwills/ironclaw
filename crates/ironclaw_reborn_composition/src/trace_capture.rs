@@ -247,51 +247,122 @@ async fn load_capture_messages(
 }
 
 /// Adapt Reborn thread transcript records into the neutral conversation
-/// shape the trace capture pipeline consumes. Only user/assistant text rows
-/// participate; tool-result references carry refs rather than content and
-/// are deferred until the capture pipeline grows a Reborn-native tool-call
-/// input. Redacted and superseded rows never leave the thread store.
+/// shape the trace capture pipeline consumes.
+///
+/// User/assistant text rows become `user`/`assistant` messages. Tool-result
+/// rows that carry `tool_result_provider_call` replay metadata are
+/// reconstructed into a single `tool_calls` message per run of consecutive
+/// rows, positioned between the user message and the assistant response — the
+/// shape `capture_turns_from_conversation_messages` expects (its per-turn
+/// lookahead consumes exactly one `tool_calls` message, so consecutive rows
+/// must collapse into one). Tool-result rows without provider metadata carry
+/// nothing reconstructable and stay dropped. Raw tool payloads inside the
+/// `tool_calls` message are consent-gated downstream by the envelope builder
+/// (`include_tool_payloads`); tool names always flow through so the value
+/// scorecard sees `required_tools`/replayability. Redacted and superseded
+/// rows never leave the thread store.
 fn conversation_messages_from_records(records: &[ThreadMessageRecord]) -> Vec<ConversationMessage> {
     let now = Utc::now();
-    let mut messages: Vec<ConversationMessage> = records
-        .iter()
-        .filter(|record| {
-            matches!(
-                record.status,
-                MessageStatus::Accepted
-                    | MessageStatus::Submitted
-                    | MessageStatus::Finalized
-                    | MessageStatus::Interrupted
-            )
-        })
-        .filter_map(|record| {
-            let role = match record.kind {
-                MessageKind::User => "user",
-                MessageKind::Assistant => "assistant",
-                MessageKind::System
-                | MessageKind::Summary
-                | MessageKind::CheckpointReference
-                | MessageKind::ToolResultReference
-                | MessageKind::CapabilityDisplayPreview => return None,
-            };
-            let content = record.content.clone()?;
-            if content.trim().is_empty() {
-                return None;
+    let mut messages: Vec<ConversationMessage> = Vec::new();
+    let mut pending_tool_calls: Vec<serde_json::Value> = Vec::new();
+
+    for record in records {
+        if !matches!(
+            record.status,
+            MessageStatus::Accepted
+                | MessageStatus::Submitted
+                | MessageStatus::Finalized
+                | MessageStatus::Interrupted
+        ) {
+            continue;
+        }
+        match record.kind {
+            MessageKind::User | MessageKind::Assistant => {
+                flush_tool_calls(&mut pending_tool_calls, &mut messages, now);
+                let role = if matches!(record.kind, MessageKind::User) {
+                    "user"
+                } else {
+                    "assistant"
+                };
+                let Some(content) = record.content.clone() else {
+                    continue;
+                };
+                if content.trim().is_empty() {
+                    continue;
+                }
+                messages.push(ConversationMessage {
+                    id: uuid::Uuid::new_v4(),
+                    role: role.to_string(),
+                    content,
+                    // Thread message records carry no timestamps; capture time
+                    // is informational only (turn started_at metadata).
+                    created_at: now,
+                });
             }
-            Some(ConversationMessage {
-                id: uuid::Uuid::new_v4(),
-                role: role.to_string(),
-                content,
-                // Thread message records carry no timestamps; capture time
-                // is informational only (turn started_at metadata).
-                created_at: now,
-            })
-        })
-        .collect();
+            MessageKind::ToolResultReference => {
+                if let Some(call) = record.tool_result_provider_call.as_ref() {
+                    pending_tool_calls
+                        .push(tool_call_capture_json(call, record.content.as_deref()));
+                }
+            }
+            MessageKind::System
+            | MessageKind::Summary
+            | MessageKind::CheckpointReference
+            | MessageKind::CapabilityDisplayPreview => {}
+        }
+    }
+    flush_tool_calls(&mut pending_tool_calls, &mut messages, now);
+
     if messages.len() > CAPTURE_MESSAGE_LIMIT {
         messages = messages.split_off(messages.len() - CAPTURE_MESSAGE_LIMIT);
     }
     messages
+}
+
+/// Emit accumulated tool-call entries as one `tool_calls` message, if any.
+fn flush_tool_calls(
+    pending: &mut Vec<serde_json::Value>,
+    messages: &mut Vec<ConversationMessage>,
+    now: chrono::DateTime<Utc>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let content = serde_json::Value::Array(std::mem::take(pending)).to_string();
+    messages.push(ConversationMessage {
+        id: uuid::Uuid::new_v4(),
+        role: "tool_calls".to_string(),
+        content,
+        created_at: now,
+    });
+}
+
+/// Build one `parse_capture_tool_calls`-shaped entry from a provider tool-call
+/// reference and its (optional) result content. The result text is carried as
+/// `result_preview`; the envelope builder redacts it unless the contribution
+/// policy consents to tool payloads.
+fn tool_call_capture_json(
+    call: &ironclaw_threads::ProviderToolCallReferenceEnvelope,
+    result: Option<&str>,
+) -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "name".to_string(),
+        serde_json::Value::String(call.provider_tool_name.clone()),
+    );
+    if let Some(result) = result.filter(|content| !content.trim().is_empty()) {
+        entry.insert(
+            "result_preview".to_string(),
+            serde_json::Value::String(result.to_string()),
+        );
+    }
+    if let Some(rationale) = call.reasoning.as_ref().filter(|r| !r.trim().is_empty()) {
+        entry.insert(
+            "rationale".to_string(),
+            serde_json::Value::String(rationale.clone()),
+        );
+    }
+    serde_json::Value::Object(entry)
 }
 
 pub(crate) struct TraceQueueFlushWorkerHandle {
@@ -350,8 +421,8 @@ pub(crate) fn spawn_trace_queue_flush_worker(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::UserId;
-    use ironclaw_threads::ThreadMessageId;
+    use ironclaw_host_api::{CapabilityId, UserId};
+    use ironclaw_threads::{ProviderToolCallReferenceEnvelope, ThreadMessageId};
     use ironclaw_turns::{EventCursor, TurnRunId, TurnScope, TurnStatus};
     use uuid::Uuid;
 
@@ -500,6 +571,112 @@ mod tests {
         assert_eq!(messages[1].content, "hi");
     }
 
+    fn tool_result_record(tool_name: &str, result: &str) -> ThreadMessageRecord {
+        ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: test_thread_id(),
+            sequence: 0,
+            kind: MessageKind::ToolResultReference,
+            status: MessageStatus::Finalized,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: Some("ref-1".to_string()),
+            tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {
+                provider_id: "openai".to_string(),
+                provider_model_id: "gpt".to_string(),
+                provider_turn_id: "turn-1".to_string(),
+                provider_call_id: "call-1".to_string(),
+                provider_tool_name: tool_name.to_string(),
+                capability_id: CapabilityId::new(format!("builtin.{tool_name}"))
+                    .expect("capability id"),
+                arguments: serde_json::json!({ "url": "https://example.com" }),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }),
+            content: Some(result.to_string()),
+            redaction_ref: None,
+        }
+    }
+
+    #[test]
+    fn tool_result_reference_with_provider_call_becomes_tool_calls_message() {
+        // The Reborn capture adapter must reconstruct tool-call turns from the
+        // `tool_result_provider_call` replay metadata so the downstream value
+        // scorecard sees `required_tools`/replayability, not just text. The
+        // envelope builder expects a `role:"tool_calls"` message sitting
+        // between the user message and the assistant response.
+        let records = vec![
+            record(MessageKind::User, MessageStatus::Accepted, "fetch the page"),
+            tool_result_record("web_fetch", "200 OK body"),
+            record(
+                MessageKind::Assistant,
+                MessageStatus::Finalized,
+                "here it is",
+            ),
+        ];
+        let messages = conversation_messages_from_records(&records);
+
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "tool_calls", "assistant"]);
+
+        let calls: serde_json::Value =
+            serde_json::from_str(&messages[1].content).expect("tool_calls content is JSON");
+        let call = &calls.as_array().expect("tool_calls is a JSON array")[0];
+        assert_eq!(call["name"], "web_fetch");
+        assert_eq!(call["result_preview"], "200 OK body");
+    }
+
+    #[test]
+    fn consecutive_tool_result_references_collapse_into_one_tool_calls_message() {
+        // The builder's per-turn lookahead consumes exactly one `tool_calls`
+        // message between user and assistant, so consecutive tool-result rows
+        // must collapse into a single message carrying every call, or only the
+        // first would be scored.
+        let records = vec![
+            record(MessageKind::User, MessageStatus::Accepted, "research it"),
+            tool_result_record("web_search", "hits"),
+            tool_result_record("web_fetch", "page body"),
+            record(MessageKind::Assistant, MessageStatus::Finalized, "summary"),
+        ];
+        let messages = conversation_messages_from_records(&records);
+
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "tool_calls", "assistant"]);
+
+        let calls: serde_json::Value =
+            serde_json::from_str(&messages[1].content).expect("tool_calls content is JSON");
+        let names: Vec<&str> = calls
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|c| c["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, vec!["web_search", "web_fetch"]);
+    }
+
+    #[test]
+    fn tool_result_reference_without_provider_call_is_still_dropped() {
+        // A ref-only tool result with no provider replay metadata carries no
+        // reconstructable tool call, so it stays dropped (no empty tool_calls
+        // message that would mislead the scorer).
+        let records = vec![
+            record(MessageKind::User, MessageStatus::Accepted, "hi"),
+            record(
+                MessageKind::ToolResultReference,
+                MessageStatus::Finalized,
+                "ref-only",
+            ),
+            record(MessageKind::Assistant, MessageStatus::Finalized, "hello"),
+        ];
+        let messages = conversation_messages_from_records(&records);
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant"]);
+    }
+
     #[test]
     fn conversation_messages_bound_to_recent_window() {
         let records: Vec<ThreadMessageRecord> = (0..(CAPTURE_MESSAGE_LIMIT + 10))
@@ -541,6 +718,53 @@ mod tests {
         let body = std::fs::read_to_string(&entries[0]).expect("queued envelope readable");
         let envelope: serde_json::Value = serde_json::from_str(&body).expect("envelope is JSON");
         assert_eq!(envelope["outcome"]["task_success"], "success");
+        cleanup_scope(&scope);
+    }
+
+    #[tokio::test]
+    async fn captured_tool_using_turn_carries_tools_into_envelope_replay() {
+        // Integration guard over adapter + envelope builder: a tool-using turn
+        // must surface the tool in the queued envelope's replay metadata
+        // (required_tools + replayable). These are the dormant value-score
+        // levers that text-only capture never lit, so this is what lets an
+        // agentic turn clear the submission-score gate in production.
+        let scope = unique_scope("tool-using");
+        trace::write_trace_policy_for_scope(Some(&scope), &enabled_policy()).expect("write policy");
+
+        let history: Arc<dyn TraceCaptureHistorySource> = Arc::new(FixedHistorySource {
+            records: vec![
+                record(MessageKind::User, MessageStatus::Accepted, "fetch the page"),
+                tool_result_record("web_fetch", "200 OK body"),
+                record(
+                    MessageKind::Assistant,
+                    MessageStatus::Finalized,
+                    "here it is",
+                ),
+            ],
+        });
+        capture_turn_trace(
+            history,
+            terminal_event(TurnEventKind::Completed, Some(&scope)),
+            scope.clone(),
+        )
+        .await;
+
+        let entries = queued_entries(&scope);
+        assert_eq!(entries.len(), 1, "exactly one envelope queued");
+        let body = std::fs::read_to_string(&entries[0]).expect("queued envelope readable");
+        let envelope: serde_json::Value = serde_json::from_str(&body).expect("envelope is JSON");
+
+        let required_tools = envelope["replay"]["required_tools"]
+            .as_array()
+            .expect("required_tools is an array");
+        assert!(
+            required_tools.iter().any(|t| t == "web_fetch"),
+            "tool name must reach replay.required_tools, got {required_tools:?}"
+        );
+        assert_eq!(
+            envelope["replay"]["replayable"], true,
+            "a tool-using turn must be marked replayable"
+        );
         cleanup_scope(&scope);
     }
 
