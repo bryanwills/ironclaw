@@ -989,18 +989,22 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
     }
 }
 
+// Below-High residual PII risk is treated as clean for scoring: the
+// deterministic redactor has already scrubbed detected PII, and the 0.35
+// submission gate leaves no headroom for a partial Medium discount on a
+// minimal trace (it would zero an otherwise-valuable trace). Only High risk
+// is penalized — `privacy_gate` zeros its score and `trace_autonomous_eligibility`
+// holds it for manual review.
 fn privacy_gate(risk: ResidualPiiRisk) -> f32 {
     match risk {
-        ResidualPiiRisk::Low => 1.0,
-        ResidualPiiRisk::Medium => 0.5,
+        ResidualPiiRisk::Low | ResidualPiiRisk::Medium => 1.0,
         ResidualPiiRisk::High => 0.0,
     }
 }
 
 fn privacy_risk_score(risk: ResidualPiiRisk) -> f32 {
     match risk {
-        ResidualPiiRisk::Low => 0.0,
-        ResidualPiiRisk::Medium => 0.5,
+        ResidualPiiRisk::Low | ResidualPiiRisk::Medium => 0.0,
         ResidualPiiRisk::High => 1.0,
     }
 }
@@ -6621,10 +6625,10 @@ pub fn trace_autonomous_eligibility(
     policy: &StandingTraceContributionPolicy,
 ) -> TraceQueueEligibility {
     if policy.require_manual_approval_when_pii_detected
-        && envelope.privacy.residual_pii_risk != ResidualPiiRisk::Low
+        && envelope.privacy.residual_pii_risk == ResidualPiiRisk::High
     {
         return TraceQueueEligibility::Hold {
-            reason: "manual review required because residual privacy risk is not low".to_string(),
+            reason: "manual review required because residual privacy risk is high".to_string(),
         };
     }
 
@@ -9086,6 +9090,55 @@ mod tests {
                 .reasons
                 .iter()
                 .any(|reason| reason.contains("high residual privacy risk"))
+        );
+    }
+
+    #[tokio::test]
+    async fn medium_pii_tool_trace_auto_submits_while_high_is_held() {
+        // Below-High residual PII risk must auto-submit: the manual-approval
+        // eligibility gate fires only on High, and the value scorecard no
+        // longer crushes a Medium tool trace below the 0.35 submission gate.
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            require_manual_approval_when_pii_detected: true,
+            ..StandingTraceContributionPolicy::default()
+        };
+        assert_eq!(policy.min_submission_score, 0.35, "default gate is 0.35");
+
+        // Medium: clears the score gate and auto-submits (no manual review).
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        apply_credit_estimate_to_envelope(&mut envelope);
+        assert!(
+            envelope.value.submission_score >= policy.min_submission_score,
+            "medium-risk tool trace must clear the score gate, got {}",
+            envelope.value.submission_score
+        );
+        assert!(
+            matches!(
+                trace_autonomous_eligibility(&envelope, &policy),
+                TraceQueueEligibility::Submit
+            ),
+            "medium-risk tool trace must auto-submit, not hold for manual review"
+        );
+
+        // High: still held (and its score collapses to zero via the gate).
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        apply_credit_estimate_to_envelope(&mut envelope);
+        assert!(
+            matches!(
+                trace_autonomous_eligibility(&envelope, &policy),
+                TraceQueueEligibility::Hold { .. }
+            ),
+            "high-risk trace must remain held"
         );
     }
 
