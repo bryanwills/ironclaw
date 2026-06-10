@@ -47,15 +47,16 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, ProcessBackendKind, SecretMode};
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
-    UserId, VirtualPath,
+    CapabilityId, EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId,
+    RuntimeHttpEgress, UserId, VirtualPath,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant, ResourceScope};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
-    HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
-    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts,
+    SHELL_CAPABILITY_ID, TriggerCreateHook, builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_package,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -2766,7 +2767,14 @@ where
     let trigger_create_hook = Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
-    let extension_registry = Arc::new(builtin_extension_registry()?);
+    let shell_capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
+    let process_capabilities_enabled =
+        production_wiring.runtime_policy.process_backend != ProcessBackendKind::None;
+    let mut extension_registry = builtin_extension_registry()?;
+    if !process_capabilities_enabled {
+        extension_registry.remove_capability(&shell_capability_id);
+    }
+    let extension_registry = Arc::new(extension_registry);
     let BudgetSinks {
         budget_event_sink,
         broadcast_budget_event_sink,
@@ -2816,6 +2824,9 @@ where
         trigger_repository,
         trigger_create_hook,
     )?;
+    if !process_capabilities_enabled {
+        first_party_registry.remove_handler(&shell_capability_id);
+    }
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
         Arc::clone(&extension_registry),

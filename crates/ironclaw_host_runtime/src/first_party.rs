@@ -297,6 +297,10 @@ impl FirstPartyCapabilityRegistry {
         self.handlers.insert(capability_id, handler);
     }
 
+    pub fn remove_handler(&mut self, capability_id: &CapabilityId) {
+        self.handlers.remove(capability_id);
+    }
+
     pub fn get(
         &self,
         capability_id: &CapabilityId,

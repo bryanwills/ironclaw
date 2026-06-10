@@ -195,6 +195,25 @@ impl ExtensionRegistry {
         Some(package)
     }
 
+    pub fn remove_capability(
+        &mut self,
+        capability_id: &CapabilityId,
+    ) -> Option<CapabilityDescriptor> {
+        let descriptor = self.capabilities.remove(capability_id)?;
+        self.capability_visibility.remove(capability_id);
+        self.capability_order.retain(|id| id != capability_id);
+        if let Some(package) = self.packages.get_mut(&descriptor.provider) {
+            package
+                .capabilities
+                .retain(|candidate| candidate.id != *capability_id);
+            package
+                .manifest
+                .capabilities
+                .retain(|candidate| candidate.id != *capability_id);
+        }
+        Some(descriptor)
+    }
+
     pub fn get_extension(&self, id: &ExtensionId) -> Option<&ExtensionPackage> {
         self.packages.get(id)
     }

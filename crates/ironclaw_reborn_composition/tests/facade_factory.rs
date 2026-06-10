@@ -147,6 +147,21 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
 }
 
 #[cfg(feature = "libsql")]
+fn hosted_secure_default_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Brokered,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::Standard,
+    }
+}
+
+#[cfg(feature = "libsql")]
 fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
@@ -1233,6 +1248,34 @@ async fn production_postgres_services_wire_first_party_runtime_http_egress() {
 
     let services =
         result.expect("production postgres services should build with a sandbox process binding");
+    assert_production_services_ready_with_first_party_runtime(&services).await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_libsql_secure_default_builds_without_process_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(hosted_secure_default_runtime_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await
+    .expect("secure_default production should not require a process port");
+
+    handle.shutdown().await;
+
     assert_production_services_ready_with_first_party_runtime(&services).await;
 }
 
