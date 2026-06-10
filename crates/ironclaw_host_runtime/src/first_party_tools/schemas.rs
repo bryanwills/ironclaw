@@ -219,6 +219,21 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {},
             "additionalProperties": false
         }),
+        "schemas/builtin/trace_commons-profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "display_handle": {
+                    "type": "string",
+                    "description": "Pseudonymous public display handle, 3-32 ASCII letters, digits, '-' or '_'"
+                },
+                "bio": {
+                    "type": "string",
+                    "description": "Optional short public bio, at most 280 bytes"
+                }
+            },
+            "required": ["display_handle"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {

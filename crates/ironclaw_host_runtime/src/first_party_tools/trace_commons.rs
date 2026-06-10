@@ -1,11 +1,12 @@
-//! First-party Trace Commons capabilities: onboard, status, credits, and profile token.
+//! First-party Trace Commons capabilities: onboard, status, credits, profile token, and profile set.
 //!
 //! `trace_commons.onboard` drives the operator-invite enrollment flow.
 //! `trace_commons.status` is a read-only policy inspector.
 //! `trace_commons.credits` is a read-only credit balance reporter.
 //! `trace_commons.profile_token` mints a short-lived public-attribution token.
+//! `trace_commons.profile_set` updates the public community profile directly.
 //!
-//! All four are model-visible.
+//! All five are model-visible.
 
 use std::{panic::AssertUnwindSafe, sync::Arc};
 
@@ -20,6 +21,7 @@ use ironclaw_host_api::{
 use ironclaw_reborn_traces::contribution::{
     ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
     TraceUploadAuthMode, mint_profile_attribution_token_for_scope, read_trace_policy_for_scope,
+    set_community_profile_for_scope,
 };
 use ironclaw_reborn_traces::onboarding::{
     OnboardConsents, OnboardError, OnboardHttpResponse, OnboardOutcome, OnboardingHttpSink,
@@ -46,6 +48,7 @@ pub const TRACE_COMMONS_ONBOARD_CAPABILITY_ID: &str = "builtin.trace_commons.onb
 pub const TRACE_COMMONS_STATUS_CAPABILITY_ID: &str = "builtin.trace_commons.status";
 pub const TRACE_COMMONS_CREDITS_CAPABILITY_ID: &str = "builtin.trace_commons.credits";
 pub const TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID: &str = "builtin.trace_commons.profile_token";
+pub const TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID: &str = "builtin.trace_commons.profile_set";
 
 // ── Manifest helpers ─────────────────────────────────────────────────────────
 
@@ -121,12 +124,41 @@ pub(super) fn profile_token_manifest() -> Result<CapabilityManifest, ExtensionEr
     )
 }
 
+pub(super) fn profile_set_manifest() -> Result<CapabilityManifest, ExtensionError> {
+    first_party_capability_manifest(
+        TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+        "Create or update the current user's public Trace Commons community profile. \
+         Use only after the user chooses a pseudonymous display handle and optional short bio. \
+         This is a separate public-profile opt-in and cannot submit traces.",
+        vec![
+            EffectKind::ReadFilesystem,
+            EffectKind::Network,
+            EffectKind::ExternalWrite,
+        ],
+        PermissionMode::Ask,
+        Some(ResourceProfile {
+            default_estimate: ResourceEstimate {
+                wall_clock_ms: Some(15_000),
+                output_bytes: Some(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
+                ..ResourceEstimate::default()
+            },
+            hard_ceiling: None,
+        }),
+    )
+}
+
 // ── Input parsing ─────────────────────────────────────────────────────────────
 
 struct OnboardToolInput {
     invite_url: String,
     consents: OnboardConsents,
     confirmed: bool,
+}
+
+#[derive(Debug)]
+struct ProfileSetToolInput {
+    display_handle: String,
+    bio: Option<String>,
 }
 
 fn parse_onboard_input(input: &Value) -> Result<OnboardToolInput, FirstPartyCapabilityError> {
@@ -156,6 +188,27 @@ fn parse_onboard_input(input: &Value) -> Result<OnboardToolInput, FirstPartyCapa
             include_tool_payloads,
         },
         confirmed,
+    })
+}
+
+fn parse_profile_set_input(
+    input: &Value,
+) -> Result<ProfileSetToolInput, FirstPartyCapabilityError> {
+    let display_handle = input
+        .get("display_handle")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|handle| !handle.is_empty())
+        .ok_or_else(input_error)?;
+    let bio = input
+        .get("bio")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|bio| !bio.is_empty())
+        .map(str::to_string);
+    Ok(ProfileSetToolInput {
+        display_handle: display_handle.to_string(),
+        bio,
     })
 }
 
@@ -513,6 +566,86 @@ fn profile_token_error_value(error: String) -> Value {
     })
 }
 
+// ── Profile set dispatch ─────────────────────────────────────────────────────
+
+pub(super) async fn dispatch_profile_set(
+    request: &FirstPartyCapabilityRequest,
+) -> Result<Value, FirstPartyCapabilityError> {
+    let input = parse_profile_set_input(&request.input)?;
+    let scope = request.scope.user_id.as_str().to_string();
+    match read_trace_policy_for_scope(Some(scope.as_str())) {
+        Ok(policy) if policy.enabled => {}
+        Ok(_) => {
+            return Ok(profile_set_error_value(
+                "not enrolled in Trace Commons".to_string(),
+            ));
+        }
+        Err(error) => return Ok(profile_set_error_value(error.to_string())),
+    }
+    match set_community_profile_for_scope(
+        Some(scope.as_str()),
+        &input.display_handle,
+        input.bio.as_deref(),
+    )
+    .await
+    {
+        Ok(()) => Ok(profile_set_success_value(&input)),
+        Err(error) => Ok(profile_set_error_value(error.to_string())),
+    }
+}
+
+fn profile_set_success_value(input: &ProfileSetToolInput) -> Value {
+    json!({
+        "updated": true,
+        "display_handle": input.display_handle.as_str(),
+        "bio": input.bio.as_deref(),
+        "profile_url": "https://tracecommons.ai/profile",
+        "message": "Your public Trace Commons profile handle is set. It may appear on the leaderboard after the next snapshot.",
+    })
+}
+
+fn profile_set_error_value(error: String) -> Value {
+    let (error_code, message) = if error.contains("not enrolled in Trace Commons")
+        || error.contains("could not read policy")
+    {
+        (
+            "NotEnrolled",
+            "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
+        )
+    } else if error.contains("community profile handle") || error.contains("community profile bio")
+    {
+        (
+            "InvalidProfile",
+            "Choose a pseudonymous handle 3-32 characters long using ASCII letters, digits, '-' or '_'. Bio must be at most 280 bytes.",
+        )
+    } else if error.contains("issuer URL is not configured") {
+        (
+            "IssuerNotConfigured",
+            "Trace Commons enrollment is missing the upload-claim issuer URL. Re-run onboarding with a fresh invite.",
+        )
+    } else if error.contains("device key") {
+        (
+            "DeviceKeyUnavailable",
+            "Trace Commons device-key state is incomplete. Re-run onboarding with a fresh invite.",
+        )
+    } else if error.contains("refused") || error.contains("rejected") {
+        (
+            "IssuerRefused",
+            "Trace Commons refused the public profile update. Ask the operator to check invite/device-key status.",
+        )
+    } else {
+        (
+            "ProfileSetFailed",
+            "Could not update the Trace Commons public profile. Check enrollment status and retry.",
+        )
+    };
+    json!({
+        "updated": false,
+        "error_code": error_code,
+        "message": message,
+    })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -838,11 +971,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_profile_set_input_trims_handle_and_optional_bio() {
+        let parsed = parse_profile_set_input(&json!({
+            "display_handle": "  pilot_zaki  ",
+            "bio": "  Repair loop enjoyer  "
+        }))
+        .unwrap();
+        assert_eq!(parsed.display_handle, "pilot_zaki");
+        assert_eq!(parsed.bio.as_deref(), Some("Repair loop enjoyer"));
+    }
+
+    #[test]
+    fn parse_profile_set_input_rejects_missing_handle() {
+        let error = parse_profile_set_input(&json!({"bio": "hello"})).unwrap_err();
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+    }
+
+    #[test]
+    fn profile_set_success_value_keeps_scope_boundary_visible() {
+        let input = ProfileSetToolInput {
+            display_handle: "pilot_zaki".to_string(),
+            bio: Some("Trace Commons pilot contributor".to_string()),
+        };
+        let v = profile_set_success_value(&input);
+        assert_eq!(v["updated"], json!(true));
+        assert_eq!(v["display_handle"], json!("pilot_zaki"));
+        assert_eq!(
+            v["bio"],
+            json!(Some("Trace Commons pilot contributor".to_string()))
+        );
+        assert_eq!(v["profile_url"], json!("https://tracecommons.ai/profile"));
+        assert!(
+            v["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("leaderboard"))
+        );
+    }
+
+    #[test]
+    fn profile_set_error_maps_validation_without_raw_error() {
+        let v = profile_set_error_value(
+            "community profile handle must be at least 3 characters".to_string(),
+        );
+        assert_eq!(v["updated"], json!(false));
+        assert_eq!(v["error_code"], json!("InvalidProfile"));
+        let serialized = serde_json::to_string(&v).unwrap();
+        assert!(
+            !serialized.contains("at least 3"),
+            "raw validation text should not be copied into model-visible output"
+        );
+    }
+
     #[tokio::test]
     async fn dispatch_profile_token_without_enrollment_returns_onboard_guidance() {
         let request = test_request(json!({}));
         let result = dispatch_profile_token(&request).await.unwrap();
         assert_eq!(result["minted"], json!(false));
+        assert_eq!(result["error_code"], json!("NotEnrolled"));
+        let message = result["message"].as_str().unwrap();
+        assert!(
+            message.contains("Onboard with the operator invite link first"),
+            "agent-visible guidance should direct the user to onboard first"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_profile_set_without_enrollment_returns_onboard_guidance() {
+        let request = test_request(json!({
+            "display_handle": "pilot_zaki",
+            "bio": "Trace Commons pilot contributor"
+        }));
+        let result = dispatch_profile_set(&request).await.unwrap();
+        assert_eq!(result["updated"], json!(false));
         assert_eq!(result["error_code"], json!("NotEnrolled"));
         let message = result["message"].as_str().unwrap();
         assert!(

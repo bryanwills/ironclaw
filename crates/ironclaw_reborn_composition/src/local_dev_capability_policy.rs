@@ -552,25 +552,25 @@ mod tests {
             assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
             assert_eq!(grant.network, LocalDevNetworkProfile::Default);
         }
-        let profile_token = policy
-            .grant(
-                &CapabilityId::new("builtin.trace_commons.profile_token").expect("capability id"),
-            )
-            .expect("trace_commons.profile_token grant");
-        assert_eq!(
-            profile_token.effects,
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::Network,
-                EffectKind::ExternalWrite,
-            ]
-        );
-        assert_eq!(profile_token.mounts, LocalDevMountProfile::Ambient);
-        assert_eq!(
-            profile_token.network,
-            LocalDevNetworkProfile::LocalDevWildcard
-        );
+        for capability in [
+            "builtin.trace_commons.profile_token",
+            "builtin.trace_commons.profile_set",
+        ] {
+            let grant = policy
+                .grant(&CapabilityId::new(capability).expect("capability id"))
+                .expect("trace_commons profile grant");
+            assert_eq!(
+                grant.effects,
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::Network,
+                    EffectKind::ExternalWrite,
+                ]
+            );
+            assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
+            assert_eq!(grant.network, LocalDevNetworkProfile::LocalDevWildcard);
+        }
     }
 
     #[test]
