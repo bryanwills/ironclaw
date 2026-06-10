@@ -10,6 +10,7 @@ import { RestartBanner } from "./components/restart-banner.js";
 import { SkillsTab } from "./components/skills-tab.js";
 import { SettingsToolbar } from "./components/settings-toolbar.js";
 import { ToolsTab } from "./components/tools-tab.js";
+import { TraceCommonsTab } from "./components/trace-commons-tab.js";
 import { UsersTab } from "./components/users-tab.js";
 import { useSettings } from "./hooks/useSettings.js";
 
@@ -64,6 +65,7 @@ export function SettingsPage() {
     />`,
     tools: html`<${ToolsTab} searchQuery=${searchQuery} />`,
     skills: html`<${SkillsTab} searchQuery=${searchQuery} />`,
+    traces: html`<${TraceCommonsTab} searchQuery=${searchQuery} />`,
     users: html`<${UsersTab} searchQuery=${searchQuery} />`,
     language: html`<${LanguageTab} searchQuery=${searchQuery} />`,
   };

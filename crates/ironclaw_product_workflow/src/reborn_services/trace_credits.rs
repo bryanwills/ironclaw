@@ -1,0 +1,161 @@
+//! Contributor-local Trace Commons credit projection for WebChat v2.
+//!
+//! The WebUI surface is read-only: it reports the caller-scoped local
+//! view of Trace Commons credit as of the last credit sync. The
+//! authoritative ledger lives server-side; nothing here mutates trace
+//! state or accepts a scope from request input — the trace scope is
+//! always derived from the authenticated caller's user id.
+
+use chrono::{DateTime, Utc};
+use ironclaw_reborn_traces::contribution::{
+    read_local_trace_records_for_scope, read_trace_policy_for_scope, trace_credit_report,
+};
+use serde::{Deserialize, Serialize};
+
+/// Server-authoritative framing returned with every credits response.
+/// Mirrors the note `builtin.trace_commons.credits` reports.
+pub(super) const TRACE_CREDITS_NOTE: &str = "Local view as of last sync; final credit can change \
+     after privacy review, replay/eval, duplicate checks, and downstream utility scoring. \
+     The authoritative ledger is server-side.";
+
+/// Read-only Trace Commons credit summary scoped to one user.
+///
+/// All aggregates are the contributor-local view as of the last credit
+/// sync (see [`TRACE_CREDITS_NOTE`]). A user with no local Trace
+/// Commons state gets the unenrolled zero-state, never an error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornTraceCreditsResponse {
+    /// Whether the caller's standing trace-contribution policy is enabled.
+    pub enrolled: bool,
+    pub pending_credit: f32,
+    pub final_credit: f32,
+    pub delayed_credit_delta: f32,
+    pub submissions_total: u32,
+    pub submissions_submitted: u32,
+    pub submissions_accepted: u32,
+    pub submissions_revoked: u32,
+    pub submissions_expired: u32,
+    pub credit_events_total: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_submission_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_credit_sync_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_explanations: Vec<String>,
+    /// Server-authoritative framing — always [`TRACE_CREDITS_NOTE`].
+    pub note: String,
+}
+
+/// Build the caller-scoped local Trace Commons credit view.
+///
+/// Missing or unreadable local state is the normal "not enrolled /
+/// nothing submitted yet" state and soft-falls back to the zero
+/// response — it is never surfaced as an error (mirrors the
+/// `builtin.trace_commons.credits` first-party capability).
+pub(super) fn local_trace_credits_for_user(user_id: &str) -> RebornTraceCreditsResponse {
+    let scope = Some(user_id);
+    let enrolled = match read_trace_policy_for_scope(scope) {
+        Ok(policy) => policy.enabled,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "failed to read Trace Commons policy for WebUI credits; treating as not enrolled"
+            );
+            false
+        }
+    };
+    let records = match read_local_trace_records_for_scope(scope) {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "failed to read local Trace Commons records for WebUI credits; treating as empty"
+            );
+            Vec::new()
+        }
+    };
+    let report = trace_credit_report(&records);
+    RebornTraceCreditsResponse {
+        enrolled,
+        pending_credit: report.pending_credit,
+        final_credit: report.final_credit,
+        delayed_credit_delta: report.delayed_credit_delta,
+        submissions_total: report.submissions_total,
+        submissions_submitted: report.submissions_submitted,
+        submissions_accepted: report.submissions_accepted,
+        submissions_revoked: report.submissions_revoked,
+        submissions_expired: report.submissions_expired,
+        credit_events_total: report.credit_events_total,
+        last_submission_at: report.last_submission_at,
+        last_credit_sync_at: report.last_credit_sync_at,
+        recent_explanations: report.explanation_lines,
+        note: TRACE_CREDITS_NOTE.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_reborn_traces::contribution::{
+        StandingTraceContributionPolicy, trace_contribution_dir_for_scope,
+        write_trace_policy_for_scope,
+    };
+
+    /// Removes the per-test trace scope directory on drop so failed
+    /// assertions don't leak state into the shared base dir.
+    struct ScopeCleanup(String);
+
+    impl Drop for ScopeCleanup {
+        fn drop(&mut self) {
+            let dir = trace_contribution_dir_for_scope(Some(self.0.as_str()));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    fn unique_scope(label: &str) -> String {
+        format!("{label}-{}", uuid::Uuid::new_v4())
+    }
+
+    #[test]
+    fn fresh_scope_yields_unenrolled_zero_state() {
+        let scope = unique_scope("pw-trace-credits-fresh");
+        let response = local_trace_credits_for_user(&scope);
+        assert!(!response.enrolled);
+        assert_eq!(response.submissions_total, 0);
+        assert_eq!(response.submissions_submitted, 0);
+        assert_eq!(response.credit_events_total, 0);
+        assert_eq!(response.pending_credit, 0.0);
+        assert_eq!(response.final_credit, 0.0);
+        assert_eq!(response.delayed_credit_delta, 0.0);
+        assert!(response.last_submission_at.is_none());
+        assert!(response.last_credit_sync_at.is_none());
+        // `trace_credit_report` always emits its summary lines, even
+        // for an empty record set.
+        assert!(
+            response
+                .recent_explanations
+                .iter()
+                .any(|line| line.contains("0 submitted trace(s)")),
+            "zero-state explanations should describe the empty record set: {:?}",
+            response.recent_explanations
+        );
+        assert_eq!(response.note, TRACE_CREDITS_NOTE);
+    }
+
+    #[test]
+    fn enabled_policy_reports_enrolled_with_zero_aggregates() {
+        let scope = unique_scope("pw-trace-credits-enrolled");
+        let _cleanup = ScopeCleanup(scope.clone());
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ..StandingTraceContributionPolicy::default()
+        };
+        write_trace_policy_for_scope(Some(scope.as_str()), &policy).expect("write policy");
+
+        let response = local_trace_credits_for_user(&scope);
+        assert!(response.enrolled);
+        assert_eq!(response.submissions_total, 0);
+        assert_eq!(response.pending_credit, 0.0);
+        assert_eq!(response.note, TRACE_CREDITS_NOTE);
+    }
+}

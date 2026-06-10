@@ -75,7 +75,7 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SET_ACTIVE_LLM, WEBUI_V2_ROUTE_SETUP_EXTENSION,
     WEBUI_V2_ROUTE_START_CODEX_LOGIN, WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
     WEBUI_V2_ROUTE_STREAM_EVENTS, WEBUI_V2_ROUTE_STREAM_EVENTS_WS,
-    WEBUI_V2_ROUTE_TEST_LLM_CONNECTION, WEBUI_V2_ROUTE_UPDATE_SKILL,
+    WEBUI_V2_ROUTE_TEST_LLM_CONNECTION, WEBUI_V2_ROUTE_TRACE_CREDITS, WEBUI_V2_ROUTE_UPDATE_SKILL,
     WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, is_webui_v2_operator_webui_config_route_id,
     webui_v2_routes,
 };
@@ -91,7 +91,8 @@ pub use handlers::{
     list_operator_config, list_skills, list_threads, query_operator_logs, remove_extension,
     remove_skill, resolve_gate, run_operator_service_lifecycle, run_operator_setup, search_skills,
     send_message, set_active_llm, setup_extension, start_codex_login, start_nearai_login,
-    stream_events, stream_events_ws, test_llm_connection, update_skill, upsert_llm_provider,
+    stream_events, stream_events_ws, test_llm_connection, trace_credits, update_skill,
+    upsert_llm_provider,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use router::{

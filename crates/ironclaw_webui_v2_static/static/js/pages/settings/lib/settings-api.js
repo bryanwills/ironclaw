@@ -117,6 +117,12 @@ export function removeSkill(name) {
     headers: { "X-Confirm-Action": "true" },
   });
 }
+// Trace Commons credits — read-only, scoped server-side to the
+// authenticated caller. The response is the contributor-local view as
+// of the last credit sync; the authoritative ledger is server-side.
+export function fetchTraceCredits() {
+  return apiFetch("/api/webchat/v2/traces/credit");
+}
 export function fetchUsers() {
   return Promise.resolve({ users: [], todo: true });
 }

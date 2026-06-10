@@ -178,8 +178,35 @@ registerPack("en", {
   "settings.networking": "Networking",
   "settings.tools": "Tools",
   "settings.skills": "Skills",
+  "settings.traceCommons": "Trace Commons",
   "settings.users": "Users",
   "settings.language": "Language",
+
+  // Settings — Trace Commons credits (read-only)
+  "traceCommons.title": "Trace Commons credits",
+  "traceCommons.description":
+    "Credit earned for contributed redacted traces, scoped to your account.",
+  "traceCommons.emptyState":
+    "Not enrolled — ask your agent to onboard with a Trace Commons invite.",
+  "traceCommons.loadFailed": "Could not load Trace Commons credits.",
+  "traceCommons.enrollment": "Enrollment",
+  "traceCommons.enrolled": "Enrolled",
+  "traceCommons.notEnrolled": "Not enrolled",
+  "traceCommons.pendingCredit": "Pending credit",
+  "traceCommons.pendingCreditDesc": "Earned but not yet finalized",
+  "traceCommons.finalCredit": "Final credit",
+  "traceCommons.finalCreditDesc": "Confirmed credit",
+  "traceCommons.delayedLedger": "Delayed ledger",
+  "traceCommons.delayedLedgerDesc": "Can still change after review",
+  "traceCommons.submissions": "Submissions",
+  "traceCommons.submissionsValue": "{submitted} submitted, {accepted} accepted of {total} total",
+  "traceCommons.lastSubmission": "Last submission",
+  "traceCommons.lastSync": "Last credit sync",
+  "traceCommons.lastSyncDesc": "Local view as of last sync",
+  "traceCommons.never": "never",
+  "traceCommons.recentExplanations": "Recent credit explanations",
+  "traceCommons.note":
+    "Local view as of last sync — the authoritative credit ledger is server-side. Final credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
 
   // Settings — toolbar
   "settings.back": "Back",

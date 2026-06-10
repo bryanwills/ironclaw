@@ -172,10 +172,10 @@ pub use reborn_services::{
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
-    SkillsProductFacade, StaticConnectableChannelsProductFacade,
-    UnsupportedAutomationProductFacade, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, SetActiveLlmRequest, SkillsProductFacade,
+    StaticConnectableChannelsProductFacade, UnsupportedAutomationProductFacade,
+    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
 };
 
 pub use webui_inbound::{

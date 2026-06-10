@@ -59,9 +59,12 @@ mod extension_setup_credentials;
 mod extensions;
 mod lifecycle_setup;
 mod llm_config;
+mod trace_credits;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
+pub use trace_credits::RebornTraceCreditsResponse;
+
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
@@ -488,6 +491,30 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
+
+    /// Read-only Trace Commons credit summary for the authenticated
+    /// caller.
+    ///
+    /// The trace scope derives from the caller's user id only — never
+    /// from request input. Missing or unreadable contributor-local
+    /// state is the normal "not enrolled / nothing submitted yet"
+    /// zero response, never an error. The aggregates are a local view
+    /// as of the last credit sync; the authoritative ledger is
+    /// server-side.
+    ///
+    /// The default body is the production implementation: every facade
+    /// reads the same caller-scoped contributor-local state through
+    /// `ironclaw_reborn_traces`, so impls (including test fakes) only
+    /// override this when they need a non-local credits source.
+    async fn trace_credits(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornTraceCreditsResponse, RebornServicesError> {
+        let actor = caller.actor();
+        Ok(trace_credits::local_trace_credits_for_user(
+            actor.user_id.as_str(),
+        ))
+    }
 
     async fn list_connectable_channels(
         &self,
