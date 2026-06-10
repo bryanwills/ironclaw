@@ -1387,11 +1387,20 @@ mod tests {
             .await
             .expect("setup record")
             .expect("stored setup");
-        assert_eq!(stored.bot_token_handle.as_str(), "slack_bot_token_v1");
-        assert_eq!(
-            stored.signing_secret_handle.as_str(),
-            "slack_signing_secret_v1"
+        assert!(
+            stored
+                .bot_token_handle
+                .as_str()
+                .starts_with("slack_bot_token_")
         );
+        assert!(stored.bot_token_handle.as_str().ends_with("_v1"));
+        assert!(
+            stored
+                .signing_secret_handle
+                .as_str()
+                .starts_with("slack_signing_secret_")
+        );
+        assert!(stored.signing_secret_handle.as_str().ends_with("_v1"));
 
         let get_response = mount
             .protected

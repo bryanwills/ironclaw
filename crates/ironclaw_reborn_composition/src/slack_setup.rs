@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ironclaw_common::hashing::sha256_hex;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
@@ -20,8 +21,9 @@ use tokio::sync::Mutex;
 
 use crate::slack_serve::{SlackApiAppId, SlackTeamId};
 
-const SLACK_BOT_TOKEN_HANDLE_PREFIX: &str = "slack_bot_token_v";
-const SLACK_SIGNING_SECRET_HANDLE_PREFIX: &str = "slack_signing_secret_v";
+const SLACK_BOT_TOKEN_HANDLE_PREFIX: &str = "slack_bot_token";
+const SLACK_SIGNING_SECRET_HANDLE_PREFIX: &str = "slack_signing_secret";
+const INSTALLATION_HANDLE_HASH_LEN: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SlackInstallationSetup {
@@ -275,7 +277,7 @@ impl SlackSetupService {
 
         let (bot_token_handle, pending_bot_token) = match update.bot_token {
             Some(secret) if !secret.expose_secret().is_empty() => {
-                (bot_token_handle(revision)?, Some(secret))
+                (bot_token_handle(&installation_id, revision)?, Some(secret))
             }
             _ => {
                 let previous =
@@ -284,9 +286,10 @@ impl SlackSetupService {
             }
         };
         let (signing_secret_handle, pending_signing_secret) = match update.signing_secret {
-            Some(secret) if !secret.expose_secret().is_empty() => {
-                (signing_secret_handle(revision)?, Some(secret))
-            }
+            Some(secret) if !secret.expose_secret().is_empty() => (
+                signing_secret_handle(&installation_id, revision)?,
+                Some(secret),
+            ),
             _ => {
                 let previous = previous.ok_or(SlackSetupError::MissingField {
                     field: "signing_secret",
@@ -345,15 +348,7 @@ impl SlackSetupService {
     }
 
     fn secret_scope(&self) -> ResourceScope {
-        ResourceScope {
-            tenant_id: self.tenant_id.clone(),
-            user_id: self.operator_user_id.clone(),
-            agent_id: Some(self.agent_id.clone()),
-            project_id: self.project_id.clone(),
-            mission_id: None,
-            thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
-        }
+        ResourceScope::system()
     }
 }
 
@@ -386,26 +381,147 @@ fn validate_optional_user(
         .transpose()
 }
 
-fn bot_token_handle(revision: u64) -> Result<SecretHandle, SlackSetupError> {
-    SecretHandle::new(format!("{SLACK_BOT_TOKEN_HANDLE_PREFIX}{revision}")).map_err(|reason| {
-        SlackSetupError::InvalidField {
+fn bot_token_handle(installation_id: &str, revision: u64) -> Result<SecretHandle, SlackSetupError> {
+    secret_handle_for_installation(SLACK_BOT_TOKEN_HANDLE_PREFIX, installation_id, revision)
+        .map_err(|reason| SlackSetupError::InvalidField {
             field: "bot_token",
             reason: reason.to_string(),
-        }
+        })
+}
+
+fn signing_secret_handle(
+    installation_id: &str,
+    revision: u64,
+) -> Result<SecretHandle, SlackSetupError> {
+    secret_handle_for_installation(
+        SLACK_SIGNING_SECRET_HANDLE_PREFIX,
+        installation_id,
+        revision,
+    )
+    .map_err(|reason| SlackSetupError::InvalidField {
+        field: "signing_secret",
+        reason: reason.to_string(),
     })
 }
 
-fn signing_secret_handle(revision: u64) -> Result<SecretHandle, SlackSetupError> {
-    SecretHandle::new(format!("{SLACK_SIGNING_SECRET_HANDLE_PREFIX}{revision}")).map_err(|reason| {
-        SlackSetupError::InvalidField {
-            field: "signing_secret",
-            reason: reason.to_string(),
-        }
-    })
+fn secret_handle_for_installation(
+    prefix: &str,
+    installation_id: &str,
+    revision: u64,
+) -> Result<SecretHandle, ironclaw_host_api::HostApiError> {
+    let digest = sha256_hex(installation_id.as_bytes());
+    SecretHandle::new(format!(
+        "{prefix}_{}_v{revision}",
+        &digest[..INSTALLATION_HANDLE_HASH_LEN]
+    ))
 }
 
 fn map_secret_error(error: SecretStoreError) -> SlackSetupError {
     SlackSetupError::SecretStoreUnavailable {
         reason: error.stable_reason(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::InvocationId;
+    use ironclaw_secrets::InMemorySecretStore;
+
+    #[derive(Debug, Default)]
+    struct MemorySetupStore {
+        setup: Mutex<Option<SlackInstallationSetup>>,
+    }
+
+    #[async_trait]
+    impl SlackInstallationSetupStore for MemorySetupStore {
+        async fn get_slack_installation_setup(
+            &self,
+        ) -> Result<Option<SlackInstallationSetup>, SlackSetupError> {
+            Ok(self.setup.lock().await.clone())
+        }
+
+        async fn put_slack_installation_setup(
+            &self,
+            setup: &SlackInstallationSetup,
+        ) -> Result<(), SlackSetupError> {
+            *self.setup.lock().await = Some(setup.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn save_stores_slack_credentials_in_system_scope_only() {
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            secret_store.clone(),
+        );
+
+        let setup = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-secret")),
+                signing_secret: Some(SecretString::from("slack-signing-secret")),
+            })
+            .await
+            .expect("save setup");
+
+        assert!(
+            setup
+                .bot_token_handle
+                .as_str()
+                .starts_with("slack_bot_token_")
+        );
+        assert!(setup.bot_token_handle.as_str().ends_with("_v1"));
+        assert!(!setup.bot_token_handle.as_str().contains("install_runtime"));
+        assert!(
+            setup
+                .signing_secret_handle
+                .as_str()
+                .starts_with("slack_signing_secret_")
+        );
+        assert!(setup.signing_secret_handle.as_str().ends_with("_v1"));
+        assert!(
+            !setup
+                .signing_secret_handle
+                .as_str()
+                .contains("install_runtime")
+        );
+
+        let operator_runtime_scope = ResourceScope {
+            tenant_id: service.tenant_id().clone(),
+            user_id: UserId::new("user:operator").expect("user"),
+            agent_id: Some(service.agent_id().clone()),
+            project_id: service.project_id().cloned(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        assert!(
+            secret_store
+                .metadata(&operator_runtime_scope, &setup.bot_token_handle)
+                .await
+                .expect("operator metadata")
+                .is_none()
+        );
+        assert!(
+            secret_store
+                .metadata(&ResourceScope::system(), &setup.bot_token_handle)
+                .await
+                .expect("system metadata")
+                .is_some()
+        );
+
+        let bot_token = service.bot_token(&setup).await.expect("bot token");
+        assert_eq!(bot_token.expose_secret(), "xoxb-secret");
     }
 }
