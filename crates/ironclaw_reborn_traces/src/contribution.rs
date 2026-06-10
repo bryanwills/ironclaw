@@ -5331,7 +5331,7 @@ async fn mint_profile_attribution_token_with_policy(
 
 /// Create or update the public community profile for this scope. Mints a
 /// fresh profile-attribution token and PUTs the profile to the Trace Commons
-/// community endpoint derived from the policy's issuer URL.
+/// community endpoint derived from the policy's ingest URL.
 pub async fn set_community_profile_for_scope(
     scope: Option<&str>,
     display_handle: &str,
@@ -5377,26 +5377,55 @@ pub async fn withdraw_community_profile_for_scope(scope: Option<&str>) -> anyhow
     .await
 }
 
-/// Derive the community-profile endpoint from the policy's upload-claim
-/// issuer URL, keeping scheme/host/port and replacing only the path. The
-/// derived URL inherits the issuer-host hardening (https, allowlisted host,
-/// no embedded credentials/query/fragment).
+/// Derive the community-profile endpoint from the policy's ingest endpoint,
+/// keeping scheme/host/port and replacing only the path. Profile writes are
+/// handled by ingest, while upload-claim minting remains issuer-owned.
 fn community_profile_url_from_policy(
     policy: &StandingTraceContributionPolicy,
 ) -> anyhow::Result<reqwest::Url> {
-    let issuer_url = policy
-        .upload_token_issuer_url
+    let ingest_url = policy
+        .ingestion_endpoint
         .as_deref()
         .map(str::trim)
         .filter(|url| !url.is_empty())
         .ok_or_else(|| {
-            anyhow::anyhow!("Trace Commons upload token issuer URL is not configured")
+            anyhow::anyhow!("Trace Commons ingest endpoint is not configured; re-run onboarding")
         })?;
     let mut url =
-        reqwest::Url::parse(issuer_url).context("invalid Trace Commons upload token issuer URL")?;
-    validate_trace_upload_claim_issuer_url(&url, &policy.upload_token_issuer_allowed_hosts)?;
+        reqwest::Url::parse(ingest_url).context("invalid Trace Commons ingest endpoint")?;
+    validate_trace_commons_ingest_url(&url)?;
     url.set_path(COMMUNITY_PROFILE_PATH);
     Ok(url)
+}
+
+fn validate_trace_commons_ingest_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        url.scheme() == "https",
+        "Trace Commons ingest endpoint must use https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "Trace Commons ingest endpoint must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "Trace Commons ingest endpoint must not include query strings or fragments"
+    );
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow::anyhow!("Trace Commons ingest endpoint requires a host"))?;
+    anyhow::ensure!(
+        !is_internal_trace_upload_claim_issuer_hostname(&host),
+        "Trace Commons ingest endpoint must not use localhost or internal hostnames"
+    );
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        anyhow::ensure!(
+            !is_disallowed_trace_upload_claim_issuer_ip(ip),
+            "Trace Commons ingest endpoint must not use private, local, or reserved IP addresses"
+        );
+    }
+    Ok(())
 }
 
 fn validate_community_profile_handle(handle: &str) -> anyhow::Result<String> {
@@ -5428,7 +5457,7 @@ fn validate_community_profile_bio(bio: &str) -> anyhow::Result<()> {
 }
 
 /// Build the hardened HTTP client for community-profile requests: pinned DNS
-/// resolution against the validated issuer host, bounded timeouts, and no
+/// resolution against the validated ingest host, bounded timeouts, and no
 /// redirect following — mirroring `fetch_trace_upload_claim_from_issuer`.
 async fn community_profile_http_client(
     policy: &StandingTraceContributionPolicy,
@@ -13007,10 +13036,11 @@ mod tests {
     }
 
     #[test]
-    fn community_profile_url_derives_from_issuer_url() {
+    fn community_profile_url_derives_from_ingest_url() {
         let policy = StandingTraceContributionPolicy {
+            ingestion_endpoint: Some("https://ingest.example.com:8443/v1/traces".to_string()),
             upload_token_issuer_url: Some(
-                "https://issuer.example.com:8443/v1/trace-upload-claim".to_string(),
+                "https://issuer.example.com/v1/trace-upload-claim".to_string(),
             ),
             upload_token_issuer_allowed_hosts: BTreeSet::from(["issuer.example.com".to_string()]),
             ..Default::default()
@@ -13018,29 +13048,41 @@ mod tests {
         let url = community_profile_url_from_policy(&policy).expect("profile URL derives");
         assert_eq!(
             url.as_str(),
-            "https://issuer.example.com:8443/v1/community/profile",
+            "https://ingest.example.com:8443/v1/community/profile",
             "scheme/host/port preserved, path replaced"
         );
 
-        // Issuer-host hardening is inherited: non-allowlisted host rejected.
-        let unlisted = StandingTraceContributionPolicy {
+        // Profile routing must not depend on issuer host compatibility.
+        let split_hosts = StandingTraceContributionPolicy {
+            ingestion_endpoint: Some("https://ingest.tracecommons.ai/v1/traces".to_string()),
             upload_token_issuer_url: Some(
-                "https://evil.example.com/v1/trace-upload-claim".to_string(),
+                "https://issuer.tracecommons.ai/v1/trace-upload-claim".to_string(),
             ),
-            upload_token_issuer_allowed_hosts: BTreeSet::from(["issuer.example.com".to_string()]),
+            upload_token_issuer_allowed_hosts: BTreeSet::from([
+                "issuer.tracecommons.ai".to_string()
+            ]),
             ..Default::default()
         };
-        assert!(community_profile_url_from_policy(&unlisted).is_err());
+        let split_url =
+            community_profile_url_from_policy(&split_hosts).expect("split hosts derive");
+        assert_eq!(
+            split_url.as_str(),
+            "https://ingest.tracecommons.ai/v1/community/profile"
+        );
 
-        // And plain http rejected.
+        // Plain HTTP ingest endpoints are rejected.
         let insecure = StandingTraceContributionPolicy {
-            upload_token_issuer_url: Some(
-                "http://issuer.example.com/v1/trace-upload-claim".to_string(),
-            ),
-            upload_token_issuer_allowed_hosts: BTreeSet::from(["issuer.example.com".to_string()]),
+            ingestion_endpoint: Some("http://ingest.example.com/v1/traces".to_string()),
             ..Default::default()
         };
         assert!(community_profile_url_from_policy(&insecure).is_err());
+
+        // Internal ingest hosts are rejected.
+        let internal = StandingTraceContributionPolicy {
+            ingestion_endpoint: Some("https://localhost/v1/traces".to_string()),
+            ..Default::default()
+        };
+        assert!(community_profile_url_from_policy(&internal).is_err());
     }
 
     #[tokio::test]

@@ -104,9 +104,10 @@ pub(super) fn profile_token_manifest() -> Result<CapabilityManifest, ExtensionEr
     first_party_capability_manifest(
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         "Mint a short-lived Trace Commons profile-management value for the current user. \
-         Use when the user asks for the attribution or profile value needed by the \
-         community profile page. The returned field can be pasted into the page and \
-         is scoped only to community profile management; it cannot submit traces.",
+         Prefer trace_commons.profile_set when the user wants to create or update \
+         their public profile from the agent. Use this token only for browser/manual \
+         profile setup. It is scoped only to community profile management; it cannot \
+         submit traces.",
         vec![
             EffectKind::ReadFilesystem,
             EffectKind::Network,
@@ -352,9 +353,10 @@ fn onboard_success_value(outcome: &OnboardOutcome, consents: &OnboardConsents) -
         },
         "next_steps": "Traces are redacted locally and queued; submission requires meeting \
     the score threshold. Optional second opt-in: to appear on the public community \
-    leaderboard, run 'ironclaw-reborn traces profile set --handle <pseudonymous-handle>' \
-    (or 'traces profile token' to mint a paste-able token for the web profile page). \
-    The browser cannot sign device-key requests — the token must be minted by IronClaw. \
+    leaderboard, choose a pseudonymous handle and ask the agent to set your public \
+    Trace Commons profile, or run 'ironclaw-reborn traces profile set --handle \
+    <pseudonymous-handle>'. Browser/manual profile setup can still use \
+    'traces profile token'. \
     Opt out anytime with 'ironclaw traces opt-out'."
     });
     // Navigation hints are optional and only included when present (and HTTPS).
@@ -525,8 +527,9 @@ fn format_profile_token(token: &ProfileAttributionToken) -> Value {
         "consent_scope": "public_attribution",
         "allowed_uses": [],
         "profile_url": "https://tracecommons.ai/profile",
-        "message": "Paste access_token exactly as shown into https://tracecommons.ai/profile. \
-    Do not add a Bearer prefix. This token is short-lived and only authorizes public profile management."
+        "message": "Prefer asking the agent to set your public profile directly with a pseudonymous handle. \
+    For browser/manual setup only, paste access_token exactly as shown into https://tracecommons.ai/profile \
+    without adding a Bearer prefix. This token is short-lived and only authorizes public profile management."
     })
 }
 
@@ -953,8 +956,12 @@ mod tests {
         assert_eq!(v["profile_url"], json!("https://tracecommons.ai/profile"));
         let message = v["message"].as_str().unwrap();
         assert!(
-            message.contains("Do not add a Bearer prefix"),
-            "message must tell users to paste the raw token"
+            message.contains("agent to set your public profile directly"),
+            "message must prefer direct agent profile setup"
+        );
+        assert!(
+            message.contains("without adding a Bearer prefix"),
+            "message must still preserve the browser/manual token fallback"
         );
     }
 
