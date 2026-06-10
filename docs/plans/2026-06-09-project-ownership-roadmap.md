@@ -293,6 +293,14 @@ These ship against the companion plan and consume the phases above:
   pagination; if that shows up in practice, the fix is a project-scoped
   route-store query mirroring the subject-scoped one added for personal
   listing.
+- Approval-reply CX follow-ups (first iteration is `approve <gate_ref>`
+  only, decided 2026-06-09): (a) hybrid bare yes/no — when exactly one
+  gate is pending for the replying user, accept `yes`/`approve`/`no`/
+  `deny` without a ref; two or more pending answers with a disambiguation
+  prompt listing the refs. (b) `always` as a separate verb: approves the
+  current gate and persists a revocable allow rule scoped to that
+  automation/action (maps onto `ApprovalRequirement`), surfaced in
+  settings; the confirmation must name the scope of the standing grant.
 
 ## Out of scope
 
