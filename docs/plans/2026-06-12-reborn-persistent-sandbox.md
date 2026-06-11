@@ -87,7 +87,7 @@ typosquatted packages). The system stays secure anyway because:
 
 | # | Invariant | Enforced where |
 |---|-----------|----------------|
-| I1 | The environment has no ambient network. Its only egress is the host broker, which enforces a per-profile domain allowlist and injects credentials itself. | `RebornSandboxConfig::container_network_mode()` (`network_mode: none` unless broker requires docker networking) + Phase 3 broker server |
+| I1 | The environment has no ambient network. Its only egress is the host broker: a CONNECT-only allowlist tunnel that carries no credential machinery. Credentialed API calls happen host-side via first-party capabilities. | `RebornSandboxConfig::container_network_mode()` (`network_mode: none` unless broker requires docker networking) + Phase 3 broker server |
 | I2 | Raw secret material never enters the environment. Credential use is staged-obligation injection performed host-side at the egress boundary. | `egress/credential.rs` `StagedObligation`-only production path; `RebornSandboxSecretBroker` exposes an endpoint, never values (`sandbox_process.rs` tests `secret_broker_exposes_endpoint_without_secret_material`) |
 | I3 | The host↔sandbox surface is minimal and typed: the command request/response (`CommandExecutionRequest`/`CommandExecutionOutput`), the scoped workspace mount, and the broker sockets. Everything crossing host-ward is untrusted input. | `SandboxCommandTransport` trait (`process_port.rs:115`); mount validation in `sandbox_process/mounts.rs`; output capping in `collect_logs` |
 | I4 | Nothing acquires privilege by virtue of originating in the sandbox. Artifacts cross the promotion gate (hash → validate → manifest → user-trust install → human capability approval) exactly like third-party registry installs. | Phase 4 pipeline |
@@ -105,7 +105,11 @@ removing them.
    per-scope Docker named volume mounted at `/home/agent`. Containers remain
    replaceable (per-command in Phase 2a, warm-with-idle-reap in Phase 2b). This is the
    shape that ports to microVMs (persistent disk + ephemeral VM) and lets the base
-   image be upgraded without losing installed tools.
+   image be upgraded without losing installed tools. Disposability is also the
+   enforcement mechanism: timeouts and runaway processes are handled by killing the
+   environment, never by in-environment process management.
+   The 2a→2b transition is an internal provider swap with **no configuration
+   surface** — persistence is one user-visible behavior, not a mode enum.
 2. **Read-only rootfs stays; installs are user-space.** The agent installs into
    `$HOME` (`~/.local/bin`, `~/.cargo`, `~/.npm-global`, nvm-style node installs), not
    `/usr`. The base image ships common toolchains (node LTS, python3+uv, rust, git,
@@ -161,8 +165,8 @@ first_party_tools/shell.rs                             ├─ /home/agent  ← n
                                                        └─ network: none
 egress broker server (Phase 3)  ◄── unix socket ─────────  http(s)_proxy → broker socket
   ├─ domain allowlist (per NetworkMode profile)
-  ├─ staged-obligation credential injection
-  └─ composes ironclaw_network egress pipeline
+  ├─ CONNECT-only TCP splice (no MITM, no credentials)
+  └─ composes ironclaw_network resolver/SSRF filtering
 
 promotion gate (Phase 4)
   artifact in /workspace → hash → wasm validate →
@@ -288,77 +292,11 @@ clear reason.
 
 ## Phase 2 — Persistent per-scope environment
 
-### 2a — Persistent home volume (the 90% win, minimal diff)
+### The lifecycle seam: `SandboxEnvironmentProvider`
 
-Keep per-command containers. Add a per-scope named volume mounted at `/home/agent`.
-Installed CLIs persist because they live in `$HOME`; container lifecycle is unchanged.
-
-**`sandbox_process/scope_key.rs`** — extend `RebornSandboxScopeKey` with:
-
-```rust
-/// Docker named-volume identity for this scope's persistent home.
-/// Same sanitized identity material as container_name_prefix(); volumes
-/// and containers must never diverge on scope derivation (invariant I5).
-pub fn home_volume_name(&self) -> String {
-    format!("ironclaw-reborn-home-{}", self.identity_slug())
-}
-```
-
-(Refactor the existing `container_name_prefix()` internals into a shared
-`identity_slug()` so both call one sanitizer.)
-
-**`sandbox_process.rs`** — config + launch changes:
-
-```rust
-pub struct RebornSandboxConfig {
-    // ...existing...
-    /// Mount a per-scope named volume at /home/agent and run commands with
-    /// HOME=/home/agent. Off = current stateless behavior.
-    persistent_home: bool,
-    /// Hard ceiling for pids inside the container (always applied).
-    pids_limit: i64,             // default 512
-    /// Soft disk ceiling for the home volume, enforced by pre-flight check.
-    home_disk_limit_bytes: u64,  // default 10 GiB
-}
-```
-
-In `container_launch_config`:
-
-- `binds.push(format!("{}:/home/agent:rw", self.config.home_volume_for(scope)))` —
-  Docker auto-creates named volumes on first use; no explicit create call needed.
-- `host_config.pids_limit = Some(self.config.pids_limit)` (do this even for
-  non-persistent mode; it's a strict improvement).
-- env: `HOME=/home/agent`, and a `PATH` that prepends
-  `/home/agent/.local/bin:/home/agent/.npm-global/bin:/home/agent/.cargo/bin`.
-  These names are reserved like the broker env keys — extend the
-  `RESERVED_BROKER_ENV_KEYS` rejection pattern (`broker.rs`) so `extra_env`
-  cannot override `HOME`/`PATH`.
-
-**Disk ceiling.** Named volumes have no native quota on the default `local` driver.
-Enforce at the transport: before each command (cheap) or every N commands, run a
-metering exec (`du -sb /home/agent`) and refuse new commands with a typed
-`RuntimeProcessError::ExecutionFailed("sandbox home over disk limit …")` once the
-ceiling is crossed, instructing cleanup. This is honest soft enforcement; hosted GA
-hardening (xfs project quotas or a quota-capable volume driver) is recorded as an open
-item, not silently assumed.
-
-**Base image.** Extend the worker image (`crates/Dockerfile.sandbox` lineage) with:
-node LTS + npm configured for `~/.npm-global`, python3 + uv, rust toolchain, git,
-ripgrep, build-essential, `agent` user (uid 1000) with writable-volume `$HOME`.
-Default `container_user` becomes `1000:1000` with
-`RebornSandboxWorkspaceMode::Private` when `persistent_home` is on.
-
-**Volume lifecycle.** Volumes are created lazily and deleted only on explicit scope
-teardown (project deletion). Add `RebornScopedSandboxCommandTransport::remove_scope_environment(scope)`
-for the product-level deletion flow to call. Never reap volumes on a timer — they are
-the persistence.
-
-### 2b — Warm containers with exec (latency + intra-run processes)
-
-Motivation: per-command container create/start costs 100–500 ms and kills any
-background process between commands (`npm run dev &` then `curl localhost` as two tool
-calls cannot work). 2b runs one long-lived container per scope and `docker exec`s
-commands into it.
+The lifecycle abstraction is introduced at the *start* of Phase 2, not as a 2b
+afterthought — both sub-phases are providers behind it, and future backends
+(SmolVM/SRT) implement it instead of `SandboxCommandTransport` directly.
 
 New module `sandbox_process/environment.rs`:
 
@@ -396,6 +334,101 @@ impl<P: SandboxEnvironmentProvider> SandboxCommandTransport
 }
 ```
 
+**Provider selection is internal to composition — there is no environment-mode
+config.** 2a ships a per-command provider (each `acquire` creates a container, each
+`exec` runs and removes it — current transport behavior restated as a provider,
+plus the volume); 2b swaps a warm-container provider in underneath once it soaks.
+Policy, config, tools, and the conformance suite see one behavior ("persistent
+sandbox environment") throughout. Rationale: 2a-vs-2b is rollout sequencing, not a
+user-meaningful choice; a wire-stable mode enum would be permanent (aliases,
+migration tests, a doubled test matrix) for a distinction we intend to delete.
+
+### 2a — Persistent home volume + ceilings
+
+**Step 0 — decompose first.** `sandbox_process.rs` is at 945 lines and these
+changes would push it past 1,000. Before adding anything: move the Docker
+transport impl into `sandbox_process/transport.rs`, leaving `sandbox_process.rs`
+as config + module wiring + re-exports (it already has `broker`/`mounts`/
+`scope_key` submodules; this completes the pattern).
+
+Then: add a per-scope named volume mounted at `/home/agent`. Installed CLIs persist
+because they live in `$HOME`; container lifecycle is unchanged.
+
+**`sandbox_process/scope_key.rs`** — extend `RebornSandboxScopeKey` with:
+
+```rust
+/// Docker named-volume identity for this scope's persistent home.
+/// Same sanitized identity material as container_name_prefix(); volumes
+/// and containers must never diverge on scope derivation (invariant I5).
+pub fn home_volume_name(&self) -> String {
+    format!("ironclaw-reborn-home-{}", self.identity_slug())
+}
+```
+
+(Refactor the existing `container_name_prefix()` internals into a shared
+`identity_slug()` so both call one sanitizer.)
+
+**`sandbox_process.rs`** — config + launch changes:
+
+```rust
+pub struct RebornSandboxConfig {
+    // ...existing...
+    /// Mount a per-scope named volume at /home/agent and run commands with
+    /// HOME=/home/agent. Off = current stateless behavior.
+    persistent_home: bool,
+    /// Hard ceiling for pids inside the container (always applied).
+    pids_limit: i64,             // default 512
+    /// Soft disk ceiling for the home volume, metered host-side.
+    home_disk_limit_bytes: u64,  // default 10 GiB
+}
+```
+
+In `container_launch_config`:
+
+- `binds.push(format!("{}:/home/agent:rw", self.config.home_volume_for(scope)))` —
+  Docker auto-creates named volumes on first use; no explicit create call needed.
+- `host_config.pids_limit = Some(self.config.pids_limit)` (do this even for
+  non-persistent mode; it's a strict improvement).
+- env: `HOME=/home/agent`, and a `PATH` that prepends
+  `/home/agent/.local/bin:/home/agent/.npm-global/bin:/home/agent/.cargo/bin`.
+  These names are reserved like the broker env keys — extend the
+  `RESERVED_BROKER_ENV_KEYS` rejection pattern (`broker.rs`) so `extra_env`
+  cannot override `HOME`/`PATH`.
+
+**Disk ceiling — metered host-side, never in-container.** Named volumes have no
+native quota on the default `local` driver. The volume's contents live on the host
+(`docker volume inspect` → `Mountpoint`); a periodic host-side task (tokio interval
+owned by the environment provider, alongside the 2b reaper) walks the mountpoint and
+records usage per scope. Once over the ceiling, the provider refuses new commands
+with a typed `RuntimeProcessError::ExecutionFailed("sandbox home over disk limit …")`
+instructing cleanup. Two things this deliberately avoids: (a) per-command metering
+latency — walking a multi-GiB `node_modules` tree is seconds of I/O, not a cheap
+pre-flight; (b) **trusting the prisoner** — an in-container `du` exec would resolve
+through the agent-controlled `PATH` (which prepends `~/.local/bin`), so a shadowed
+`du` defeats the ceiling. Enforcement data must never originate inside the
+assumed-compromised environment. This is honest soft enforcement; hosted GA
+hardening (xfs project quotas or a quota-capable volume driver) is recorded as an open
+item, not silently assumed.
+
+**Base image.** Extend the worker image (`crates/Dockerfile.sandbox` lineage) with:
+node LTS + npm configured for `~/.npm-global`, python3 + uv, rust toolchain, git,
+ripgrep, build-essential, `agent` user (uid 1000) with writable-volume `$HOME`.
+Default `container_user` becomes `1000:1000` with
+`RebornSandboxWorkspaceMode::Private` when `persistent_home` is on.
+
+**Volume lifecycle.** Volumes are created lazily and deleted only on explicit scope
+teardown (project deletion). Add `RebornScopedSandboxCommandTransport::remove_scope_environment(scope)`
+for the product-level deletion flow to call. Never reap volumes on a timer — they are
+the persistence.
+
+### 2b — Warm containers with exec (latency + intra-run processes)
+
+Motivation: per-command container create/start costs 100–500 ms and kills any
+background process between commands (`npm run dev &` then `curl localhost` as two tool
+calls cannot work). 2b runs one long-lived container per scope and `docker exec`s
+commands into it — a second `SandboxEnvironmentProvider` impl that composition swaps
+in for the 2a per-command provider.
+
 Docker implementation notes:
 
 - Container entrypoint: `sleep infinity` (image has no tini requirement; exec'd
@@ -410,19 +443,29 @@ Docker implementation notes:
   `acquire`-on-demand).
 - `exec`: `create_exec` with per-command env (broker vars, `extra_env` re-validated),
   workdir resolution reusing `resolve_container_workdir`, stream capped output
-  reusing `append_with_limit`, enforce `timeout_secs` by killing the exec'd process
-  group on expiry (exec `sh -c` wrapped command with `setsid`; on timeout, exec a
-  `pkill -g` against its pgid — Docker has no native exec-kill, this must be explicit,
-  matching the `SandboxCommandTransport` doc contract at `process_port.rs:111-113`).
+  reusing `append_with_limit`.
+- **Timeout = restart the container, never in-container process management.** Docker
+  has no native exec-kill, and any in-container mechanism (`setsid` + `pkill` on a
+  process group) is enforcement tooling running inside the assumed-compromised
+  environment with an agent-controlled `PATH` — a shadowed `pkill` defeats it. On
+  `timeout_secs` expiry the provider issues `docker restart` (host-side, certain):
+  the whole process tree dies, the home volume persists, the next `acquire` finds the
+  container running again in hundreds of milliseconds. This satisfies the
+  `SandboxCommandTransport` cleanup contract (`process_port.rs:111-113`), is locked
+  decision 1 applied ("compute is disposable"), and ports to microVMs as "kill the
+  VM" — which a pgid trick does not. Cost: a timeout also kills unrelated background
+  processes in the same environment; acceptable, since a scope that times out is
+  misbehaving by definition.
 - `reap_idle`: tokio interval task started by the composition factory; `docker stop`
   (not remove) idle containers. Stopped containers restart in ~hundreds of ms on next
   acquire; background processes are documented to live only within the idle window.
 - Concurrency: per-scope `tokio::sync::Mutex` around acquire (two simultaneous tool
   calls must not race create); execs themselves run concurrently.
 
-Rollout: 2a and 2b ship behind one config knob —
-`sandbox.environment_mode: "per_command" | "persistent"` (enum, wire-stable
-snake_case per types rule), defaulting to `per_command` until 2b soaks.
+Rollout: composition constructs the per-command provider until 2b soaks, then the
+warm provider — an internal swap with no config migration, no wire-stable enum, and
+one conformance suite (written against `dyn SandboxEnvironmentProvider`) covering
+whichever provider is live.
 
 ### Phase 2 tests
 
@@ -431,11 +474,13 @@ snake_case per types rule), defaulting to `per_command` until 2b soaks.
   collision `sandbox_process.rs`'s module doc warns about).
 - Reserved-env tests: `extra_env` cannot override `HOME`/`PATH` (extend the
   `broker_env_rejects_all_reserved_user_overrides` pattern).
-- Docker-gated integration: (1) `npm config set prefix` + `npm install -g` in one
-  command, binary runnable from a *separate* command; (2) state survives
-  `reap_idle` + reacquire; (3) two scopes cannot read each other's home;
-  (4) pids/disk ceilings actually refuse work; (5) timeout kills an exec'd
-  process group.
+- Docker-gated integration (written against `dyn SandboxEnvironmentProvider` so any
+  provider — and any future backend — inherits them): (1) `npm config set prefix` +
+  `npm install -g` in one command, binary runnable from a *separate* command;
+  (2) state survives `reap_idle` + reacquire; (3) two scopes cannot read each
+  other's home; (4) pids ceiling refuses work; host-side disk metering flips a
+  scope to refusing once over the ceiling; (5) timeout restarts the environment
+  and the next command still finds the home volume intact.
 
 **Exit criteria:** a hosted agent can `npm i -g @some/cli` in one turn and use the CLI
 in a later run after a host restart, inside a container that still has read-only
@@ -451,45 +496,45 @@ profiles that make package installation possible without granting open network.
 
 ### 3.1 Broker server (`crates/ironclaw_host_runtime/src/sandbox_broker/`)
 
-Per the host_runtime guardrails: compose `ironclaw_network`, don't duplicate URL
-parsing/DNS/private-IP filtering. New module:
+**The broker is CONNECT-only.** It tunnels TLS to allowlisted hosts and does nothing
+else: no plain-HTTP forwarding, no credential resolution, no dependency on the
+`egress/` pipeline or the obligations store. Rationale: every supported package
+registry is HTTPS, and credentialed API calls from inside the sandbox are not the
+model — the agent calls credentialed APIs via the first-party `http` capability on
+the host, where staged-obligation injection applies (I2). Keeping the broker
+credential-free means a compromise of the broker process yields a domain-allowlisted
+TCP splicer, not a secret-bearing pipeline. It also avoids building a second
+HTTP-forwarding/injection proxy alongside the v1 `src/sandbox/proxy/` (architecture
+rule: no duplicate dispatch pipelines) — the only shared concept left is allowlist
+matching, which moves to its canonical home (3.2).
 
 ```
 sandbox_broker/
-├── mod.rs        # SandboxEgressBroker: bind unix socket, axum/hyper service
-├── connect.rs    # HTTP CONNECT handling (TLS passthrough for allowed hosts)
-├── forward.rs    # Plain HTTP forwarding for non-TLS (redirect to https where possible)
+├── mod.rs        # SandboxEgressBroker: per-scope unix listeners, task lifecycle
+├── connect.rs    # HTTP CONNECT handling: policy check → TCP splice (no MITM)
 └── policy.rs     # SandboxEgressPolicy: domain allowlist per NetworkMode profile
 ```
 
 Design points:
 
-- **Listener**: one unix socket per Reborn instance (not per scope),
-  `<data_dir>/sandbox/broker.sock`, bind-mounted via the existing
-  `with_network_broker_unix_socket` path — this keeps `network_mode: none` on the
-  container (the socket is the only hole, see existing test
+- **Listener: one unix socket per scope**, `<data_dir>/sandbox/broker/<slug>.sock`,
+  created at `SandboxEnvironmentProvider::acquire` and bind-mounted via the existing
+  `with_network_broker_unix_socket` path. The listener's identity *is* the scope —
+  no in-container token, nothing to steal, and `network_mode: none` is preserved on
+  the container (the socket is the only hole; see existing test
   `unix_socket_network_broker_preserves_none_network_mode_and_mounts_socket`).
-- **Scope attribution**: the broker must know which scope a connection belongs to
-  (per-scope policy, audit). With a shared socket, pass scope identity per container
-  via a reserved env var `IRONCLAW_REBORN_SCOPE_TOKEN` holding an opaque
-  per-environment token minted at `acquire` time and mapped host-side to the
-  `ResourceScope`; the in-container proxy client (standard `http_proxy` semantics
-  can't add headers, so:) — **simpler locked choice**: one socket *per scope*,
-  `<data_dir>/sandbox/broker/<slug>.sock`, created at `acquire`, so the listener
-  itself knows the scope. No in-container token, nothing to steal.
-- **CONNECT semantics**: for `CONNECT host:443`, consult
+  Rejected alternative: a single shared socket with a per-environment scope token in
+  env — adds a stealable credential and host-side token bookkeeping for no gain.
+  Socket files are removed when the environment is reaped/removed.
+- **CONNECT semantics**: for `CONNECT host:port`, consult
   `SandboxEgressPolicy::decide(scope, host, port)`; on allow, splice a TCP tunnel
-  (TLS terminates at the destination — the broker does not MITM). DNS resolution and
-  private-IP/SSRF filtering go through `ironclaw_network`'s resolver/url_target
-  primitives so the sandbox cannot reach link-local/RFC1918/metadata endpoints even
-  for allowed-looking names.
-- **Credential injection**: plain-HTTP (non-CONNECT) requests route through the
-  existing host egress pipeline (`egress/` steps, staged obligations), giving header
-  injection at the boundary for APIs that need it. For CONNECT'd TLS traffic the
-  broker cannot inject (by design — no MITM); credentialed API calls from inside the
-  sandbox are *not* the model. The agent calls credentialed APIs via first-party
-  `http` capability on the host, where staged injection applies. Package registries
-  need no tenant credentials, which is why allowlist-CONNECT suffices for installs.
+  (TLS terminates at the destination — the broker does not MITM and cannot see or
+  modify payload). Non-CONNECT requests are rejected with `405` and audited. DNS
+  resolution and private-IP/SSRF filtering go through `ironclaw_network`'s
+  resolver primitives (`is_private_or_loopback_ip` denial already exists at
+  `resolver.rs:58`) so the sandbox cannot reach link-local/RFC1918/metadata
+  endpoints even for allowed-looking names, including via DNS rebinding (connect to
+  the resolved-and-checked IP, not a re-resolved name).
 - **Audit**: every decision (allow/deny, scope, host, byte counts out/in — preserve
   the `network_egress_bytes` outbound-only accounting invariant) emits through the
   existing host-runtime accounting path.
@@ -506,9 +551,11 @@ Typed, reviewable-in-one-place mapping from `NetworkMode` (already in
   `objects.githubusercontent.com`, `raw.githubusercontent.com`,
   `deb.nodesource.com` — plus per-tenant additions via product settings (additions
   are tenant-admin approved, normal settings flow).
-- Wildcards reuse the existing `DomainPattern` semantics (`src/sandbox/proxy/allowlist.rs`)
-  — port that type into `ironclaw_network` if it isn't there yet rather than
-  re-implementing (architecture rule #4: one pipeline, not two).
+- Wildcard matching: **move `DomainPattern`/`DomainAllowlist` from
+  `src/sandbox/proxy/allowlist.rs` into `ironclaw_network`** as their canonical home;
+  the v1 proxy consumes them from there (re-export shim during migration). This is a
+  prerequisite step of this phase, not an option — it is the one concept the broker
+  and the v1 proxy genuinely share, and duplicating it is architecture-rule smell #4.
 
 ### 3.3 Wiring
 
@@ -523,7 +570,9 @@ The per-scope socket creation hooks into `SandboxEnvironmentProvider::acquire`.
 - Policy unit tests: profile → decision matrix, private-IP/metadata denial even when
   DNS for an allowed name resolves there (rebind protection via `ironclaw_network`).
 - Integration (Docker-gated): container with broker can `npm install` a real small
-  package; same container cannot `curl https://example.com` (denied) nor reach
+  package; non-CONNECT requests to the broker are rejected (`405`) so plain-HTTP
+  egress is impossible by construction; same container cannot
+  `curl https://example.com` (denied) nor reach
   `169.254.169.254`; broker socket per scope means scope A's socket absent in scope
   B's container.
 
@@ -586,11 +635,11 @@ Per host_runtime guardrails: one first-party tool file per capability. Tool surf
   "name": "my_tool",                  // ExtensionName::new() validated
   "display_name": "My Tool",
   "description": "…",
-  "requested_capabilities": {
-    "http_endpoints": [{ "host": "api.example.com", "path_prefix": "/v1", "methods": ["GET"] }],
-    "tool_invoke": [],
-    "secret_checks": []
-  }
+  // Deserializes into the EXISTING manifest types — ironclaw_extensions'
+  // ExtensionManifestV2 / CapabilityDeclV2 (v2.rs:369,435) — never a bespoke
+  // parallel shape. The promotion service fills provenance and pins
+  // ManifestHash (installations.rs:16) from the artifact bytes.
+  "requested_capabilities": [ /* CapabilityDeclV2 wire shape */ ]
 }
 // → { "extension": "my_tool", "artifact_hash": "blake3:…",
 //     "status": "registered_pending_grants",
@@ -598,12 +647,18 @@ Per host_runtime guardrails: one first-party tool file per capability. Tool surf
 ```
 
 Dispatch follows the `shell.rs` pattern: parse/validate params, delegate to a
-`PromotionService` on `InvocationServices` (new optional-but-policy-validated service,
-same shape as the process port: present iff the deployment enables promotion —
-add `promotion_enabled` to the policy aggregate or gate on
-`ApprovalPolicy != Minimal`-style rules; pick the former, a new
-`EffectiveRuntimePolicy` field `extension_promotion: PromotionMode { Disabled, UserTrustOnly }`,
-defaulting `Disabled` for `SecureDefault`/`HostedSafe`, `UserTrustOnly` elsewhere).
+`PromotionService` on `InvocationServices`. **No new runtime-policy axis.** The
+`backends_for` matrix (`resolver.rs:270`) stays a 6-tuple: promotion availability is
+a composition concern, not a policy dimension. The factory constructs the
+`PromotionService` iff (a) Reborn config enables it (`extension_promotion_enabled`,
+default `false`) and (b) the approval store and extension registry are composed;
+when absent, `extension_promote` returns a typed "promotion disabled in this
+deployment" error. The service is another optional-but-required-when-enabled
+dependency, the same shape as the process port — and it carries the same
+obligation: a `validate_for_*`-style composition check (config says enabled ⇒
+service present) so misconfiguration is a startup error, never a silent no-op.
+This guard is mandatory, not precedent-following — it is what makes the
+`Option<Arc<…>>` pattern acceptable under the architecture rules.
 
 The promotion is itself an approval-gated action: invoking the tool raises an
 approval ("Install agent-built extension my_tool (blake3:…)?") before step 4 runs,
@@ -650,7 +705,7 @@ extension running under the existing capability sandbox.
 
 Adding `SmolVm`/`Srt`/`OrgDedicatedRunner` later requires exactly:
 
-1. An impl of `SandboxEnvironmentProvider` (Phase 2b trait): acquire = boot microVM
+1. An impl of `SandboxEnvironmentProvider` (Phase 2 trait): acquire = boot microVM
    with persistent disk attached; exec = vsock/agent command channel; reap = pause or
    shutdown; remove = destroy VM + disk.
 2. A `ProcessBackendKind` arm in `LocalInvocationServicesResolver::resolve` and a
@@ -660,9 +715,9 @@ Adding `SmolVm`/`Srt`/`OrgDedicatedRunner` later requires exactly:
 
 Invariants I1–I6 are enforced in the broker, the obligations store, the promotion
 gate, and the trait contracts — none of them are Docker-specific. The conformance
-test suite from Phases 2–3 (isolation, persistence, allowlist, reserved env, timeout
-kill) should be written against `dyn SandboxEnvironmentProvider` so a new backend
-inherits its acceptance tests.
+test suite from Phases 2–3 (isolation, persistence, allowlist, reserved env,
+timeout-restart) is written against `dyn SandboxEnvironmentProvider` so a new
+backend inherits its acceptance tests.
 
 ## Threat model summary
 
@@ -672,16 +727,16 @@ inherits its acceptance tests.
 | Exfiltration of workspace data | Egress only via broker allowlist; registries are the only reachable hosts in Allowlist mode; denials audited |
 | Cross-tenant contamination via shared caches | Per-scope volumes/containers/sockets; no shared mutable state (I5) |
 | Privilege escalation via promoted artifact | WASM-only, user trust pinned, deny-default capabilities, human approval per grant, hash-pinned re-promotion |
-| Resource exhaustion (disk fill, fork bomb, runaway build) | memory/cpu (existing), pids_limit, disk ceiling, command timeout with exec-group kill |
+| Resource exhaustion (disk fill, fork bomb, runaway build) | memory/cpu (existing), pids_limit, host-side disk metering, timeout via environment restart (disposable compute — no in-container enforcement) |
 | Container escape | Unchanged hardening: ro rootfs, cap_drop ALL, no-new-privileges, tmpfs /tmp; defense-in-depth accepted as Docker-grade until microVM backend lands |
 | Broker SSRF (DNS rebind to metadata/RFC1918) | `ironclaw_network` resolver + private-IP filtering in the broker connect path |
-| Secret theft via broker socket | Sockets are per-scope; CONNECT path carries no credentials; injection only on host-side egress pipeline with staged obligations |
+| Secret theft via broker socket | Sockets are per-scope; the broker is CONNECT-only and contains no credential machinery at all — secrets exist only in the host-side egress pipeline (staged obligations), which the sandbox cannot reach |
 
 ## Sequencing & dependencies
 
 ```
 Phase 1 (wiring)            — independent, ship first
-Phase 2a (volume)           — depends on 1; ship behind environment_mode knob
+Phase 2a (volume)           — depends on 1; internal provider, no config knob
 Phase 2b (warm exec)        — depends on 2a
 Phase 3 (broker)            — depends on 1; parallel with 2; required before
                               "install CLIs" is real (2a without 3 = persistent
@@ -693,7 +748,8 @@ Phase 4 (promotion)         — depends on 1; needs 2a+3 for the e2e story;
 ## Open items (tracked, not blocking)
 
 1. Hard disk quotas for named volumes (xfs project quota / quota-capable volume
-   driver) — soft `du`-based ceiling is the interim, explicitly logged when enforced.
+   driver) — host-side mountpoint metering is the interim, explicitly logged when
+   enforced.
 2. Background services with lifecycles beyond the idle window — belongs to
    `ironclaw_processes`, not this plan.
 3. Base-image update policy (how often, who approves new system packages).
