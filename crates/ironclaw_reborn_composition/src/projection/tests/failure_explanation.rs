@@ -30,6 +30,16 @@ async fn webui_event_stream_projects_iteration_limit_failure_summary() {
     .await;
 }
 
+#[tokio::test]
+async fn webui_event_stream_projects_model_configuration_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-model-config-thread",
+        ironclaw_reborn::failure_categories::MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY,
+        "The run failed because model credentials or provider configuration are invalid. Check your model provider API key and base URL, then restart if you changed environment variables.",
+    )
+    .await;
+}
+
 async fn assert_failed_run_status_summary(
     thread_id: &str,
     failure_category: &str,

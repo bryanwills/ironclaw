@@ -22,7 +22,9 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use ironclaw_reborn::failure_categories::MODEL_CREDITS_EXHAUSTED_CATEGORY;
+use ironclaw_reborn::failure_categories::{
+    MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+};
 
 use crate::AuthChallengeProvider;
 use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
@@ -503,6 +505,9 @@ async fn failure_summary_for_turn_event(
     if category == MODEL_CREDITS_EXHAUSTED_CATEGORY {
         return fallback_summary;
     }
+    if category == MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY {
+        return fallback_summary;
+    }
     failure_explainer
         .explain_failure(FailureExplanationInput {
             failure_category: category.to_string(),
@@ -537,6 +542,9 @@ fn failure_summary_for_category(category: &str) -> &'static str {
         "host_creation_failed" => "The run failed while preparing the runtime host.",
         "route_snapshot_persistence_failed" => {
             "The run failed while saving the selected model route."
+        }
+        MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY => {
+            "The run failed because model credentials or provider configuration are invalid. Check your model provider API key and base URL, then restart if you changed environment variables."
         }
         MODEL_CREDITS_EXHAUSTED_CATEGORY => {
             "The AI provider account is out of credits. Add credits or switch providers and try again."

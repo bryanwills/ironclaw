@@ -18,7 +18,8 @@ use ironclaw_turns::{
 };
 
 use crate::failure_categories::{
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+    MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_REASON_KIND,
 };
 
 pub(crate) const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
@@ -186,6 +187,11 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
             reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
         };
     }
+    if stage == STAGE_MODEL && error.kind == AgentLoopHostErrorKind::CredentialUnavailable {
+        return AgentLoopDriverError::Failed {
+            reason_kind: MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY.to_string(),
+        };
+    }
 
     match error.kind {
         AgentLoopHostErrorKind::InvalidInvocation
@@ -280,6 +286,23 @@ mod tests {
             mapped,
             AgentLoopDriverError::Failed {
                 reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string()
+            }
+        );
+    }
+    #[test]
+    fn model_credential_error_maps_to_sanitized_configuration_category() {
+        let mapped = map_host_error(
+            "model",
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::CredentialUnavailable,
+                "model credentials are unavailable",
+            ),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY.to_string()
             }
         );
     }

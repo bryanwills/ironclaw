@@ -26,7 +26,8 @@ use ironclaw_turns::{
 };
 
 use crate::failure_categories::{
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+    MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_REASON_KIND,
 };
 
 pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
@@ -252,6 +253,11 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                     reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
                 };
             }
+            if stage == HostStage::Model && kind == AgentLoopHostErrorKind::CredentialUnavailable {
+                return AgentLoopDriverError::Failed {
+                    reason_kind: MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY.to_string(),
+                };
+            }
             AgentLoopDriverError::Unavailable {
                 reason: format!("{}: {safe_summary}", host_stage_name(stage)),
             }
@@ -435,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn executor_host_diagnostics_map_to_actionable_unavailable_reason() {
+    fn executor_model_credential_diagnostics_preserve_configuration_category() {
         let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
             stage: HostStage::Model,
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
@@ -446,8 +452,8 @@ mod tests {
 
         assert_eq!(
             mapped,
-            AgentLoopDriverError::Unavailable {
-                reason: "Model: model credentials are unavailable".to_string()
+            AgentLoopDriverError::Failed {
+                reason_kind: MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY.to_string()
             }
         );
     }

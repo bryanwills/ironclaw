@@ -36,7 +36,9 @@ use ironclaw_turns::{
 
 use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
-    failure_categories::MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    failure_categories::{
+        MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    },
     loop_exit_applier::LoopExitApplier,
 };
 
@@ -60,16 +62,18 @@ fn sanitized_failure(category: &'static str) -> Option<SanitizedFailure> {
         }
     }
 }
-
 fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFailure> {
-    if reason_kind == MODEL_CREDITS_EXHAUSTED_CATEGORY {
+    if matches!(
+        reason_kind,
+        MODEL_CREDITS_EXHAUSTED_CATEGORY | MODEL_CREDENTIALS_OR_CONFIG_INVALID_CATEGORY
+    ) {
         return match SanitizedFailure::new(reason_kind.to_string()) {
             Ok(failure) => Some(failure),
             Err(error) => {
                 debug!(
                     reason_kind,
                     %error,
-                    "model credit exhaustion failure category failed validation; using generic driver failure"
+                    "known model failure category failed validation; using generic driver failure"
                 );
                 sanitized_failure("driver_failed")
             }
@@ -77,9 +81,6 @@ fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFailure> {
     }
     sanitized_failure("driver_failed")
 }
-
-/// Configuration for the turn-runner worker.
-#[derive(Debug, Clone)]
 pub struct TurnRunnerWorkerConfig {
     /// How often to send heartbeats for an active run lease.
     pub heartbeat_interval: Duration,
