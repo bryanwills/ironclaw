@@ -51,9 +51,9 @@ use crate::slack_delivery::{
 use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
 use crate::slack_host_state::FilesystemSlackHostState;
 use crate::slack_outbound_targets::{
-    SlackConfiguredChannelRoute, SlackHostBetaOutboundTargetProvider,
-    SlackOutboundTargetProviderConfig, SlackPersonalDmTargetProvisioner,
-    SlackPersonalDmTargetStore,
+    SlackConfiguredChannelRoute, SlackDeliveryConnectionProvider,
+    SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig,
+    SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
 use crate::slack_pairing_notifier::SlackPairingChallengeHttpNotifier;
 use crate::slack_personal_binding::{
@@ -257,6 +257,8 @@ pub struct SlackHostBetaMounts {
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
     /// Internal target-authority handle consumed only by WebUI product-facade composition.
     pub(crate) outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider>,
+    /// Internal Slack delivery authority consumed only by WebUI connectable-channel state.
+    pub(crate) delivery_connection_provider: Arc<dyn SlackDeliveryConnectionProvider>,
 }
 
 pub fn build_slack_events_route_mount(
@@ -437,31 +439,38 @@ pub fn build_slack_host_beta_mounts(
         }
     }
 
+    let outbound_target_provider = Arc::new(SlackHostBetaOutboundTargetProvider::new(
+        SlackOutboundTargetProviderConfig {
+            tenant_id: config.tenant_id.clone(),
+            agent_id: config.agent_id.clone(),
+            project_id: config.project_id.clone(),
+            installation_id: config.installation_id.clone(),
+            team_id: config.team_id.clone(),
+            configured_channel_routes: config
+                .channel_routes
+                .iter()
+                .map(|route| {
+                    SlackConfiguredChannelRoute::new(
+                        route.channel_id.clone(),
+                        route.subject_user_id.clone(),
+                    )
+                })
+                .collect(),
+        },
+        channel_route_store,
+        Arc::clone(&personal_dm_target_store),
+    ));
+    let outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
+        outbound_target_provider.clone();
+    let delivery_connection_provider: Arc<dyn SlackDeliveryConnectionProvider> =
+        outbound_target_provider;
+
     Ok(SlackHostBetaMounts {
         events,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
-        outbound_delivery_target_provider: Arc::new(SlackHostBetaOutboundTargetProvider::new(
-            SlackOutboundTargetProviderConfig {
-                tenant_id: config.tenant_id.clone(),
-                agent_id: config.agent_id.clone(),
-                project_id: config.project_id.clone(),
-                installation_id: config.installation_id.clone(),
-                team_id: config.team_id.clone(),
-                configured_channel_routes: config
-                    .channel_routes
-                    .iter()
-                    .map(|route| {
-                        SlackConfiguredChannelRoute::new(
-                            route.channel_id.clone(),
-                            route.subject_user_id.clone(),
-                        )
-                    })
-                    .collect(),
-            },
-            channel_route_store,
-            Arc::clone(&personal_dm_target_store),
-        )),
+        outbound_delivery_target_provider,
+        delivery_connection_provider,
     })
 }
 
@@ -775,9 +784,9 @@ mod tests {
     use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
     use ironclaw_product_workflow::{
         ProductActorUserResolutionRequest, ProductWorkflowError, RebornChannelConnectStrategy,
-        RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetStatus,
-        RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-        WebUiAuthenticatedCaller,
+        RebornChannelConnectionStatus, RebornOutboundDeliveryTargetId,
+        RebornOutboundDeliveryTargetStatus, RebornServicesErrorCode, RebornServicesErrorKind,
+        RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_secrets::InMemorySecretStore;
@@ -1811,6 +1820,21 @@ mod tests {
         assert_eq!(target.target.channel.as_str(), "slack");
         assert_eq!(target.target.display_name.as_str(), "Slack channel C0HOST");
         assert!(target.capabilities.final_replies);
+        let connectable = bundle
+            .api
+            .list_connectable_channels(shared_subject.clone())
+            .await
+            .expect("connectable channels");
+        let personal_slack = connectable
+            .channels
+            .iter()
+            .find(|channel| channel.strategy == RebornChannelConnectStrategy::InboundProofCode)
+            .expect("personal Slack channel");
+        assert_eq!(
+            personal_slack.connection_status,
+            RebornChannelConnectionStatus::Connected,
+            "a caller with a shared Slack outbound target should not be prompted to reconnect Slack"
+        );
 
         let selected = bundle
             .api
@@ -1979,6 +2003,21 @@ mod tests {
             targets.targets.is_empty(),
             "identity-only Slack state must not synthesize a personal DM target"
         );
+        let connectable = bundle
+            .api
+            .list_connectable_channels(operator_caller())
+            .await
+            .expect("connectable channels");
+        let personal_slack = connectable
+            .channels
+            .iter()
+            .find(|channel| channel.strategy == RebornChannelConnectStrategy::InboundProofCode)
+            .expect("personal Slack channel");
+        assert_eq!(
+            personal_slack.connection_status,
+            RebornChannelConnectionStatus::Disconnected,
+            "identity-only Slack state must not mark personal Slack connected"
+        );
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
@@ -2018,6 +2057,30 @@ mod tests {
             "slack:personal-dm:T0HOST:user:slack-host"
         );
         assert!(targets.targets[0].capabilities.final_replies);
+        let connectable = bundle
+            .api
+            .list_connectable_channels(operator_caller())
+            .await
+            .expect("connectable channels");
+        let personal_slack = connectable
+            .channels
+            .iter()
+            .find(|channel| channel.strategy == RebornChannelConnectStrategy::InboundProofCode)
+            .expect("personal Slack channel");
+        assert_eq!(
+            personal_slack.connection_status,
+            RebornChannelConnectionStatus::Connected
+        );
+        let preferences = bundle
+            .api
+            .get_outbound_preferences(operator_caller())
+            .await
+            .expect("outbound preferences");
+        assert_eq!(
+            preferences.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::NoneConfigured,
+            "provisioning Slack must not implicitly set the default outbound target"
+        );
         assert_eq!(
             egress
                 .requests()

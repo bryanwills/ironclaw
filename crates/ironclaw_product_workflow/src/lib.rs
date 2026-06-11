@@ -152,7 +152,7 @@ pub use reborn_services::{
     ProductAgentBoundCaller, RebornAutomationInfo, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornChannelConnectStrategy, RebornChannelConnectionStatus, RebornConnectableChannelInfo,
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,

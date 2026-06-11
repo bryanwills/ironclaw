@@ -33,6 +33,15 @@ use crate::slack_serve::{SlackTeamId, SlackUserId};
 
 pub(crate) const SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE: usize = 500;
 const SLACK_OUTBOUND_TARGET_LIST_MAX_TOTAL_ROUTES: usize = 10_000;
+const SLACK_PERSONAL_DM_TARGET_ID_PREFIX: &str = "slack:personal-dm:";
+
+#[async_trait::async_trait]
+pub(crate) trait SlackDeliveryConnectionProvider: Send + Sync {
+    async fn has_delivery_connection(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlackConfiguredChannelRoute {
@@ -279,7 +288,11 @@ impl SlackHostBetaOutboundTargetProvider {
             project_id: config.project_id,
             installation_id: config.installation_id,
             shared_target_id_prefix: format!("slack:shared-channel:{}:", config.team_id.as_str()),
-            personal_target_id_prefix: format!("slack:personal-dm:{}:", config.team_id.as_str()),
+            personal_target_id_prefix: format!(
+                "{}{}:",
+                SLACK_PERSONAL_DM_TARGET_ID_PREFIX,
+                config.team_id.as_str()
+            ),
             team_id: config.team_id,
             configured_channel_routes: config.configured_channel_routes,
             channel_route_store,
@@ -304,7 +317,8 @@ impl SlackHostBetaOutboundTargetProvider {
         user_id: &UserId,
     ) -> Result<RebornOutboundDeliveryTargetId, RebornServicesError> {
         RebornOutboundDeliveryTargetId::new(format!(
-            "slack:personal-dm:{}:{}",
+            "{}{}:{}",
+            SLACK_PERSONAL_DM_TARGET_ID_PREFIX,
             self.team_id.as_str(),
             user_id.as_str()
         ))
@@ -514,6 +528,19 @@ impl SlackHostBetaOutboundTargetProvider {
         if caller.tenant_id != self.tenant_id || &caller.user_id != user_id {
             return Ok(None);
         }
+        let Some(target) = self.load_personal_dm_target_for_caller(caller).await? else {
+            return Ok(None);
+        };
+        self.entry_for_personal_dm_target(&target).map(Some)
+    }
+
+    async fn load_personal_dm_target_for_caller(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Option<SlackPersonalDmTarget>, RebornServicesError> {
+        if caller.tenant_id != self.tenant_id {
+            return Ok(None);
+        }
         let key = SlackPersonalDmTargetKey::new(
             self.tenant_id.clone(),
             self.installation_id.clone(),
@@ -521,15 +548,69 @@ impl SlackHostBetaOutboundTargetProvider {
             caller.user_id.clone(),
         )
         .map_err(map_slack_personal_dm_target_error)?;
-        let Some(target) = self
-            .personal_dm_target_store
+        self.personal_dm_target_store
             .load_personal_dm_target(&key)
             .await
-            .map_err(map_slack_personal_dm_target_error)?
-        else {
-            return Ok(None);
-        };
-        self.entry_for_personal_dm_target(&target).map(Some)
+            .map_err(map_slack_personal_dm_target_error)
+    }
+
+    async fn active_shared_channel_routes_for_caller(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Vec<SlackConfiguredChannelRoute>, RebornServicesError> {
+        if caller.tenant_id != self.tenant_id {
+            return Ok(Vec::new());
+        }
+        let stored_routes = self
+            .channel_route_store
+            .list_routes_for_subject(
+                &self.tenant_id,
+                &self.installation_id,
+                self.team_id.as_str(),
+                &caller.user_id,
+                SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
+                SLACK_OUTBOUND_TARGET_LIST_MAX_TOTAL_ROUTES,
+            )
+            .await
+            .map_err(map_slack_target_route_error)?;
+        let stored_channel_ids: HashSet<String> =
+            stored_routes.iter().map(|r| r.channel_id.clone()).collect();
+        let mut routes: Vec<SlackConfiguredChannelRoute> = stored_routes
+            .into_iter()
+            .map(|r| {
+                UserId::new(r.subject_user_id)
+                    .map_err(|_| slack_target_backend_error())
+                    .map(|uid| SlackConfiguredChannelRoute::new(r.channel_id, uid))
+            })
+            .collect::<Result<_, _>>()?;
+        for static_route in self
+            .configured_channel_routes
+            .iter()
+            .filter(|r| r.subject_user_id == caller.user_id)
+        {
+            if stored_channel_ids.contains(&static_route.channel_id) {
+                continue;
+            }
+            let key = match SlackChannelRouteKey::new(
+                self.tenant_id.clone(),
+                self.installation_id.clone(),
+                self.team_id.as_str().to_string(),
+                static_route.channel_id.clone(),
+            ) {
+                Ok(key) => key,
+                Err(_) => continue,
+            };
+            let store_override = self
+                .channel_route_store
+                .resolve_subject_user_id(&key)
+                .await
+                .map_err(map_slack_target_route_error)?;
+            if store_override.is_none() {
+                routes.push(static_route.clone());
+            }
+        }
+        routes.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
+        Ok(routes)
     }
 
     async fn resolve_personal_dm_for_binding(
@@ -564,6 +645,32 @@ impl SlackHostBetaOutboundTargetProvider {
 }
 
 #[async_trait::async_trait]
+impl SlackDeliveryConnectionProvider for SlackHostBetaOutboundTargetProvider {
+    async fn has_delivery_connection(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        let shared_routes = self.active_shared_channel_routes_for_caller(caller);
+        let personal_dm_target = self.load_personal_dm_target_for_caller(caller);
+        let (shared_routes, personal_dm_target) = tokio::join!(shared_routes, personal_dm_target);
+        if !shared_routes?.is_empty() {
+            return Ok(true);
+        }
+        match personal_dm_target {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Slack personal DM target lookup failed while resolving connection state"
+                );
+                Ok(false)
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
 impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
@@ -572,96 +679,15 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
         if caller.tenant_id != self.tenant_id {
             return Ok(Vec::new());
         }
-        let personal_dm_key = SlackPersonalDmTargetKey::new(
-            self.tenant_id.clone(),
-            self.installation_id.clone(),
-            self.team_id.as_str().to_string(),
-            caller.user_id.clone(),
-        );
-        let personal_dm_target = async {
-            match personal_dm_key {
-                Ok(key) => Some(
-                    self.personal_dm_target_store
-                        .load_personal_dm_target(&key)
-                        .await,
-                ),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "Slack personal DM target key could not be built while listing outbound targets"
-                    );
-                    None
-                }
-            }
-        };
-        let subject_routes = self.channel_route_store.list_routes_for_subject(
-            &self.tenant_id,
-            &self.installation_id,
-            self.team_id.as_str(),
-            &caller.user_id,
-            SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
-            SLACK_OUTBOUND_TARGET_LIST_MAX_TOTAL_ROUTES,
-        );
-        let (stored_routes, personal_dm_target) = tokio::join!(subject_routes, personal_dm_target);
-        let stored_routes = stored_routes.map_err(map_slack_target_route_error)?;
-        // Collect the channel ids returned for this subject so we can skip
-        // static configured routes that the store has already overridden with
-        // any subject (including a different one).  Collect as owned Strings so
-        // `stored_routes` can be moved into the route vec below.
-        let stored_channel_ids: HashSet<String> =
-            stored_routes.iter().map(|r| r.channel_id.clone()).collect();
-        let mut routes: Vec<SlackConfiguredChannelRoute> = stored_routes
-            .into_iter()
-            .map(|r| {
-                UserId::new(r.subject_user_id)
-                    .map_err(|_| slack_target_backend_error())
-                    .map(|uid| SlackConfiguredChannelRoute::new(r.channel_id, uid))
-            })
-            .collect::<Result<_, _>>()?;
-        // For each static configured route belonging to this caller that is not
-        // already in the subject-scoped store results, check whether the store
-        // has ANY entry for that channel (even under a different subject).  If
-        // the store has overridden the channel, omit the stale static entry so
-        // the admin-assigned subject wins.  A true subject index remains a
-        // tracked follow-up; for now the N point-lookups over the (typically
-        // small) static route list are cheaper than a full-inventory scan.
-        for static_route in self
-            .configured_channel_routes
-            .iter()
-            .filter(|r| r.subject_user_id == caller.user_id)
-        {
-            if stored_channel_ids.contains(&static_route.channel_id) {
-                // Already present from the subject-scoped store results.
-                continue;
-            }
-            let key = match SlackChannelRouteKey::new(
-                self.tenant_id.clone(),
-                self.installation_id.clone(),
-                self.team_id.as_str().to_string(),
-                static_route.channel_id.clone(),
-            ) {
-                Ok(key) => key,
-                Err(_) => continue,
-            };
-            let store_override = self
-                .channel_route_store
-                .resolve_subject_user_id(&key)
-                .await
-                .map_err(map_slack_target_route_error)?;
-            if store_override.is_none() {
-                // No store entry for this channel — static route is active.
-                routes.push(static_route.clone());
-            }
-            // If the store has an entry for another subject, the static route
-            // is suppressed (admin override takes precedence).
-        }
-        routes.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
-        let mut targets = routes
+        let shared_routes = self.active_shared_channel_routes_for_caller(caller);
+        let personal_dm_target = self.load_personal_dm_target_for_caller(caller);
+        let (routes, personal_dm_target) = tokio::join!(shared_routes, personal_dm_target);
+        let mut targets = routes?
             .into_iter()
             .map(|route| self.entry_for_shared_channel_route(&route))
             .collect::<Result<Vec<_>, _>>()?;
         match personal_dm_target {
-            Some(Ok(Some(target))) => match self.entry_for_personal_dm_target(&target) {
+            Ok(Some(target)) => match self.entry_for_personal_dm_target(&target) {
                 Ok(target) => targets.push(target),
                 Err(error) => {
                     tracing::warn!(
@@ -670,14 +696,13 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
                     );
                 }
             },
-            Some(Ok(None)) => {}
-            Some(Err(error)) => {
+            Ok(None) => {}
+            Err(error) => {
                 tracing::warn!(
                     %error,
                     "Slack personal DM target lookup failed while listing outbound targets"
                 );
             }
-            None => {}
         }
         Ok(targets)
     }

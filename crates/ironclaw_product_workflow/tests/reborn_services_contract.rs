@@ -37,10 +37,11 @@ use ironclaw_product_workflow::{
     ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornChannelConnectionStatus, RebornConnectableChannelInfo, RebornDeleteThreadRequest,
+    RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornLogLevel,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
@@ -4130,6 +4131,7 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
                 error_message: "Invalid or expired Slack pairing code.".to_string(),
             },
             command_aliases: vec!["slack".to_string(), "slack account".to_string()],
+            connection_status: RebornChannelConnectionStatus::Connected,
         },
     ])));
 
@@ -4152,6 +4154,10 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
     assert_eq!(
         channel.command_aliases,
         vec!["slack".to_string(), "slack account".to_string()]
+    );
+    assert_eq!(
+        channel.connection_status,
+        RebornChannelConnectionStatus::Connected
     );
 }
 
