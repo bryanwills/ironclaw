@@ -33,11 +33,14 @@ mod budget_events;
 mod bundled_skills;
 mod default_system_prompt;
 mod error;
+mod extension_activation_credentials;
+mod extension_credential_requirements;
 mod extension_installation_store;
 mod extension_lifecycle;
 mod extension_lifecycle_capabilities;
 mod extension_lifecycle_command;
 mod factory;
+mod failure_summary;
 mod google_oauth;
 mod gsuite;
 mod hooks;
@@ -162,6 +165,7 @@ pub use extension_lifecycle_command::{
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use failure_summary::reborn_failure_summary_for_category;
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use hooks::{
     HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
@@ -186,6 +190,7 @@ pub use ironclaw_skills::{
     skill_summary_json as reborn_skill_summary_json,
 };
 pub use ironclaw_triggers::TriggerId;
+pub use ironclaw_turns::TurnStatus;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
