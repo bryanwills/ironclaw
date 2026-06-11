@@ -8,6 +8,10 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_approvals::FilesystemPersistentApprovalPolicyStore;
+#[cfg(not(feature = "libsql"))]
+use ironclaw_approvals::InMemoryPersistentApprovalPolicyStore;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
@@ -188,6 +192,12 @@ pub(crate) type LocalDevCapabilityLeaseStore =
     FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>;
 #[cfg(not(feature = "libsql"))]
 pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
+
+#[cfg(feature = "libsql")]
+pub(crate) type LocalDevPersistentApprovalPolicyStore =
+    FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+pub(crate) type LocalDevPersistentApprovalPolicyStore = InMemoryPersistentApprovalPolicyStore;
 
 #[cfg(feature = "libsql")]
 type LocalDevProcessServices = ProcessServices<
@@ -379,6 +389,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     // lint on non-test builds where that module is not compiled in.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) capability_policy: Arc<LocalDevCapabilityPolicy>,
+    pub(crate) persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -497,6 +508,21 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+impl RebornProductionRuntimeServices {
+    /// Returns the trigger repository from whichever production store graph is
+    /// active. Backs the WebUI automations facade for production profiles
+    /// (libSQL / Postgres) where `local_runtime` is None.
+    pub(crate) fn trigger_repository(&self) -> Arc<dyn TriggerRepository> {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::LibSql(graph) => Arc::clone(&graph.trigger_repository),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(graph) => Arc::clone(&graph.trigger_repository),
+        }
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 impl RebornLocalRuntimeServices {
     pub(crate) async fn durable_trigger_conversation_services(
         &self,
@@ -515,6 +541,7 @@ struct RebornLocalDevStoreGraph {
     run_state: Arc<LocalDevRunStateStore>,
     approval_requests: Arc<LocalDevApprovalRequestStore>,
     capability_leases: Arc<LocalDevCapabilityLeaseStore>,
+    persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
     turn_state: Arc<LocalDevTurnStateStore>,
     local_runtime: Arc<RebornLocalRuntimeServices>,
     resource_governor: Arc<LocalDevResourceGovernor>,
@@ -640,6 +667,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        nearai_mcp_bootstrap_config,
         owner_id,
         ..
     } = input;
@@ -733,6 +761,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&filesystem),
         runtime_workspace_mounts.clone(),
     ));
+    let owner_user_id_for_nearai_mcp = owner_user_id.clone();
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -784,6 +813,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_run_state(Arc::clone(&store_graph.run_state))
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
     .with_capability_leases(Arc::clone(&store_graph.capability_leases))
+    .with_persistent_approval_policies(Arc::clone(&store_graph.persistent_approval_policies))
     .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
     let local_dev_process_port = local_dev_process_port_for_policy(
         &runtime_policy,
@@ -871,10 +901,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         reason: format!("available extension catalog could not be loaded: {error}"),
     })?;
     available_extensions.extend(
-        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("first-party extension catalog could not be loaded: {error}"),
-            }
+        AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(
+            nearai_mcp_bootstrap_config.as_ref(),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("first-party extension catalog could not be loaded: {error}"),
         })?,
     );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
@@ -912,6 +943,13 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         extension_lifecycle_service,
         active_extensions,
     ));
+    crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+        nearai_mcp_bootstrap_config,
+        &product_auth,
+        &extension_management,
+        &owner_user_id_for_nearai_mcp,
+    )
+    .await?;
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
@@ -1151,6 +1189,9 @@ fn build_local_dev_store_graph(
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
+    let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        Arc::clone(&scoped_filesystem),
+    ));
     let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
         &scoped_filesystem,
     )));
@@ -1197,6 +1238,7 @@ fn build_local_dev_store_graph(
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),
+        persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         outbound_preferences,
@@ -1240,6 +1282,7 @@ fn build_local_dev_store_graph(
         run_state,
         approval_requests,
         capability_leases,
+        persistent_approval_policies,
         turn_state,
         local_runtime,
         resource_governor,
@@ -1269,6 +1312,7 @@ fn build_local_dev_store_graph(
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let persistent_approval_policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
@@ -1310,6 +1354,7 @@ fn build_local_dev_store_graph(
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),
+        persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         outbound_preferences,
@@ -1352,6 +1397,7 @@ fn build_local_dev_store_graph(
         run_state,
         approval_requests,
         capability_leases,
+        persistent_approval_policies,
         turn_state,
         local_runtime,
         resource_governor,
@@ -2280,6 +2326,7 @@ async fn build_production_shaped(
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        nearai_mcp_bootstrap_config: _,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -2340,6 +2387,7 @@ async fn build_production_shaped(
         RebornStorageInput::Postgres {
             pool,
             url,
+            tls_options,
             secret_master_key,
         } => {
             let production_wiring = production_wiring(
@@ -2358,7 +2406,7 @@ async fn build_production_shaped(
                 oauth_dcr_provider_configs,
                 owner_id,
             };
-            build_postgres_production(context, pool, url, secret_master_key).await
+            build_postgres_production(context, pool, url, tls_options, secret_master_key).await
         }
     }
 }
@@ -2518,6 +2566,9 @@ where
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
+    let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        Arc::clone(&scoped_filesystem),
+    ));
     let (runtime_policy, process_binding) = runtime_policy.into_parts();
 
     let services = HostRuntimeServices::new(
@@ -2531,6 +2582,7 @@ where
     .with_trust_policy(trust_policy)
     .with_runtime_policy(runtime_policy)
     .with_capability_leases(capability_leases)
+    .with_persistent_approval_policies(persistent_approval_policies)
     .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
     .with_secret_store(Arc::clone(&secret_credentials.secret_store))
     .with_credential_broker(secret_credentials.credential_broker)
@@ -2642,6 +2694,7 @@ where
     filesystem: Arc<F>,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     leases: Arc<FilesystemCapabilityLeaseStore<F>>,
+    persistent_approval_policies: Arc<FilesystemPersistentApprovalPolicyStore<F>>,
     secret_credentials: FilesystemSecretCredentialStores<F>,
     event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
 }
@@ -2660,6 +2713,9 @@ where
         let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
             &scoped_filesystem,
         )));
+        let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+            Arc::clone(&scoped_filesystem),
+        ));
         let secret_credentials = FilesystemSecretCredentialStores::from_master_key(
             Arc::clone(&scoped_filesystem),
             secret_master_key,
@@ -2669,6 +2725,7 @@ where
             filesystem,
             scoped_filesystem,
             leases,
+            persistent_approval_policies,
             secret_credentials,
             event_store,
         })
@@ -2793,6 +2850,7 @@ where
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
     .with_capability_leases(stores.leases)
+    .with_persistent_approval_policies(stores.persistent_approval_policies)
     .with_secret_store(Arc::clone(&stores.secret_credentials.secret_store))
     .with_credential_broker(stores.secret_credentials.credential_broker)
     .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
@@ -2924,6 +2982,7 @@ async fn build_postgres_production(
     context: RebornProductionBuildContext,
     pool: deadpool_postgres::Pool,
     url: ironclaw_secrets::SecretMaterial,
+    tls_options: ironclaw_reborn_event_store::PostgresPoolTlsOptions,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
@@ -2940,7 +2999,7 @@ async fn build_postgres_production(
     let stores = ProductionStoreBundle::new(
         filesystem,
         secret_master_key,
-        ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url },
+        ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url, tls_options },
     )?;
 
     build_backend_production(
@@ -3023,7 +3082,7 @@ mod tests {
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
     };
-    use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
+    use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     #[cfg(feature = "libsql")]
     use secrecy::ExposeSecret;
@@ -3150,6 +3209,7 @@ mod tests {
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
             capability_policy: Arc::clone(&base_runtime.capability_policy),
+            persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
@@ -3736,12 +3796,34 @@ mod tests {
         assert_eq!(failure.kind, RuntimeFailureKind::Backend);
     }
 
+    fn nearai_bootstrap_input_with_base(
+        owner: &str,
+        root: PathBuf,
+        base_url: &str,
+        api_key: &str,
+    ) -> RebornBuildInput {
+        RebornBuildInput::local_dev(owner, root).with_nearai_mcp_bootstrap_config(
+            crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                base_url,
+                secrecy::SecretString::from(api_key.to_string()),
+            )
+            .expect("valid NEAR AI MCP bootstrap config"),
+        )
+    }
+
+    fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornBuildInput {
+        nearai_bootstrap_input_with_base(owner, root, "https://private.near.ai", api_key)
+    }
+
     #[tokio::test]
-    async fn local_dev_nearai_mcp_installs_and_activates_model_visible_capability() {
+    async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "local-dev-nearai-mcp-owner",
+        let owner = "local-dev-nearai-mcp-owner";
+        let services = build_reborn_services(nearai_bootstrap_input_with_base(
+            owner,
             dir.path().join("local-dev"),
+            "https://nearai-db.example.test:9443/v1",
+            "nearai-test-key",
         ))
         .await
         .expect("local-dev services build");
@@ -3753,14 +3835,11 @@ mod tests {
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
-        extension_management
-            .install(nearai_ref.clone())
+        let projection = extension_management
+            .project(nearai_ref)
             .await
-            .expect("install NEAR AI MCP");
-        extension_management
-            .activate(nearai_ref, ExtensionActivationMode::Static)
-            .await
-            .expect("activate NEAR AI MCP");
+            .expect("NEAR AI MCP projected");
+        assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
             .active_model_visible_capabilities()
@@ -3768,8 +3847,8 @@ mod tests {
             .expect("active capabilities");
         let search = capabilities
             .iter()
-            .find(|capability| capability.id.as_str() == "nearai.search")
-            .expect("nearai.search active");
+            .find(|capability| capability.id.as_str() == "nearai.web_search")
+            .expect("nearai.web_search active");
 
         assert_eq!(search.provider.as_str(), "nearai");
         assert_eq!(search.effects, nearai_allowed_effects());
@@ -3778,12 +3857,6 @@ mod tests {
             search.runtime_credentials[0].handle,
             SecretHandle::new("llm_nearai_api_key").unwrap()
         );
-        // NEAR AI MCP credential is sourced from a product-auth account so that the
-        // user-facing setup flow is the manual-token product-auth surface (shared
-        // with GitHub WASM), not an out-of-band SecretStore handle drop.
-        // The 'handle' field remains the staging slot name the MCP egress planner
-        // reads from RuntimeSecretInjectionStore after the obligation handler resolves
-        // the access secret via RuntimeCredentialAccountResolver.
         assert_eq!(
             search.runtime_credentials[0].source,
             RuntimeCredentialRequirementSource::ProductAuthAccount {
@@ -3793,8 +3866,151 @@ mod tests {
         );
         assert_eq!(
             search.runtime_credentials[0].audience.host_pattern,
-            "private.near.ai"
+            "nearai-db.example.test"
         );
+        assert_eq!(search.runtime_credentials[0].audience.port, Some(9443));
+
+        let auth_scope = AuthProductScope::new(
+            ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
+            AuthSurface::Api,
+        );
+        let accounts = services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_record_source()
+            .accounts_for_owner(&auth_scope)
+            .await
+            .expect("credential accounts load");
+        let nearai_account = accounts
+            .iter()
+            .find(|account| account.provider.as_str() == "nearai")
+            .expect("NEAR AI product-auth account");
+        assert_eq!(nearai_account.status, CredentialAccountStatus::Configured);
+        assert!(nearai_account.access_secret.is_some());
+    }
+
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_rebootstrap_updates_existing_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("local-dev");
+        let owner = "local-dev-nearai-mcp-idempotent-owner";
+
+        let first = build_reborn_services(nearai_bootstrap_input(
+            owner,
+            root.clone(),
+            "nearai-first-key",
+        ))
+        .await
+        .expect("first local-dev services build");
+        drop(first);
+
+        let second =
+            build_reborn_services(nearai_bootstrap_input(owner, root, "nearai-second-key"))
+                .await
+                .expect("second local-dev services build");
+        let auth_scope = AuthProductScope::new(
+            ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
+            AuthSurface::Api,
+        );
+        let accounts = second
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_record_source()
+            .accounts_for_owner(&auth_scope)
+            .await
+            .expect("credential accounts load");
+        let nearai_accounts = accounts
+            .iter()
+            .filter(|account| account.provider.as_str() == "nearai")
+            .collect::<Vec<_>>();
+
+        assert_eq!(nearai_accounts.len(), 1);
+        assert_eq!(
+            nearai_accounts[0].status,
+            CredentialAccountStatus::Configured
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_bootstrap_preserves_removed_extension() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = "local-dev-nearai-mcp-disabled-owner";
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+
+        let services = build_reborn_services(nearai_bootstrap_input(
+            owner,
+            dir.path().join("local-dev"),
+            "nearai-test-key",
+        ))
+        .await
+        .expect("local-dev services build");
+        let extension_management = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime")
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        extension_management
+            .remove(nearai_ref.clone())
+            .await
+            .expect("disable NEAR AI MCP extension");
+        crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+            Some(
+                crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                    "https://private.near.ai",
+                    secrecy::SecretString::from("nearai-test-key"),
+                )
+                .expect("valid NEAR AI MCP bootstrap config"),
+            ),
+            services.product_auth.as_ref().expect("product auth"),
+            extension_management,
+            &UserId::new(owner).unwrap(),
+        )
+        .await
+        .expect("bootstrap should preserve disabled extension");
+        let projection = extension_management
+            .project(nearai_ref)
+            .await
+            .expect("NEAR AI MCP projected");
+        assert_ne!(projection.phase, LifecyclePhase::Active);
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .all(|capability| capability.id.as_str() != "nearai.web_search")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+            "http://private.near.ai",
+            secrecy::SecretString::from("nearai-test-key"),
+        )
+        .expect("config shape");
+        let error = build_reborn_services(
+            RebornBuildInput::local_dev(
+                "local-dev-nearai-mcp-invalid-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_nearai_mcp_bootstrap_config(config),
+        )
+        .await
+        .expect_err("invalid endpoint should fail build");
+
+        let RebornBuildError::InvalidConfig { reason } = error else {
+            panic!("expected invalid config");
+        };
+        assert!(reason.contains("NEARAI_BASE_URL must use https"));
     }
 
     #[test]

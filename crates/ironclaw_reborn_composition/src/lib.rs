@@ -81,6 +81,8 @@ mod profile;
 mod profile_approval_authorization;
 mod projection;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+#[cfg(feature = "slack-v2-host-beta")]
+mod delivered_gate_routing;
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
@@ -133,6 +135,8 @@ mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
 mod webui_extension_credentials;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_operator_auth;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
 #[cfg(feature = "webui-v2-beta")]
@@ -198,6 +202,9 @@ pub use local_runtime_profile::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
+pub use nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
+};
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
 pub use product_live_adapters::{
@@ -253,6 +260,10 @@ pub use slack_connectable_channel::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
+    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
 };
@@ -267,6 +278,7 @@ pub use slack_host_beta::{
     SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
     build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
     build_slack_host_beta_mounts, build_slack_host_beta_runtime_mounts,
+    build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
@@ -307,9 +319,9 @@ pub use webui::{RebornWebuiBundle, build_webui_services};
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_serve::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, WebuiAuthenticator,
-    WebuiServeConfig, WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app,
-    webui_v2_app_with_lifecycle,
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
+    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
