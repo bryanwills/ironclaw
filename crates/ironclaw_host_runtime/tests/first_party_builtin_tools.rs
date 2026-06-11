@@ -511,7 +511,80 @@ async fn builtin_trigger_create_invalid_cron_surfaces_actionable_error_summary()
     );
 }
 
-// Fix 2 — trigger_output shape: run_in_flight, enabled, last_error fields.
+#[tokio::test]
+async fn builtin_trigger_create_invalid_timezone_summary_does_not_echo_user_value() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Invalid timezone",
+            "prompt": "Run in the user's timezone",
+            "cron": "0 8 * * *",
+            "timezone": "secret/America"
+        }),
+        context.clone(),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    let summary = failure
+        .safe_summary()
+        .expect("timezone validation error must carry a safe summary");
+    assert!(
+        summary.contains("invalid timezone"),
+        "summary should describe the invalid timezone, got: {summary}"
+    );
+    assert!(
+        !summary.contains("secret/America") && !summary.contains("secretAmerica"),
+        "safe summary must not echo the invalid timezone value: {summary}"
+    );
+    assert!(
+        !summary.chars().any(|character| matches!(
+            character,
+            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+        )),
+        "safe summary must not contain raw payload or path delimiters: {summary}"
+    );
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "rejected trigger must not be persisted"
+    );
+}
+
+fn assert_trigger_output_state(
+    trigger: &Value,
+    run_in_flight: bool,
+    enabled: bool,
+    last_error_contains: Option<&str>,
+) {
+    assert_eq!(trigger["run_in_flight"], json!(run_in_flight));
+    assert_eq!(trigger["enabled"], json!(enabled));
+    match last_error_contains {
+        Some(expected) => {
+            let last_error = trigger["last_error"]
+                .as_str()
+                .expect("failed trigger must carry last_error");
+            assert!(
+                last_error.contains(expected),
+                "last_error should contain {expected:?}, got: {last_error}"
+            );
+        }
+        None => assert_eq!(trigger["last_error"], Value::Null),
+    }
+    assert!(
+        trigger.get("is_active").is_none(),
+        "is_active alias was dropped"
+    );
+}
+
 #[tokio::test]
 async fn builtin_trigger_output_run_in_flight_false_between_fires_and_enabled_true_when_scheduled()
 {
@@ -543,29 +616,7 @@ async fn builtin_trigger_output_run_in_flight_false_between_fires_and_enabled_tr
     .unwrap();
     let trigger = &listed["triggers"][0];
 
-    // Between fires, no run is in flight.
-    assert_eq!(
-        trigger["run_in_flight"],
-        json!(false),
-        "run_in_flight must be false between fires"
-    );
-    // A Scheduled trigger is enabled.
-    assert_eq!(
-        trigger["enabled"],
-        json!(true),
-        "Scheduled trigger must have enabled=true"
-    );
-    // No error on a healthy scheduled trigger.
-    assert_eq!(
-        trigger["last_error"],
-        Value::Null,
-        "healthy trigger must not carry last_error"
-    );
-    // is_active alias was dropped; field must be absent from tool output.
-    assert!(
-        trigger.get("is_active").is_none(),
-        "is_active alias was removed; field must not appear in trigger output"
-    );
+    assert_trigger_output_state(trigger, false, true, None);
 }
 
 #[tokio::test]
@@ -630,23 +681,7 @@ async fn builtin_trigger_output_enabled_false_and_last_error_present_for_termina
         .unwrap();
     let trigger = &listed["triggers"][0];
 
-    assert_eq!(
-        trigger["enabled"],
-        json!(false),
-        "terminal Completed trigger must have enabled=false"
-    );
-    assert_eq!(
-        trigger["run_in_flight"],
-        json!(false),
-        "terminal trigger has no active fire"
-    );
-    let last_error = trigger["last_error"]
-        .as_str()
-        .expect("terminal Completed+Error trigger must carry last_error");
-    assert!(
-        last_error.contains("recreate"),
-        "last_error should guide the user to recreate the trigger, got: {last_error}"
-    );
+    assert_trigger_output_state(trigger, false, false, Some("recreate"));
 }
 
 #[tokio::test]
@@ -716,26 +751,7 @@ async fn builtin_trigger_output_enabled_true_and_last_error_present_for_reschedu
         .unwrap();
     let trigger = &listed["triggers"][0];
 
-    // enabled=true: trigger is still scheduled to fire again.
-    assert_eq!(
-        trigger["enabled"],
-        json!(true),
-        "rescheduled-failure trigger must have enabled=true"
-    );
-    // run_in_flight=false: the failed fire has been cleared.
-    assert_eq!(
-        trigger["run_in_flight"],
-        json!(false),
-        "rescheduled-failure trigger has no active fire after permanent failure"
-    );
-    // last_error must be present and indicate the trigger will retry.
-    let last_error = trigger["last_error"]
-        .as_str()
-        .expect("Scheduled+Error trigger must carry last_error");
-    assert!(
-        last_error.contains("still scheduled"),
-        "last_error should tell the user the trigger will retry, got: {last_error}"
-    );
+    assert_trigger_output_state(trigger, false, true, Some("still scheduled"));
 }
 
 #[cfg(feature = "test-support")]
