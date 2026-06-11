@@ -100,6 +100,7 @@ pub struct SlackFinalReplyDeliveryServices {
     pub thread_service: Arc<dyn SessionThreadService>,
     pub turn_coordinator: Arc<dyn TurnCoordinator>,
     pub outbound_store: Arc<dyn OutboundStateStore>,
+    pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
     pub adapter: Arc<dyn ProductAdapter>,
     pub egress: Arc<dyn ProtocolHttpEgress>,
@@ -192,6 +193,7 @@ impl SlackFinalReplyDeliveryObserver {
             };
             let next_blocked_marker = blocked_actionable_marker(&actionable_state);
             let event_kind = notification.event_kind;
+            let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
             let posted_messages = self
                 .deliver_run_notification(
                     &envelope,
@@ -202,6 +204,22 @@ impl SlackFinalReplyDeliveryObserver {
                     notification,
                 )
                 .await?;
+            if (event_kind == RunNotificationEventKind::ApprovalNeeded
+                || event_kind == RunNotificationEventKind::AuthRequired)
+                && let Some(gate_ref_str) = gate_ref_for_routing.as_deref()
+            {
+                record_gate_route_if_needed(
+                    self.services.route_store.as_ref(),
+                    run_id,
+                    &scope.tenant_id,
+                    &binding.actor_user_id,
+                    gate_ref_str,
+                    &scope,
+                    &posted_messages,
+                    Some(envelope.external_conversation_ref()),
+                )
+                .await;
+            }
 
             let Some(marker) = next_blocked_marker else {
                 self.delete_slack_message_if_present(working_message.take())
@@ -262,7 +280,7 @@ impl SlackFinalReplyDeliveryObserver {
                     payload: ProductOutboundPayload::GatePrompt(slack_approval_gate_prompt_view(
                         run_id, gate_ref,
                     )),
-                    gate_ref_for_routing: None,
+                    gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 }
             }
             TurnStatus::BlockedAuth => {
@@ -289,7 +307,7 @@ impl SlackFinalReplyDeliveryObserver {
                 SlackActionableNotification {
                     event_kind: RunNotificationEventKind::AuthRequired,
                     payload: ProductOutboundPayload::AuthPrompt(view),
-                    gate_ref_for_routing: None,
+                    gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 }
             }
             _ => return Ok(None),
@@ -469,6 +487,108 @@ impl SlackFinalReplyDeliveryObserver {
 struct PostedSlackMessage {
     channel: String,
     ts: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_gate_route_if_needed(
+    route_store: &dyn DeliveredGateRouteStore,
+    run_id: TurnRunId,
+    tenant_id: &ironclaw_host_api::TenantId,
+    user_id: &ironclaw_host_api::UserId,
+    gate_ref: &str,
+    scope: &TurnScope,
+    posted_messages: &[PostedSlackMessage],
+    envelope_conv_ref: Option<&ExternalConversationRef>,
+) {
+    let mut conversation_refs: Vec<ironclaw_conversations::ExternalConversationRef> = Vec::new();
+
+    for msg in posted_messages {
+        if let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
+            None,
+            &msg.channel,
+            Some(&msg.ts),
+            None,
+        ) {
+            push_unique_conversation_ref(&mut conversation_refs, conv_ref);
+        }
+    }
+
+    if let Some(env_ref) = envelope_conv_ref
+        && let Ok(env_conv_ref) = conversations_ref_from_product_ref(env_ref)
+    {
+        let env_no_msg = env_conv_ref.without_message_id();
+        push_unique_conversation_ref(&mut conversation_refs, env_no_msg.clone());
+        if let Ok(base_ref) = ironclaw_conversations::ExternalConversationRef::new(
+            env_no_msg.space_id(),
+            env_no_msg.conversation_id(),
+            None,
+            None,
+        ) {
+            push_unique_conversation_ref(&mut conversation_refs, base_ref);
+        }
+    }
+
+    if conversation_refs.is_empty() {
+        return;
+    }
+
+    let record = DeliveredGateRouteRecord {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+        gate_ref: gate_ref.to_string(),
+        run_id,
+        scope: scope.clone(),
+        recorded_at: Utc::now(),
+        delivered_conversation_refs: conversation_refs,
+    };
+
+    if let Err(error) = route_store.record_delivered_gate_route(record).await {
+        // best-effort: route write failure never fails delivery
+        tracing::debug!(
+            target = "ironclaw::reborn::slack_delivery",
+            %run_id,
+            error = %error,
+            "failed to record delivered gate route"
+        );
+        return;
+    }
+
+    if let Err(sweep_err) = route_store
+        .sweep_expired_delivered_gate_routes(Utc::now())
+        .await
+    {
+        tracing::debug!(
+            target = "ironclaw::reborn::slack_delivery",
+            %run_id,
+            error = %sweep_err,
+            "delivered gate route sweep failed"
+        );
+    }
+}
+
+fn push_unique_conversation_ref(
+    refs: &mut Vec<ironclaw_conversations::ExternalConversationRef>,
+    conv_ref: ironclaw_conversations::ExternalConversationRef,
+) {
+    let fingerprint = conv_ref.conversation_fingerprint();
+    if !refs
+        .iter()
+        .any(|existing| existing.conversation_fingerprint() == fingerprint)
+    {
+        refs.push(conv_ref);
+    }
+}
+
+fn conversations_ref_from_product_ref(
+    conv_ref: &ExternalConversationRef,
+) -> Result<ironclaw_conversations::ExternalConversationRef, ironclaw_conversations::InboundTurnError>
+{
+    ironclaw_conversations::ExternalConversationRef::new(
+        conv_ref.space_id(),
+        conv_ref.conversation_id(),
+        conv_ref.topic_id(),
+        conv_ref.reply_target_message_id(),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -1002,6 +1122,7 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
             thread_service: Arc::clone(&self.services.thread_service),
             turn_coordinator: Arc::clone(&self.services.turn_coordinator),
             outbound_store: Arc::clone(&self.services.outbound_store),
+            route_store: Arc::clone(&self.route_store),
             communication_preferences: Arc::clone(&self.services.communication_preferences),
             adapter: Arc::clone(&self.services.adapter),
             egress: Arc::clone(&self.services.egress),
@@ -1010,7 +1131,6 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
         };
         let settings = self.settings;
         let delivery_store = Arc::clone(&self.delivery_store);
-        let route_store = Arc::clone(&self.route_store);
         let fallback_agent_id = self.fallback_agent_id.clone();
 
         tokio::spawn(async move {
@@ -1040,7 +1160,6 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
                 run_id,
                 scope,
                 &*delivery_store,
-                &*route_store,
                 &fallback_agent_id,
             )
             .await;
@@ -1069,7 +1188,6 @@ async fn deliver_triggered_run(
     run_id: TurnRunId,
     scope: TurnScope,
     delivery_store: &dyn TriggeredRunDeliveryStore,
-    route_store: &dyn DeliveredGateRouteStore,
     fallback_agent_id: &ironclaw_host_api::AgentId,
 ) -> TriggeredRunDeliveryOutcomeKind {
     // The actor is the trigger creator.
@@ -1192,49 +1310,20 @@ async fn deliver_triggered_run(
 
         match delivery_result {
             Ok(posted_messages) => {
-                // A delivered approval prompt invites "approve <gate_ref>" in
-                // the creator's DM — record the route so the reply resolves
-                // the gate on this run's thread. Keyed by the trigger creator
-                // (the actor): trusted trigger submissions may carry no
-                // explicit scope owner, and the prompt is delivered to the
-                // creator's personal preference either way. Best-effort:
-                // never affects the delivery outcome.
                 if event_kind == RunNotificationEventKind::ApprovalNeeded
-                    && let Some(gate_ref) = gate_ref_for_routing
+                    && let Some(gate_ref) = gate_ref_for_routing.as_deref()
                 {
-                    let record = DeliveredGateRouteRecord {
-                        tenant_id: scope.tenant_id.clone(),
-                        user_id: fire.creator_user_id.clone(),
-                        gate_ref,
+                    record_gate_route_if_needed(
+                        services.route_store.as_ref(),
                         run_id,
-                        scope: scope.clone(),
-                        recorded_at: Utc::now(),
-                        delivered_conversation_refs: Vec::new(),
-                    };
-                    if let Err(error) = route_store.record_delivered_gate_route(record).await {
-                        tracing::debug!(
-                            target = "ironclaw::reborn::slack_delivery",
-                            %run_id,
-                            error = %error,
-                            "failed to record delivered gate route (best-effort)"
-                        );
-                    } else {
-                        // Opportunistic sweep: remove stale records for this
-                        // user now that we have just written a new one. The
-                        // sweep is best-effort — errors are logged at debug
-                        // and never affect the delivery outcome.
-                        if let Err(sweep_err) = route_store
-                            .sweep_expired_delivered_gate_routes(Utc::now())
-                            .await
-                        {
-                            tracing::debug!(
-                                target = "ironclaw::reborn::slack_delivery",
-                                %run_id,
-                                error = %sweep_err,
-                                "delivered gate route sweep failed (best-effort)"
-                            );
-                        }
-                    }
+                        &scope.tenant_id,
+                        &fire.creator_user_id,
+                        gate_ref,
+                        &scope,
+                        &posted_messages,
+                        None,
+                    )
+                    .await;
                 }
                 if let Some(marker) = next_blocked_marker {
                     if event_kind == RunNotificationEventKind::AuthRequired {
@@ -2016,6 +2105,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
+            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
             communication_preferences: outbound,
             adapter: test_adapter(installation_id),
             egress,

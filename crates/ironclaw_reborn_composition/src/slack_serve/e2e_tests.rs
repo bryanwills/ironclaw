@@ -276,6 +276,8 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
     let egress = RecordingEgress::default();
     let sink = RecordingDeliverySink::default();
     let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
@@ -284,6 +286,7 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
             thread_service: Arc::new(threads),
             turn_coordinator: Arc::new(coordinator.clone()),
             outbound_store,
+            route_store,
             communication_preferences: preferences,
             adapter,
             egress: Arc::new(egress.clone()),

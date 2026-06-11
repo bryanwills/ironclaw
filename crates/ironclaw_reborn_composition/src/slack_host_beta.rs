@@ -307,6 +307,7 @@ pub fn build_triggered_run_delivery_hook(
         thread_service: runtime.webui_thread_service(),
         turn_coordinator: runtime.webui_turn_coordinator(),
         outbound_store,
+        route_store: Arc::clone(&route_store),
         communication_preferences: preferences,
         adapter,
         egress,
@@ -590,6 +591,7 @@ fn build_slack_events_route_mount_with_resolvers(
         &local_runtime.host_state_filesystem,
     )));
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> = outbound.clone();
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> = outbound;
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
@@ -598,6 +600,7 @@ fn build_slack_events_route_mount_with_resolvers(
             thread_service: runtime.webui_thread_service(),
             turn_coordinator: runtime.webui_turn_coordinator(),
             outbound_store,
+            route_store,
             communication_preferences: preferences,
             adapter,
             egress,
