@@ -489,6 +489,7 @@ struct PostedSlackMessage {
     ts: String,
 }
 
+// arch-exempt: too_many_args, needs a GateRouteRecordingContext bundle (store + scope identity + posted refs), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
 #[allow(clippy::too_many_arguments)]
 async fn record_gate_route_if_needed(
     route_store: &dyn DeliveredGateRouteStore,

@@ -484,6 +484,7 @@ async fn load_delivered_route_for_envelope(
     Some(route)
 }
 
+// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
 #[allow(clippy::too_many_arguments)]
 async fn resolve_via_delivered_approval_route(
     envelope: &ProductInboundEnvelope,
