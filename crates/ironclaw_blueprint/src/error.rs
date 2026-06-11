@@ -1,7 +1,19 @@
 //! Error types for blueprint parsing, validation, and lockfile resolution.
 
+use ironclaw_host_api::HostApiError;
 use ironclaw_reborn_config::InlineSecretError;
 use thiserror::Error;
+
+/// Extract the human-readable rule from a host-api validation error, dropping
+/// the upstream `kind` label — a skill validated via the extension grammar
+/// must not report itself as an "extension", and a secret handle carries its
+/// own context in [`BlueprintError::InvalidSecretHandle`].
+pub(crate) fn host_api_reason(err: HostApiError) -> String {
+    match err {
+        HostApiError::InvalidId { reason, .. } => reason,
+        other => other.to_string(),
+    }
+}
 
 /// Anything that can go wrong turning blueprint source into a validated
 /// [`crate::Blueprint`] AST or a [`crate::Lockfile`].
@@ -36,11 +48,10 @@ pub enum BlueprintError {
         source: InlineSecretError,
     },
 
-    /// A `${secret:<name>}` handle had an invalid name segment.
-    #[error(
-        "at `{path}`: secret handle `{handle}` is invalid ({reason}); \
-         names must be lowercase, start with a letter, and use only `a-z0-9_-.`"
-    )]
+    /// A `${secret:<name>}` handle had an invalid name segment. The grammar
+    /// is owned by `SecretHandle` in `ironclaw_host_api`; `reason` carries its
+    /// exact rule so this message never drifts from the real validator.
+    #[error("at `{path}`: secret handle `{handle}` is invalid ({reason})")]
     InvalidSecretHandle {
         path: String,
         handle: String,
@@ -48,9 +59,18 @@ pub enum BlueprintError {
     },
 
     /// A scope / extension / skill / mission / project identifier was empty
-    /// or used disallowed characters.
+    /// or used disallowed characters. The grammars are owned by the typed IDs
+    /// in `ironclaw_host_api`; `reason` carries the rule that was violated.
     #[error("at `{path}`: identifier `{value}` is invalid ({reason})")]
     InvalidIdentifier {
+        path: String,
+        value: String,
+        reason: String,
+    },
+
+    /// An `extensions[].version` requirement was not a valid semver range.
+    #[error("at `{path}`: version requirement `{value}` is invalid ({reason})")]
+    InvalidVersionReq {
         path: String,
         value: String,
         reason: String,

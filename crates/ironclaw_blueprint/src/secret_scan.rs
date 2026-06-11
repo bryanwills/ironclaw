@@ -1,20 +1,26 @@
 //! Inline-secret scanning over the raw TOML tree.
 //!
 //! Walking the untyped [`toml::Value`] (rather than the typed AST) means every
-//! string in the document is checked, including ones that would later be
-//! rejected as unknown keys — a pasted credential fails closed no matter where
-//! it lands. Each finding carries the dotted/indexed path to the offending
-//! value so the operator can fix the exact line.
+//! string in the document is checked — values *and* table keys, including ones
+//! that would later be rejected as unknown keys — so a pasted credential fails
+//! closed no matter where it lands. Keys matter as much as values: inside an
+//! opaque `extensions[].config` table `deny_unknown_fields` cannot see them,
+//! so a credential pasted as a key would otherwise sail through. Each finding
+//! carries the dotted/indexed path to the offending string so the operator can
+//! fix the exact line.
 //!
 //! The one legitimate way to name a secret in a blueprint is a
 //! `${secret:<name>}` handle (per `docs/reborn/contracts/secrets.md`). A value
-//! that is exactly such a handle is allowed (and its name segment validated);
-//! anything else runs through the shared
+//! that is exactly such a handle is allowed — its name validated by
+//! constructing the real [`ironclaw_host_api::SecretHandle`], so the grammar
+//! accepted here is exactly the grammar the secrets layer accepts. Anything
+//! else runs through the shared
 //! [`ironclaw_reborn_config::reject_inline_secret`] guard.
 
+use ironclaw_host_api::SecretHandle;
 use ironclaw_reborn_config::reject_inline_secret;
 
-use crate::error::BlueprintError;
+use crate::error::{BlueprintError, host_api_reason};
 
 const HANDLE_PREFIX: &str = "${secret:";
 const HANDLE_SUFFIX: &str = "}";
@@ -34,6 +40,9 @@ fn walk(value: &toml::Value, path: &mut String) -> Result<(), BlueprintError> {
                     path.push('.');
                 }
                 path.push_str(key);
+                // Keys are operator-typed strings too; scan them so a
+                // credential pasted as a key (not just as a value) is caught.
+                check_string(key, path)?;
                 walk(child, path)?;
                 path.truncate(len);
             }
@@ -77,39 +86,19 @@ fn parse_secret_handle(text: &str) -> Option<&str> {
     Some(inner)
 }
 
-/// Validate a secret-handle name segment. Mirrors the `validate_name_segment`
-/// rules used by `SecretHandle` in `ironclaw_host_api`: non-empty, lowercase
-/// ASCII start, `a-z0-9_-.` only, no `..`, bounded length.
+/// Validate a secret-handle name by constructing the real
+/// [`SecretHandle`] — the same constructor the secrets layer uses — so a
+/// handle accepted at parse time can never be rejected at resolve time, and
+/// vice versa. Re-implementing the grammar here is how it drifted before.
 fn validate_handle_name(name: &str, path: &str) -> Result<(), BlueprintError> {
-    let invalid = |reason: &str| BlueprintError::InvalidSecretHandle {
-        path: path.to_string(),
-        handle: name.to_string(),
-        reason: reason.to_string(),
-    };
-
-    if name.is_empty() {
-        return Err(invalid("empty name"));
+    match SecretHandle::new(name) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(BlueprintError::InvalidSecretHandle {
+            path: path.to_string(),
+            handle: name.to_string(),
+            reason: host_api_reason(err),
+        }),
     }
-    if name.len() > 128 {
-        return Err(invalid("longer than 128 bytes"));
-    }
-    if name.contains("..") {
-        return Err(invalid("contains `..`"));
-    }
-    let mut chars = name.chars();
-    let first = chars.next().expect("name is non-empty");
-    if !first.is_ascii_lowercase() {
-        return Err(invalid("must start with a lowercase ASCII letter"));
-    }
-    for character in name.chars() {
-        let ok = character.is_ascii_lowercase()
-            || character.is_ascii_digit()
-            || matches!(character, '_' | '-' | '.');
-        if !ok {
-            return Err(invalid("contains a character outside `a-z0-9_-.`"));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -161,5 +150,34 @@ mod tests {
     fn rejects_handle_name_traversal() {
         let err = scan_str(r#"api_key = "${secret:../escape}""#).expect_err("traversal rejected");
         assert!(matches!(err, BlueprintError::InvalidSecretHandle { .. }));
+    }
+
+    /// Pins grammar parity with `ironclaw_host_api::SecretHandle`: digit-start
+    /// names are valid there and must be valid here.
+    #[test]
+    fn allows_digit_start_handle_name() {
+        scan_str(r#"api_key = "${secret:1password_token}""#).expect("digit start allowed");
+    }
+
+    /// Pins grammar parity the other way: empty dot segments are rejected by
+    /// `SecretHandle` and must be rejected here too.
+    #[test]
+    fn rejects_empty_dot_segment_handle_name() {
+        let err = scan_str(r#"api_key = "${secret:a.}""#).expect_err("empty dot segment rejected");
+        assert!(matches!(err, BlueprintError::InvalidSecretHandle { .. }));
+    }
+
+    /// A credential pasted as a table KEY (not a value) must be caught too —
+    /// inside an opaque config table, `deny_unknown_fields` never sees it.
+    #[test]
+    fn rejects_inline_credential_in_table_key() {
+        let err = scan_str("[config]\n\"sk-proj-abcdef1234567890abcdef1234\" = true\n")
+            .expect_err("secret-as-key rejected");
+        match err {
+            BlueprintError::InlineSecret { path, .. } => {
+                assert_eq!(path, "config.sk-proj-abcdef1234567890abcdef1234");
+            }
+            other => panic!("expected InlineSecret, got {other:?}"),
+        }
     }
 }

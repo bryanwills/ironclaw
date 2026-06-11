@@ -11,13 +11,18 @@
 //! and the `[agent_loop]` driver-selection block (#3107) — because once
 //! `ironclaw.config/v1` ships, the only way to add a field is a migration or a
 //! major bump. Better to land the full surface now.
+//!
+//! Every type also derives [`JsonSchema`] so the per-domain JSON Schema
+//! artifacts (see [`crate::json_schema`]) are generated from these exact
+//! shapes and can never drift from what the parser accepts.
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Root blueprint document.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Blueprint {
     /// Locks the schema major. Validated against [`crate::SUPPORTED_API_VERSION`].
@@ -67,14 +72,14 @@ pub struct Blueprint {
 }
 
 /// Document-kind discriminant for the blueprint file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum BlueprintKind {
     Blueprint,
 }
 
 /// Apply scope. All fields optional; absence means "do not narrow on this
 /// axis".
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Scope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +93,7 @@ pub struct Scope {
 }
 
 /// Scoped system-prompt setting.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SystemPrompt {
     /// Root-relative path to the prompt body. Read once, hashed into the
@@ -99,7 +104,7 @@ pub struct SystemPrompt {
 }
 
 /// Narrowing selector for where a scoped setting applies.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppliesTo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,7 +121,7 @@ pub struct AppliesTo {
 /// This struct cannot use `deny_unknown_fields` because the named provider
 /// tables are flattened into `entries`; unknown *provider config* keys are
 /// still rejected by [`ProviderEntry`].
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Providers {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_llm: Option<String>,
@@ -126,7 +131,7 @@ pub struct Providers {
 
 /// Per-provider configuration. `api_key` accepts only a `${secret:<name>}`
 /// handle (enforced by the secret scan); inline material is rejected.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,7 +145,7 @@ pub struct ProviderEntry {
 }
 
 /// `[runtime]` — declared profile + approval policy.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Runtime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,7 +155,7 @@ pub struct Runtime {
 }
 
 /// `[agent_loop]` — optional loop-driver selection (#3107).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentLoop {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,7 +169,7 @@ pub struct AgentLoop {
 }
 
 /// `[[extensions]]` entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Extension {
     pub id: String,
@@ -173,15 +178,17 @@ pub struct Extension {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust: Option<String>,
     /// Opaque per-extension config. Validated against the extension's own
-    /// schema by the apply reconciler, not here.
+    /// schema by the apply reconciler, not here — which is also why the JSON
+    /// Schema view of this field is deliberately permissive (`any`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub config: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ExtensionAuth>,
 }
 
 /// Extension auth binding. References an account, never embeds credentials.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionAuth {
     pub kind: String,
@@ -190,7 +197,7 @@ pub struct ExtensionAuth {
 }
 
 /// `[[skills]]` entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Skill {
     pub id: String,
@@ -201,7 +208,7 @@ pub struct Skill {
 }
 
 /// `[[missions]]` entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Mission {
     pub id: String,
@@ -213,7 +220,7 @@ pub struct Mission {
 }
 
 /// `[[projects]]` entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
     pub id: String,
@@ -222,7 +229,7 @@ pub struct Project {
 }
 
 /// Seed source for a pre-seeded project.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSeed {
     pub from: String,
@@ -234,7 +241,7 @@ pub struct ProjectSeed {
 
 /// Capability-surface visibility filter. Glob entries like `github-mcp.*` are
 /// allowed; this is matched before the model call, not at authorization time.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitySurface {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -246,7 +253,7 @@ pub struct CapabilitySurface {
 /// `[harness]` — either bind a registered harness by id, define one inline, or
 /// both (a registered id with inline overrides is rejected at validation; the
 /// two are mutually exclusive).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,7 +265,7 @@ pub struct HarnessBinding {
 /// Inline harness definition (#3036 comment). Registered as project-scoped in
 /// the typed harness repo at apply time; behaviourally identical to a separate
 /// manifest.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InlineHarness {
     pub id: String,
@@ -274,7 +281,7 @@ pub struct InlineHarness {
 
 /// Prompt overlay composed on top of the resolved scope system prompt — never
 /// a replacement for identity files.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromptOverlay {
     /// Root-relative path to the overlay body. Hashed into the lockfile.
@@ -282,7 +289,7 @@ pub struct PromptOverlay {
 }
 
 /// A `{ id = "…" }` reference to a required extension or skill.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredRef {
     pub id: String,

@@ -5,9 +5,13 @@
 //! relative to the blueprint root, read once, and embedded in a lockfile by
 //! SHA-256 so an apply is reproducible and tamper-evident across machines.
 //!
-//! Resolution fails closed: absolute paths and any `..` component are rejected
-//! before touching the filesystem, so a blueprint cannot reach outside its own
-//! directory.
+//! Resolution fails closed twice: absolute paths and any `..` component are
+//! rejected lexically before touching the filesystem, and the resolved real
+//! path (after following symlinks) must still live under the canonicalized
+//! blueprint root — so neither a `..` reference nor a symlink planted inside
+//! the blueprint directory can reach outside it. The second check matters for
+//! GitOps-style flows where the blueprint directory arrives from a remote
+//! repository and may contain hostile symlinks.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -30,7 +34,9 @@ pub struct FileRefSite {
 /// A resolved, hashed file reference recorded in the lockfile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockedFile {
-    /// Root-relative path of the referenced file.
+    /// Normalized root-relative path of the referenced file (`/`-separated,
+    /// `.` components removed), so equivalent spellings of the same reference
+    /// collapse to one entry and the lockfile is identical across platforms.
     pub path: String,
     /// Lowercase hex SHA-256 of the file contents.
     pub sha256: String,
@@ -75,22 +81,45 @@ impl Blueprint {
     }
 
     /// Resolve every file reference against `root`, hash the contents, and
-    /// produce a [`Lockfile`]. Fails if a reference escapes the root or a
-    /// referenced file cannot be read.
+    /// produce a [`Lockfile`]. Fails if a reference escapes the root (lexically
+    /// or through a symlink) or a referenced file cannot be read.
     pub fn resolve_lockfile(&self, root: &Path) -> Result<Lockfile, BlueprintError> {
+        let refs = self.file_refs();
         let mut files = Vec::new();
-        for FileRefSite { site, reference } in self.file_refs() {
-            let relative = validate_relative(&site, &reference)?;
-            let absolute = root.join(&relative);
-            let bytes = std::fs::read(&absolute).map_err(|e| BlueprintError::FileRefRead {
-                path: site.clone(),
-                reference: reference.clone(),
-                reason: e.to_string(),
-            })?;
+        if refs.is_empty() {
+            return Ok(Lockfile {
+                api_version: self.api_version.clone(),
+                files,
+            });
+        }
+
+        // Canonicalize the root once so the containment check below compares
+        // real paths even when the root itself is reached through a symlink
+        // (e.g. `/var` -> `/private/var` on macOS).
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|e| read_error("(blueprint root)", &root.display().to_string(), &e))?;
+
+        for FileRefSite { site, reference } in refs {
+            let (relative, normalized) = validate_relative(&site, &reference)?;
+            // The lexical check cannot see symlinks: canonicalize the joined
+            // path and require the real file to stay under the root.
+            let resolved = canonical_root
+                .join(&relative)
+                .canonicalize()
+                .map_err(|e| read_error(&site, &reference, &e))?;
+            if !resolved.starts_with(&canonical_root) {
+                return Err(BlueprintError::InvalidFileRef {
+                    path: site,
+                    reference,
+                    reason: "resolves outside the blueprint root via a symlink".to_string(),
+                });
+            }
+            let bytes = std::fs::read(&resolved).map_err(|e| read_error(&site, &reference, &e))?;
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             files.push(LockedFile {
-                path: reference,
+                path: normalized,
                 sha256: hex::encode(hasher.finalize()),
             });
         }
@@ -103,9 +132,19 @@ impl Blueprint {
     }
 }
 
+fn read_error(site: &str, reference: &str, error: &std::io::Error) -> BlueprintError {
+    BlueprintError::FileRefRead {
+        path: site.to_string(),
+        reference: reference.to_string(),
+        reason: error.to_string(),
+    }
+}
+
 /// Reject absolute paths, root/prefix components, and any `..` so a reference
-/// can only name files at or below the blueprint root.
-fn validate_relative(site: &str, reference: &str) -> Result<PathBuf, BlueprintError> {
+/// can only name files at or below the blueprint root. Returns the validated
+/// relative path plus its normalized `/`-separated string form for the
+/// lockfile (so `files/./a.md` and `files/a.md` record identically).
+fn validate_relative(site: &str, reference: &str) -> Result<(PathBuf, String), BlueprintError> {
     let invalid = |reason: &str| BlueprintError::InvalidFileRef {
         path: site.to_string(),
         reference: reference.to_string(),
@@ -117,9 +156,14 @@ fn validate_relative(site: &str, reference: &str) -> Result<PathBuf, BlueprintEr
         return Err(invalid("absolute paths are not allowed"));
     }
     let mut normalized = PathBuf::new();
+    let mut segments = Vec::new();
     for component in path.components() {
         match component {
-            Component::Normal(segment) => normalized.push(segment),
+            Component::Normal(segment) => {
+                // Lossless: `reference` is `&str`, so every segment is UTF-8.
+                segments.push(segment.to_string_lossy());
+                normalized.push(segment);
+            }
             Component::CurDir => {}
             Component::ParentDir => return Err(invalid("`..` components are not allowed")),
             Component::RootDir | Component::Prefix(_) => {
@@ -130,7 +174,7 @@ fn validate_relative(site: &str, reference: &str) -> Result<PathBuf, BlueprintEr
     if normalized.as_os_str().is_empty() {
         return Err(invalid("empty reference"));
     }
-    Ok(normalized)
+    Ok((normalized, segments.join("/")))
 }
 
 #[cfg(test)]
@@ -153,8 +197,21 @@ mod tests {
 
     #[test]
     fn accepts_nested_relative() {
-        let resolved = validate_relative("system_prompt.text_ref", "files/prompt.md")
+        let (resolved, normalized) = validate_relative("system_prompt.text_ref", "files/prompt.md")
             .expect("nested relative ok");
         assert_eq!(resolved, PathBuf::from("files/prompt.md"));
+        assert_eq!(normalized, "files/prompt.md");
+    }
+
+    #[test]
+    fn normalizes_curdir_components() {
+        let (resolved, normalized) =
+            validate_relative("system_prompt.text_ref", "files/./prompt.md")
+                .expect("curdir normalized");
+        assert_eq!(resolved, PathBuf::from("files/prompt.md"));
+        assert_eq!(
+            normalized, "files/prompt.md",
+            "equivalent spellings must record identically in the lockfile"
+        );
     }
 }
