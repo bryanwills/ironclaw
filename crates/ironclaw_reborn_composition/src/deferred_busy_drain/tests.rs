@@ -1,4 +1,9 @@
-use std::sync::Arc;
+// File-size budget: this test suite is expected to be decomposed when the drain
+// moves behind the `product_workflow` replay owner (issue #4831).
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_threads::{
@@ -2050,5 +2055,548 @@ async fn drain_replays_persisted_refs_verbatim_in_submit_turn_request() {
         captured.accepted_message_ref.as_str(),
         expected_accepted_ref,
         "accepted_message_ref must point at the deferred message"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Scenario M: DRAIN_TOTAL_CAP boundary — drain stops after 64 invalid records
+//
+// A list service that always returns DRAIN_LIST_LIMIT (8) invalid records
+// (all missing canonical refs) until the drain's total cap is hit.  The
+// drain must stop after examining at most DRAIN_TOTAL_CAP (64) records
+// and return Ok without ever calling mark_message_submitted.
+// -----------------------------------------------------------------------
+
+/// Service that returns a full window of `DRAIN_LIST_LIMIT` invalid
+/// deferred records (no turn_source_binding_ref) on every call,
+/// simulating a pathologically large backlog of legacy / bad entries.
+/// `mark_message_submitted` is unreachable — any call panics the test.
+/// The number of `list_deferred_busy_messages` calls is tracked so the
+/// test can assert the drain didn't loop past the cap.
+struct OverCapInvalidListService {
+    list_call_count: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_threads::SessionThreadService for OverCapInvalidListService {
+    async fn ensure_thread(
+        &self,
+        _: ironclaw_threads::EnsureThreadRequest,
+    ) -> Result<ironclaw_threads::SessionThreadRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: ensure_thread")
+    }
+    async fn accept_inbound_message(
+        &self,
+        _: ironclaw_threads::AcceptInboundMessageRequest,
+    ) -> Result<ironclaw_threads::AcceptedInboundMessage, ironclaw_threads::SessionThreadError>
+    {
+        unreachable!("OverCapInvalidListService: accept_inbound_message")
+    }
+    async fn replay_accepted_inbound_message(
+        &self,
+        _: ironclaw_threads::ReplayAcceptedInboundMessageRequest,
+    ) -> Result<
+        Option<ironclaw_threads::AcceptedInboundMessageReplay>,
+        ironclaw_threads::SessionThreadError,
+    > {
+        unreachable!("OverCapInvalidListService: replay_accepted_inbound_message")
+    }
+    /// Must never be called — drain must not submit any of the invalid records.
+    async fn mark_message_submitted(
+        &self,
+        _: &ThreadScope,
+        _: &ironclaw_host_api::ThreadId,
+        _: ironclaw_threads::ThreadMessageId,
+        _: String,
+        _: String,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!(
+            "OverCapInvalidListService: mark_message_submitted must not be called for invalid records"
+        )
+    }
+    async fn mark_message_deferred_busy(
+        &self,
+        _: &ThreadScope,
+        _: &ironclaw_host_api::ThreadId,
+        _: ironclaw_threads::ThreadMessageId,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: mark_message_deferred_busy")
+    }
+    /// Always returns a full window of 8 invalid records (no turn_source_binding_ref),
+    /// each with an incrementing sequence number derived from the request cursor.
+    /// This ensures after_sequence pagination works correctly and the drain
+    /// always gets a non-empty window, forcing it to keep going until the cap.
+    async fn list_deferred_busy_messages(
+        &self,
+        request: ironclaw_threads::ListDeferredBusyMessagesRequest,
+    ) -> Result<Vec<ironclaw_threads::ThreadMessageRecord>, ironclaw_threads::SessionThreadError>
+    {
+        let call_n = self.list_call_count.fetch_add(1, Ordering::Relaxed);
+        let window_size = request.limit.unwrap_or(8);
+        // Generate sequences starting after after_sequence (or from 1).
+        let base_seq = request.after_sequence.unwrap_or(0) + 1;
+        let records = (0..window_size)
+            .map(|i| ironclaw_threads::ThreadMessageRecord {
+                message_id: ironclaw_threads::ThreadMessageId::new(),
+                thread_id: thread_id(),
+                sequence: base_seq + i as u64,
+                kind: ironclaw_threads::MessageKind::User,
+                status: ironclaw_threads::MessageStatus::DeferredBusy,
+                actor_id: Some(actor().as_str().to_string()),
+                source_binding_id: Some("binding-drain".to_string()),
+                reply_target_binding_id: Some("binding-drain".to_string()),
+                turn_id: None,
+                turn_run_id: None,
+                tool_result_ref: None,
+                tool_result_provider_call: None,
+                content: Some(format!("cap-test message call={call_n} i={i}")),
+                redaction_ref: None,
+                // No canonical refs → drain skips all of these.
+                turn_source_binding_ref: None,
+                turn_reply_target_binding_ref: None,
+            })
+            .collect();
+        Ok(records)
+    }
+    async fn append_assistant_draft(
+        &self,
+        _: ironclaw_threads::AppendAssistantDraftRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: append_assistant_draft")
+    }
+    async fn append_tool_result_reference(
+        &self,
+        _: ironclaw_threads::AppendToolResultReferenceRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: append_tool_result_reference")
+    }
+    async fn append_capability_display_preview(
+        &self,
+        _: ironclaw_threads::AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: append_capability_display_preview")
+    }
+    async fn update_tool_result_reference(
+        &self,
+        _: ironclaw_threads::UpdateToolResultReferenceRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: update_tool_result_reference")
+    }
+    async fn update_assistant_draft(
+        &self,
+        _: ironclaw_threads::UpdateAssistantDraftRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: update_assistant_draft")
+    }
+    async fn finalize_assistant_message(
+        &self,
+        _: &ThreadScope,
+        _: &ironclaw_host_api::ThreadId,
+        _: ironclaw_threads::ThreadMessageId,
+        _: ironclaw_threads::MessageContent,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: finalize_assistant_message")
+    }
+    async fn redact_message(
+        &self,
+        _: ironclaw_threads::RedactMessageRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: redact_message")
+    }
+    async fn load_context_window(
+        &self,
+        _: ironclaw_threads::LoadContextWindowRequest,
+    ) -> Result<ironclaw_threads::ContextWindow, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: load_context_window")
+    }
+    async fn load_context_messages(
+        &self,
+        _: ironclaw_threads::LoadContextMessagesRequest,
+    ) -> Result<ironclaw_threads::ContextMessages, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: load_context_messages")
+    }
+    async fn list_thread_history(
+        &self,
+        _: ironclaw_threads::ThreadHistoryRequest,
+    ) -> Result<ironclaw_threads::ThreadHistory, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: list_thread_history")
+    }
+    async fn create_summary_artifact(
+        &self,
+        _: ironclaw_threads::CreateSummaryArtifactRequest,
+    ) -> Result<ironclaw_threads::SummaryArtifact, ironclaw_threads::SessionThreadError> {
+        unreachable!("OverCapInvalidListService: create_summary_artifact")
+    }
+    // Methods with default impls are inherited.
+}
+
+#[tokio::test]
+async fn drain_stops_after_total_cap_when_all_records_invalid() {
+    let list_call_count = Arc::new(AtomicUsize::new(0));
+    let svc: Arc<dyn ironclaw_threads::SessionThreadService> =
+        Arc::new(OverCapInvalidListService {
+            list_call_count: Arc::clone(&list_call_count),
+        });
+
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+
+    let drain = Arc::new(DeferredBusyDrainObserver::new_unbound(Arc::clone(&svc)));
+    let drain_observer: Arc<dyn TurnCommittedEventObserver> =
+        Arc::clone(&drain) as Arc<dyn TurnCommittedEventObserver>;
+    lifecycle_bus
+        .subscribe_required(drain_observer)
+        .expect("subscribe drain");
+
+    let publishing_store = Arc::new(LifecyclePublishingTurnStateStore::new(
+        Arc::clone(&turn_store),
+        lifecycle_bus,
+    ));
+    let coordinator: Arc<dyn TurnCoordinator> =
+        Arc::new(DefaultTurnCoordinator::new(Arc::clone(&publishing_store)));
+    drain
+        .bind_coordinator(Arc::clone(&coordinator))
+        .expect("bind coordinator");
+
+    // Submit a run and then cancel it to fire the drain.
+    let run_response = coordinator
+        .submit_turn(SubmitTurnRequest {
+            scope: turn_scope(),
+            actor: TurnActor::new(actor()),
+            accepted_message_ref: AcceptedMessageRef::new("msg:cap-test-a").unwrap(),
+            source_binding_ref: SourceBindingRef::new("src:binding-drain").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:binding-drain").unwrap(),
+            requested_run_profile: None,
+            idempotency_key: IdempotencyKey::new("turn:cap-test-a").unwrap(),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+        })
+        .await
+        .expect("submit turn");
+    let SubmitTurnResponse::Accepted { run_id, .. } = run_response;
+
+    // Cancel fires drain → list returns endless invalid windows →
+    // drain hits DRAIN_TOTAL_CAP (64) and stops without submitting.
+    // mark_message_submitted would panic if called (unreachable!).
+    let cancel_result = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: turn_scope(),
+            actor: TurnActor::new(actor()),
+            run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("cancel:cap-test-a").unwrap(),
+        })
+        .await;
+    assert!(
+        cancel_result.is_ok(),
+        "cancel_run must return Ok even when drain hits cap: {cancel_result:?}"
+    );
+
+    // The drain must have made a bounded number of list calls.
+    // With DRAIN_TOTAL_CAP=64 and DRAIN_LIST_LIMIT=8, the drain examines
+    // at most 64 records across 8 full windows of 8, so list was called at
+    // most 9 times (the cap can be hit either at the start of a window or
+    // mid-window, so at most one extra fetch is possible).
+    let calls = list_call_count.load(Ordering::Relaxed);
+    assert!(
+        calls <= 9,
+        "drain must not exceed 9 list calls for 64-record cap (DRAIN_LIST_LIMIT=8), made {calls}"
+    );
+    assert!(
+        calls >= 1,
+        "drain must call list_deferred_busy_messages at least once"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Scenario N: malformed persisted binding refs — drain skips, submits next
+//
+// The oldest deferred record has turn_source_binding_ref that exceeds the
+// 256-byte SourceBindingRef limit, so SourceBindingRef::new rejects it.
+// The next record is valid.  The drain must skip the first (leaving it
+// DeferredBusy) and submit the second.
+// -----------------------------------------------------------------------
+
+/// Service that returns two records on the first call:
+///   1. A record with a >256-byte turn_source_binding_ref (malformed).
+///   2. A valid record with proper canonical refs.
+/// On subsequent calls (after_sequence set) returns empty.
+/// `mark_message_submitted` is allowed and records the submitted message id.
+struct MalformedRefListService {
+    bad_message_id: ironclaw_threads::ThreadMessageId,
+    good_message_id: ironclaw_threads::ThreadMessageId,
+    submitted_id: Arc<tokio::sync::Mutex<Option<ironclaw_threads::ThreadMessageId>>>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_threads::SessionThreadService for MalformedRefListService {
+    async fn ensure_thread(
+        &self,
+        _: ironclaw_threads::EnsureThreadRequest,
+    ) -> Result<ironclaw_threads::SessionThreadRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: ensure_thread")
+    }
+    async fn accept_inbound_message(
+        &self,
+        _: ironclaw_threads::AcceptInboundMessageRequest,
+    ) -> Result<ironclaw_threads::AcceptedInboundMessage, ironclaw_threads::SessionThreadError>
+    {
+        unreachable!("MalformedRefListService: accept_inbound_message")
+    }
+    async fn replay_accepted_inbound_message(
+        &self,
+        _: ironclaw_threads::ReplayAcceptedInboundMessageRequest,
+    ) -> Result<
+        Option<ironclaw_threads::AcceptedInboundMessageReplay>,
+        ironclaw_threads::SessionThreadError,
+    > {
+        unreachable!("MalformedRefListService: replay_accepted_inbound_message")
+    }
+    /// Records the submitted message_id; must only be called for the valid record.
+    async fn mark_message_submitted(
+        &self,
+        _: &ThreadScope,
+        _: &ironclaw_host_api::ThreadId,
+        message_id: ironclaw_threads::ThreadMessageId,
+        _: String,
+        _: String,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        *self.submitted_id.lock().await = Some(message_id);
+        Ok(ironclaw_threads::ThreadMessageRecord {
+            message_id,
+            thread_id: thread_id(),
+            sequence: 2,
+            kind: ironclaw_threads::MessageKind::User,
+            status: ironclaw_threads::MessageStatus::Submitted,
+            actor_id: Some(actor().as_str().to_string()),
+            source_binding_id: Some("binding-drain".to_string()),
+            reply_target_binding_id: Some("binding-drain".to_string()),
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some("malformed-test good message".to_string()),
+            redaction_ref: None,
+            turn_source_binding_ref: Some("src:binding-drain".to_string()),
+            turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+        })
+    }
+    async fn mark_message_deferred_busy(
+        &self,
+        _: &ThreadScope,
+        _: &ironclaw_host_api::ThreadId,
+        _: ironclaw_threads::ThreadMessageId,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: mark_message_deferred_busy")
+    }
+    /// Returns bad record (seq=1) then good record (seq=2) on first call.
+    /// Returns empty on subsequent calls (after_sequence is Some).
+    async fn list_deferred_busy_messages(
+        &self,
+        request: ironclaw_threads::ListDeferredBusyMessagesRequest,
+    ) -> Result<Vec<ironclaw_threads::ThreadMessageRecord>, ironclaw_threads::SessionThreadError>
+    {
+        if request.after_sequence.is_some() {
+            return Ok(vec![]);
+        }
+        // The bad record has a turn_source_binding_ref that is 257 bytes long
+        // (exceeds the 256-byte limit validated by SourceBindingRef::new).
+        let overlong_ref = "x".repeat(257);
+        Ok(vec![
+            ironclaw_threads::ThreadMessageRecord {
+                message_id: self.bad_message_id,
+                thread_id: thread_id(),
+                sequence: 1,
+                kind: ironclaw_threads::MessageKind::User,
+                status: ironclaw_threads::MessageStatus::DeferredBusy,
+                actor_id: Some(actor().as_str().to_string()),
+                source_binding_id: Some("binding-drain".to_string()),
+                reply_target_binding_id: Some("binding-drain".to_string()),
+                turn_id: None,
+                turn_run_id: None,
+                tool_result_ref: None,
+                tool_result_provider_call: None,
+                content: Some("malformed-test bad message".to_string()),
+                redaction_ref: None,
+                // >256 bytes → SourceBindingRef::new will reject this.
+                turn_source_binding_ref: Some(overlong_ref),
+                turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+            },
+            ironclaw_threads::ThreadMessageRecord {
+                message_id: self.good_message_id,
+                thread_id: thread_id(),
+                sequence: 2,
+                kind: ironclaw_threads::MessageKind::User,
+                status: ironclaw_threads::MessageStatus::DeferredBusy,
+                actor_id: Some(actor().as_str().to_string()),
+                source_binding_id: Some("binding-drain".to_string()),
+                reply_target_binding_id: Some("binding-drain".to_string()),
+                turn_id: None,
+                turn_run_id: None,
+                tool_result_ref: None,
+                tool_result_provider_call: None,
+                content: Some("malformed-test good message".to_string()),
+                redaction_ref: None,
+                turn_source_binding_ref: Some("src:binding-drain".to_string()),
+                turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+            },
+        ])
+    }
+    async fn append_assistant_draft(
+        &self,
+        _: ironclaw_threads::AppendAssistantDraftRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: append_assistant_draft")
+    }
+    async fn append_tool_result_reference(
+        &self,
+        _: ironclaw_threads::AppendToolResultReferenceRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: append_tool_result_reference")
+    }
+    async fn append_capability_display_preview(
+        &self,
+        _: ironclaw_threads::AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: append_capability_display_preview")
+    }
+    async fn update_tool_result_reference(
+        &self,
+        _: ironclaw_threads::UpdateToolResultReferenceRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: update_tool_result_reference")
+    }
+    async fn update_assistant_draft(
+        &self,
+        _: ironclaw_threads::UpdateAssistantDraftRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: update_assistant_draft")
+    }
+    async fn finalize_assistant_message(
+        &self,
+        _: &ThreadScope,
+        _: &ironclaw_host_api::ThreadId,
+        _: ironclaw_threads::ThreadMessageId,
+        _: ironclaw_threads::MessageContent,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: finalize_assistant_message")
+    }
+    async fn redact_message(
+        &self,
+        _: ironclaw_threads::RedactMessageRequest,
+    ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: redact_message")
+    }
+    async fn load_context_window(
+        &self,
+        _: ironclaw_threads::LoadContextWindowRequest,
+    ) -> Result<ironclaw_threads::ContextWindow, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: load_context_window")
+    }
+    async fn load_context_messages(
+        &self,
+        _: ironclaw_threads::LoadContextMessagesRequest,
+    ) -> Result<ironclaw_threads::ContextMessages, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: load_context_messages")
+    }
+    async fn list_thread_history(
+        &self,
+        _: ironclaw_threads::ThreadHistoryRequest,
+    ) -> Result<ironclaw_threads::ThreadHistory, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: list_thread_history")
+    }
+    async fn create_summary_artifact(
+        &self,
+        _: ironclaw_threads::CreateSummaryArtifactRequest,
+    ) -> Result<ironclaw_threads::SummaryArtifact, ironclaw_threads::SessionThreadError> {
+        unreachable!("MalformedRefListService: create_summary_artifact")
+    }
+    // Methods with default impls are inherited.
+}
+
+#[tokio::test]
+async fn drain_skips_malformed_persisted_binding_refs_and_submits_next() {
+    let bad_message_id = ironclaw_threads::ThreadMessageId::new();
+    let good_message_id = ironclaw_threads::ThreadMessageId::new();
+    let submitted_id: Arc<tokio::sync::Mutex<Option<ironclaw_threads::ThreadMessageId>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    let svc: Arc<dyn ironclaw_threads::SessionThreadService> = Arc::new(MalformedRefListService {
+        bad_message_id,
+        good_message_id,
+        submitted_id: Arc::clone(&submitted_id),
+    });
+
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+
+    let drain = Arc::new(DeferredBusyDrainObserver::new_unbound(Arc::clone(&svc)));
+    let drain_observer: Arc<dyn TurnCommittedEventObserver> =
+        Arc::clone(&drain) as Arc<dyn TurnCommittedEventObserver>;
+    lifecycle_bus
+        .subscribe_required(drain_observer)
+        .expect("subscribe drain");
+
+    let publishing_store = Arc::new(LifecyclePublishingTurnStateStore::new(
+        Arc::clone(&turn_store),
+        lifecycle_bus,
+    ));
+    let coordinator: Arc<dyn TurnCoordinator> =
+        Arc::new(DefaultTurnCoordinator::new(Arc::clone(&publishing_store)));
+    drain
+        .bind_coordinator(Arc::clone(&coordinator))
+        .expect("bind coordinator");
+
+    // Submit a run so we can cancel it to trigger the drain.
+    let run_response = coordinator
+        .submit_turn(SubmitTurnRequest {
+            scope: turn_scope(),
+            actor: TurnActor::new(actor()),
+            accepted_message_ref: AcceptedMessageRef::new("msg:malformed-test-a").unwrap(),
+            source_binding_ref: SourceBindingRef::new("src:binding-drain").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:binding-drain").unwrap(),
+            requested_run_profile: None,
+            idempotency_key: IdempotencyKey::new("turn:malformed-test-a").unwrap(),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+        })
+        .await
+        .expect("submit turn");
+    let SubmitTurnResponse::Accepted { run_id, .. } = run_response;
+
+    // Cancel fires drain → list returns [bad, good] → drain skips bad
+    // (malformed turn_source_binding_ref >256 bytes) → submits good.
+    let cancel_result = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: turn_scope(),
+            actor: TurnActor::new(actor()),
+            run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("cancel:malformed-test-a").unwrap(),
+        })
+        .await;
+    assert!(
+        cancel_result.is_ok(),
+        "cancel_run must succeed even with a malformed record in the deferred list: {cancel_result:?}"
+    );
+
+    // The good message must have been passed to mark_message_submitted.
+    // The bad message must NOT appear — drain skips it and leaves it DeferredBusy.
+    let submitted = submitted_id.lock().await.take();
+    assert_eq!(
+        submitted,
+        Some(good_message_id),
+        "drain must submit the valid record after skipping the malformed one; \
+         bad_message_id={bad_message_id}, good_message_id={good_message_id}, submitted={submitted:?}"
     );
 }

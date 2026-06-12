@@ -109,7 +109,11 @@ impl ThreadScopeResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, TenantId, UserId};
+    use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+    use ironclaw_turns::{
+        AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+        SourceBindingRef, TurnEventKind, TurnId, TurnRunId, TurnStatus,
+    };
 
     fn scope(owner: Option<&str>) -> ThreadScope {
         ThreadScope {
@@ -123,6 +127,165 @@ mod tests {
 
     fn actor(user: &str) -> TurnActor {
         TurnActor::new(UserId::new(user).expect("user"))
+    }
+
+    fn turn_scope_with_owner(owner_user_id: Option<UserId>) -> TurnScope {
+        TurnScope::new_with_owner(
+            TenantId::new("tenant").expect("tenant"),
+            Some(AgentId::new("agent").expect("agent")),
+            None,
+            ThreadId::new("thread").expect("thread"),
+            owner_user_id,
+        )
+    }
+
+    fn agentless_turn_scope() -> TurnScope {
+        TurnScope::new(
+            TenantId::new("tenant").expect("tenant"),
+            None, // no agent_id → agentless
+            None,
+            ThreadId::new("thread").expect("thread"),
+        )
+    }
+
+    fn minimal_run_state(scope: TurnScope, actor: Option<TurnActor>) -> TurnRunState {
+        TurnRunState {
+            scope,
+            actor,
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Completed,
+            accepted_message_ref: AcceptedMessageRef::new("test-msg").expect("valid"),
+            source_binding_ref: SourceBindingRef::new("test-src").expect("valid"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("test-reply").expect("valid"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: chrono::Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor(0),
+        }
+    }
+
+    fn minimal_lifecycle_event(
+        scope: TurnScope,
+        owner_user_id: Option<UserId>,
+    ) -> TurnLifecycleEvent {
+        TurnLifecycleEvent {
+            cursor: EventCursor(1),
+            scope,
+            occurred_at: None,
+            owner_user_id,
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Completed,
+            kind: TurnEventKind::Completed,
+            blocked_gate: None,
+            sanitized_reason: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_for_terminal_event
+    // -----------------------------------------------------------------------
+
+    /// Explicit owner in TurnScope takes priority over event.owner_user_id.
+    #[test]
+    fn derive_for_terminal_event_explicit_owner_preferred() {
+        let ts = turn_scope_with_owner(Some(UserId::new("explicit-owner").expect("user")));
+        let event = minimal_lifecycle_event(ts, Some(UserId::new("event-owner").expect("user")));
+        let result =
+            ThreadScopeResolver::derive_for_terminal_event(&event).expect("should derive scope");
+        assert_eq!(
+            result.owner_user_id.as_ref().map(|u| u.as_str()),
+            Some("explicit-owner"),
+            "explicit TurnScope owner must take precedence over event.owner_user_id"
+        );
+        assert_eq!(result.agent_id.as_str(), "agent");
+    }
+
+    /// When no explicit owner, falls back to event.owner_user_id.
+    #[test]
+    fn derive_for_terminal_event_falls_back_to_event_owner_user_id() {
+        // ActorFallback scope → no explicit owner_user_id
+        let ts = TurnScope::new(
+            TenantId::new("tenant").expect("tenant"),
+            Some(AgentId::new("agent").expect("agent")),
+            None,
+            ThreadId::new("thread").expect("thread"),
+        );
+        let event = minimal_lifecycle_event(ts, Some(UserId::new("event-actor").expect("user")));
+        let result =
+            ThreadScopeResolver::derive_for_terminal_event(&event).expect("should derive scope");
+        assert_eq!(
+            result.owner_user_id.as_ref().map(|u| u.as_str()),
+            Some("event-actor"),
+            "must fall back to event.owner_user_id when scope has no explicit owner"
+        );
+    }
+
+    /// Agentless turn scope → Err.
+    #[test]
+    fn derive_for_terminal_event_agentless_returns_err() {
+        let ts = agentless_turn_scope();
+        let event = minimal_lifecycle_event(ts, None);
+        let result = ThreadScopeResolver::derive_for_terminal_event(&event);
+        assert!(
+            result.is_err(),
+            "agentless scope must return Err, got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_for_terminal_state
+    // -----------------------------------------------------------------------
+
+    /// Explicit owner in TurnScope takes priority over state.actor.
+    #[test]
+    fn derive_for_terminal_state_explicit_owner_preferred() {
+        let ts = turn_scope_with_owner(Some(UserId::new("explicit-owner").expect("user")));
+        let state = minimal_run_state(ts, Some(actor("actor-user")));
+        let result =
+            ThreadScopeResolver::derive_for_terminal_state(&state).expect("should derive scope");
+        assert_eq!(
+            result.owner_user_id.as_ref().map(|u| u.as_str()),
+            Some("explicit-owner"),
+            "explicit TurnScope owner must take precedence over state.actor"
+        );
+        assert_eq!(result.agent_id.as_str(), "agent");
+    }
+
+    /// When no explicit owner, falls back to state.actor.user_id.
+    #[test]
+    fn derive_for_terminal_state_falls_back_to_actor() {
+        let ts = TurnScope::new(
+            TenantId::new("tenant").expect("tenant"),
+            Some(AgentId::new("agent").expect("agent")),
+            None,
+            ThreadId::new("thread").expect("thread"),
+        );
+        let state = minimal_run_state(ts, Some(actor("actor-user")));
+        let result =
+            ThreadScopeResolver::derive_for_terminal_state(&state).expect("should derive scope");
+        assert_eq!(
+            result.owner_user_id.as_ref().map(|u| u.as_str()),
+            Some("actor-user"),
+            "must fall back to state.actor.user_id when scope has no explicit owner"
+        );
+    }
+
+    /// Agentless turn scope → Err.
+    #[test]
+    fn derive_for_terminal_state_agentless_returns_err() {
+        let ts = agentless_turn_scope();
+        let state = minimal_run_state(ts, None);
+        let result = ThreadScopeResolver::derive_for_terminal_state(&state);
+        assert!(
+            result.is_err(),
+            "agentless scope must return Err, got: {result:?}"
+        );
     }
 
     #[test]

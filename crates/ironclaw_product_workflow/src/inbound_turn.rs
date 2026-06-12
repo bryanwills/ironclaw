@@ -695,11 +695,13 @@ impl AcceptedProductInboundTurn {
                             binding,
                         })
                     }
-                    Err(TurnError::ThreadBusy(_)) => Ok(InboundTurnOutcome::DeferredBusy {
-                        accepted_message_ref,
-                        active_run_id: busy.active_run_id,
-                        binding,
-                    }),
+                    Err(TurnError::ThreadBusy(retry_busy)) => {
+                        Ok(InboundTurnOutcome::DeferredBusy {
+                            accepted_message_ref,
+                            active_run_id: retry_busy.active_run_id,
+                            binding,
+                        })
+                    }
                     Err(retry_error) => {
                         tracing::warn!(
                             message_id = %message_id,

@@ -1458,6 +1458,54 @@ async fn defer_retry_still_busy_message_stays_deferred() {
 }
 
 #[tokio::test]
+async fn defer_retry_still_busy_reports_retry_run_id_not_original() {
+    // The initial submit is busy on run X; by the time the retry fires, a
+    // DIFFERENT run Y has acquired the thread.  The DeferredBusy outcome must
+    // report Y (the retry's active_run_id), not the stale X from the first call.
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    let run_x = TurnRunId::new();
+    let run_y = TurnRunId::new();
+    coordinator.push_result(Err(TurnError::ThreadBusy(ThreadBusy {
+        active_run_id: run_x,
+        status: TurnStatus::Running,
+        event_cursor: EventCursor::default(),
+    })));
+    coordinator.push_result(Err(TurnError::ThreadBusy(ThreadBusy {
+        active_run_id: run_y,
+        status: TurnStatus::Running,
+        event_cursor: EventCursor::default(),
+    })));
+    let coordinator_handle = coordinator.clone();
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let envelope = sample_user_message_envelope("defer-retry-run-y");
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("busy submit");
+
+    let InboundTurnOutcome::DeferredBusy { active_run_id, .. } = outcome else {
+        panic!("expected DeferredBusy")
+    };
+    assert_eq!(
+        active_run_id, run_y,
+        "DeferredBusy must report the retry's active_run_id (Y), not the original (X)"
+    );
+    assert_ne!(
+        active_run_id, run_x,
+        "must not report the stale original run X"
+    );
+    assert_eq!(
+        coordinator_handle.submissions().len(),
+        2,
+        "initial + retry submit_turn calls"
+    );
+}
+
+#[tokio::test]
 async fn defer_retry_gap_hit_message_becomes_submitted() {
     // The initial submit returns ThreadBusy (blocking run active) but the
     // post-defer retry returns Accepted (run terminated during the gap).
@@ -1531,6 +1579,7 @@ async fn defer_retry_non_busy_error_message_stays_deferred_call_succeeds() {
     coordinator.push_result(Err(TurnError::Unavailable {
         reason: "transient coordinator error".into(),
     }));
+    let coordinator_handle = coordinator.clone();
     let service =
         DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
 
@@ -1543,6 +1592,12 @@ async fn defer_retry_non_busy_error_message_stays_deferred_call_succeeds() {
     let InboundTurnOutcome::DeferredBusy { binding, .. } = outcome else {
         panic!("retry error must leave message DeferredBusy")
     };
+    // Both the initial submit (ThreadBusy) and the retry (Unavailable) must have run.
+    assert_eq!(
+        coordinator_handle.submissions().len(),
+        2,
+        "expected initial + retry submit_turn calls"
+    );
     let history = thread_service
         .list_thread_history(ThreadHistoryRequest {
             scope: ThreadScope {

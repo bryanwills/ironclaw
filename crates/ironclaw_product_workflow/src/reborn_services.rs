@@ -1824,13 +1824,15 @@ impl RebornServicesApi for RebornServices {
                             event_cursor,
                         })
                     }
-                    Err(TurnError::ThreadBusy(_)) => Ok(RebornSubmitTurnResponse::DeferredBusy {
-                        thread_id: handoff.thread_id,
-                        accepted_message_ref,
-                        active_run_id: busy.active_run_id,
-                        status: busy.status,
-                        event_cursor: busy.event_cursor,
-                    }),
+                    Err(TurnError::ThreadBusy(retry_busy)) => {
+                        Ok(RebornSubmitTurnResponse::DeferredBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: retry_busy.active_run_id,
+                            status: retry_busy.status,
+                            event_cursor: retry_busy.event_cursor,
+                        })
+                    }
                     Err(retry_error) => {
                         tracing::warn!(
                             message_id = %handoff.message_id,

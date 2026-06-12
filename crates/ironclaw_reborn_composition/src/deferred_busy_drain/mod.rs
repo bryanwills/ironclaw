@@ -13,20 +13,27 @@
 //!
 //! Both defer call sites (`inbound_turn.rs` and `reborn_services.rs`) perform
 //! a one-shot retry of `submit_turn` immediately after the `DeferredBusy`
-//! marker becomes durable.  This closes the residual window where the blocking
-//! run's terminal event fires between the original `ThreadBusy` result and the
-//! marker write: the thread is free by the time the retry runs, so the retry
-//! is accepted and `mark_message_submitted` flips the status before any drain
-//! fires.  If the run is still active the retry gets `ThreadBusy` again, and
-//! the drain picks up the message on the next terminal event as normal.
-//! The drain's separate `drain:<message_id>` idempotency key prevents
-//! double-submission even if both paths race.
+//! marker becomes durable.  This closes the marker-visibility gap: if the
+//! blocking run terminated between the original `ThreadBusy` result and the
+//! marker write, the retry finds the thread free and calls
+//! `mark_message_submitted`, which flips the status.  If the run is still
+//! active the retry gets `ThreadBusy` again, and the drain picks up the
+//! message on the next terminal event.  There is no hard ordering between the
+//! retry and a concurrently-firing drain; observer-side replays are
+//! deduplicated by the `drain:<message_id>` idempotency key rather than by
+//! one path always winning the race.
 //!
 //! # Failure contract
 //!
 //! Drain failures must **never** poison the terminal-event path.  The observer
-//! logs a `warn!` and returns `Ok(())` so the run's own terminal state is
+//! logs a `debug!` and returns `Ok(())` so the run's own terminal state is
 //! always committed even when the drain step fails.
+//!
+//! # File-size budget
+//!
+//! This module is expected to shrink once the drain moves behind the
+//! `product_workflow` replay owner tracked in issue #4831; test-suite
+//! decomposition lands with that refactor.
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -38,7 +45,7 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCommittedEventObserver, TurnCoordinator, TurnError,
     TurnLifecycleEvent, TurnRunState, TurnScope,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Maximum number of `DeferredBusy` records loaded per drain window.
 ///
@@ -96,7 +103,7 @@ where
     ///
     /// Iterates in sequence order (oldest first) in windows of `DRAIN_LIST_LIMIT`.
     /// A message that fails validation (bad actor, missing canonical refs, etc.)
-    /// is logged at `warn!` and **skipped** — the loop continues to the next
+    /// is logged at `debug!` and **skipped** — the loop continues to the next
     /// entry.  When an entire window is exhausted without finding a valid message,
     /// the next window is fetched starting after the last examined sequence.
     /// The total number of records examined across all windows is capped at
@@ -122,9 +129,10 @@ where
         loop {
             if total_examined >= DRAIN_TOTAL_CAP {
                 debug!(
+                    observer = "deferred_busy_drain",
                     run_id = %run_id,
                     total_examined,
-                    "DeferredBusyDrainObserver: total examined cap reached, leaving rest for next drain"
+                    "total examined cap reached, leaving rest for next drain"
                 );
                 return Ok(());
             }
@@ -141,10 +149,11 @@ where
             {
                 Ok(messages) => messages,
                 Err(error) => {
-                    warn!(
+                    debug!(
+                        observer = "deferred_busy_drain",
                         run_id = %run_id,
                         error = %error,
-                        "DeferredBusyDrainObserver: failed to list deferred messages, skipping drain"
+                        "failed to list deferred messages, skipping drain"
                     );
                     return Ok(());
                 }
@@ -160,9 +169,10 @@ where
             for message in window {
                 if total_examined >= DRAIN_TOTAL_CAP {
                     debug!(
+                        observer = "deferred_busy_drain",
                         run_id = %run_id,
                         total_examined,
-                        "DeferredBusyDrainObserver: total examined cap reached, leaving rest for next drain"
+                        "total examined cap reached, leaving rest for next drain"
                     );
                     return Ok(());
                 }
@@ -174,11 +184,12 @@ where
                 let actor_user_id = match resolve_actor_user_id(&message, thread_scope) {
                     Ok(id) => id,
                     Err(reason) => {
-                        warn!(
+                        debug!(
+                            observer = "deferred_busy_drain",
                             run_id = %run_id,
                             message_id = %message.message_id,
                             reason,
-                            "DeferredBusyDrainObserver: cannot resolve actor for deferred message, skipping"
+                            "cannot resolve actor for deferred message, skipping"
                         );
                         continue;
                     }
@@ -191,20 +202,22 @@ where
                     Some(canonical) => match SourceBindingRef::new(canonical) {
                         Ok(r) => r,
                         Err(reason) => {
-                            warn!(
+                            debug!(
+                                observer = "deferred_busy_drain",
                                 run_id = %run_id,
                                 message_id = %message.message_id,
                                 reason,
-                                "DeferredBusyDrainObserver: invalid persisted turn_source_binding_ref, skipping"
+                                "invalid persisted turn_source_binding_ref, skipping"
                             );
                             continue;
                         }
                     },
                     None => {
-                        warn!(
+                        debug!(
+                            observer = "deferred_busy_drain",
                             run_id = %run_id,
                             message_id = %message.message_id,
-                            "DeferredBusyDrainObserver: deferred message missing turn_source_binding_ref (legacy record), skipping"
+                            "deferred message missing turn_source_binding_ref (legacy record), skipping"
                         );
                         continue;
                     }
@@ -217,40 +230,41 @@ where
                     Some(canonical) => match ReplyTargetBindingRef::new(canonical) {
                         Ok(r) => r,
                         Err(reason) => {
-                            warn!(
+                            debug!(
+                                observer = "deferred_busy_drain",
                                 run_id = %run_id,
                                 message_id = %message.message_id,
                                 reason,
-                                "DeferredBusyDrainObserver: invalid persisted turn_reply_target_binding_ref, skipping"
+                                "invalid persisted turn_reply_target_binding_ref, skipping"
                             );
                             continue;
                         }
                     },
                     None => {
-                        warn!(
+                        debug!(
+                            observer = "deferred_busy_drain",
                             run_id = %run_id,
                             message_id = %message.message_id,
-                            "DeferredBusyDrainObserver: deferred message missing turn_reply_target_binding_ref (legacy record), skipping"
+                            "deferred message missing turn_reply_target_binding_ref (legacy record), skipping"
                         );
                         continue;
                     }
                 };
 
-                let accepted_message_ref = match AcceptedMessageRef::new(format!(
-                    "msg:{}",
-                    message.message_id
-                )) {
-                    Ok(r) => r,
-                    Err(reason) => {
-                        warn!(
-                            run_id = %run_id,
-                            message_id = %message.message_id,
-                            reason,
-                            "DeferredBusyDrainObserver: cannot build accepted_message_ref, skipping"
-                        );
-                        continue;
-                    }
-                };
+                let accepted_message_ref =
+                    match AcceptedMessageRef::new(format!("msg:{}", message.message_id)) {
+                        Ok(r) => r,
+                        Err(reason) => {
+                            debug!(
+                                observer = "deferred_busy_drain",
+                                run_id = %run_id,
+                                message_id = %message.message_id,
+                                reason,
+                                "cannot build accepted_message_ref, skipping"
+                            );
+                            continue;
+                        }
+                    };
 
                 // Use the message_id as the idempotency key so a duplicate drain
                 // fire produces the same run rather than a second submission.
@@ -258,11 +272,12 @@ where
                     match IdempotencyKey::new(format!("drain:{}", message.message_id)) {
                         Ok(k) => k,
                         Err(reason) => {
-                            warn!(
+                            debug!(
+                                observer = "deferred_busy_drain",
                                 run_id = %run_id,
                                 message_id = %message.message_id,
                                 reason,
-                                "DeferredBusyDrainObserver: cannot build idempotency key, skipping"
+                                "cannot build idempotency key, skipping"
                             );
                             continue;
                         }
@@ -272,9 +287,10 @@ where
                     Some(id) => id,
                     None => {
                         debug!(
+                            observer = "deferred_busy_drain",
                             run_id = %run_id,
                             message_id = %message.message_id,
-                            "DeferredBusyDrainObserver: agentless scope, skipping drain"
+                            "agentless scope, skipping drain"
                         );
                         // Agentless scope is a structural issue — no point
                         // iterating further since all messages share the same scope.
@@ -312,11 +328,12 @@ where
                         ..
                     }) => {
                         debug!(
+                            observer = "deferred_busy_drain",
                             drained_message_id = %message.message_id,
                             submitted_turn_id = %turn_id,
                             submitted_run_id = %submitted_run_id,
                             triggering_run_id = %run_id,
-                            "DeferredBusyDrainObserver: deferred message drained and submitted"
+                            "deferred message drained and submitted"
                         );
                         if let Err(error) = self
                             .thread_service
@@ -329,10 +346,11 @@ where
                             )
                             .await
                         {
-                            warn!(
+                            debug!(
+                                observer = "deferred_busy_drain",
                                 error = %error,
                                 drained_message_id = %message.message_id,
-                                "DeferredBusyDrainObserver: submitted to coordinator but failed to mark message as submitted"
+                                "submitted to coordinator but failed to mark message as submitted"
                             );
                         }
                         // Stop after the first successful submit — the cascade
@@ -344,19 +362,21 @@ where
                         // deferred messages.  The drain will fire again when that
                         // run terminates.
                         debug!(
+                            observer = "deferred_busy_drain",
                             active_run_id = ?busy.active_run_id,
                             drained_message_id = %message.message_id,
                             triggering_run_id = %run_id,
-                            "DeferredBusyDrainObserver: thread still busy after terminal event, leaving deferred"
+                            "thread still busy after terminal event, leaving deferred"
                         );
                         return Ok(());
                     }
                     Err(error) => {
-                        warn!(
+                        debug!(
+                            observer = "deferred_busy_drain",
                             error = %error,
                             drained_message_id = %message.message_id,
                             triggering_run_id = %run_id,
-                            "DeferredBusyDrainObserver: coordinator submit failed, leaving deferred"
+                            "coordinator submit failed, leaving deferred"
                         );
                         return Ok(());
                     }
@@ -368,10 +388,11 @@ where
             // Entire window was skipped (all validation failures).
             // Advance past this window and fetch the next one.
             debug!(
+                observer = "deferred_busy_drain",
                 run_id = %run_id,
                 window_last_sequence,
                 total_examined,
-                "DeferredBusyDrainObserver: full window skipped, advancing past sequence {window_last_sequence}"
+                "full window skipped, advancing past sequence {window_last_sequence}"
             );
             after_sequence = Some(window_last_sequence);
         }
@@ -381,9 +402,10 @@ where
         let coordinator = match self.coordinator.get() {
             Some(c) => Arc::clone(c),
             None => {
-                warn!(
+                debug!(
+                    observer = "deferred_busy_drain",
                     run_id = %event.run_id,
-                    "DeferredBusyDrainObserver: coordinator not bound, skipping drain"
+                    "coordinator not bound, skipping drain"
                 );
                 return Ok(());
             }
@@ -393,9 +415,10 @@ where
             Ok(scope) => scope,
             Err(reason) => {
                 debug!(
+                    observer = "deferred_busy_drain",
                     run_id = %event.run_id,
                     reason,
-                    "DeferredBusyDrainObserver: cannot derive thread scope, skipping drain"
+                    "cannot derive thread scope, skipping drain"
                 );
                 return Ok(());
             }
@@ -409,9 +432,10 @@ where
         let coordinator = match self.coordinator.get() {
             Some(c) => Arc::clone(c),
             None => {
-                warn!(
+                debug!(
+                    observer = "deferred_busy_drain",
                     run_id = %state.run_id,
-                    "DeferredBusyDrainObserver: coordinator not bound, skipping drain"
+                    "coordinator not bound, skipping drain"
                 );
                 return Ok(());
             }
@@ -421,9 +445,10 @@ where
             Ok(scope) => scope,
             Err(reason) => {
                 debug!(
+                    observer = "deferred_busy_drain",
                     run_id = %state.run_id,
                     reason,
-                    "DeferredBusyDrainObserver: cannot derive thread scope from state, skipping drain"
+                    "cannot derive thread scope from state, skipping drain"
                 );
                 return Ok(());
             }
@@ -463,10 +488,11 @@ where
     /// second call rather than a duplicate run.
     async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError> {
         if let Err(error) = self.drain_for_terminal_state(&state).await {
-            warn!(
+            debug!(
+                observer = "deferred_busy_drain",
                 run_id = %state.run_id,
                 error = %error,
-                "DeferredBusyDrainObserver: drain step returned error on state, continuing"
+                "drain step returned error on state, continuing"
             );
         }
         Ok(())
@@ -476,10 +502,11 @@ where
         if let Err(error) = self.drain_for_terminal_event(&event).await {
             // Must not surface errors up — the terminal event path must always
             // succeed even when the drain step fails.
-            warn!(
+            debug!(
+                observer = "deferred_busy_drain",
                 run_id = %event.run_id,
                 error = %error,
-                "DeferredBusyDrainObserver: drain step returned error, continuing"
+                "drain step returned error, continuing"
             );
         }
         Ok(())

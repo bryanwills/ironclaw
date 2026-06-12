@@ -1,4 +1,8 @@
 //! Contract tests for WebUI-facing RebornServices facade.
+//!
+//! NOTE: This file is >3000 lines and is due for decomposition. Retry/defer
+//! coverage is slated to move with the product-workflow replay-owner refactor
+//! tracked in issue #4831.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -551,12 +555,12 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
 /// Used by post-defer retry tests that need to script two sequential
 /// `submit_turn` outcomes for a single inbound call.
 #[derive(Clone, Default)]
-struct ScriptedRebornsCoordinator {
+struct ScriptedTurnCoordinator {
     results: Arc<Mutex<VecDeque<Result<SubmitTurnResponse, TurnError>>>>,
     submissions: Arc<Mutex<Vec<SubmitTurnRequest>>>,
 }
 
-impl ScriptedRebornsCoordinator {
+impl ScriptedTurnCoordinator {
     fn push_result(&self, result: Result<SubmitTurnResponse, TurnError>) {
         self.results
             .lock()
@@ -573,7 +577,7 @@ impl ScriptedRebornsCoordinator {
 }
 
 #[async_trait]
-impl TurnCoordinator for ScriptedRebornsCoordinator {
+impl TurnCoordinator for ScriptedTurnCoordinator {
     async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
         Ok(TurnRunId::new())
     }
@@ -1954,7 +1958,7 @@ async fn busy_submit_clears_skill_activation_message() {
     let active_run_id = TurnRunId::new();
     // Push two ThreadBusy results: one for the initial submit and one for the
     // post-defer retry.  Both must be busy so the message stays DeferredBusy.
-    let coordinator = Arc::new(ScriptedRebornsCoordinator::default());
+    let coordinator = Arc::new(ScriptedTurnCoordinator::default());
     let busy_result = || {
         Err(TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
             active_run_id,
@@ -8208,7 +8212,7 @@ async fn webui_defer_retry_still_busy_message_stays_deferred() {
     let thread_store = Arc::new(InMemorySessionThreadService::default());
     let threads: Arc<dyn SessionThreadService> = thread_store.clone();
     let active_run_id = TurnRunId::new();
-    let coordinator = Arc::new(ScriptedRebornsCoordinator::default());
+    let coordinator = Arc::new(ScriptedTurnCoordinator::default());
     let busy_result = || {
         Err(TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
             active_run_id,
@@ -8276,6 +8280,59 @@ async fn webui_defer_retry_still_busy_message_stays_deferred() {
 }
 
 #[tokio::test]
+async fn webui_defer_retry_still_busy_reports_retry_run_id_not_original() {
+    // The initial submit is busy on run X; by the time the retry fires, a
+    // DIFFERENT run Y has acquired the thread.  The DeferredBusy response must
+    // report Y (the retry's active_run_id/status/event_cursor), not the stale
+    // X values from the first call — callers that watch the run would otherwise
+    // subscribe to the wrong SSE stream.
+    let thread_store = Arc::new(InMemorySessionThreadService::default());
+    let threads: Arc<dyn SessionThreadService> = thread_store.clone();
+    let run_x = TurnRunId::new();
+    let run_y = TurnRunId::new();
+    let coordinator = Arc::new(ScriptedTurnCoordinator::default());
+    coordinator.push_result(Err(TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+        active_run_id: run_x,
+        status: TurnStatus::Running,
+        event_cursor: EventCursor(7),
+    })));
+    coordinator.push_result(Err(TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+        active_run_id: run_y,
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(99),
+    })));
+    let services = RebornServices::new(threads, coordinator.clone() as Arc<dyn TurnCoordinator>);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let outcome = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "retry-run-y",
+                "thread_id": "thread-alpha",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds even though retry is busy");
+
+    assert!(
+        matches!(
+            outcome,
+            RebornSubmitTurnResponse::DeferredBusy {
+                active_run_id: id,
+                event_cursor: EventCursor(99),
+                ..
+            } if id == run_y
+        ),
+        "DeferredBusy must report the retry's active_run_id (Y) and its event_cursor, not X's"
+    );
+    // Two submit_turn calls: initial (ThreadBusy on X) + retry (ThreadBusy on Y).
+    assert_eq!(coordinator.submission_count(), 2);
+}
+
+#[tokio::test]
 async fn webui_defer_retry_gap_hit_message_becomes_submitted() {
     // The initial submit returns ThreadBusy but the post-defer retry returns
     // Accepted (the blocking run terminated during the window).
@@ -8283,7 +8340,7 @@ async fn webui_defer_retry_gap_hit_message_becomes_submitted() {
     let thread_store = Arc::new(InMemorySessionThreadService::default());
     let threads: Arc<dyn SessionThreadService> = thread_store.clone();
     let active_run_id = TurnRunId::new();
-    let coordinator = Arc::new(ScriptedRebornsCoordinator::default());
+    let coordinator = Arc::new(ScriptedTurnCoordinator::default());
     coordinator.push_result(Err(TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
         active_run_id,
         status: TurnStatus::Running,
@@ -8361,7 +8418,7 @@ async fn webui_defer_retry_non_busy_error_message_stays_deferred_call_succeeds()
     let thread_store = Arc::new(InMemorySessionThreadService::default());
     let threads: Arc<dyn SessionThreadService> = thread_store.clone();
     let active_run_id = TurnRunId::new();
-    let coordinator = Arc::new(ScriptedRebornsCoordinator::default());
+    let coordinator = Arc::new(ScriptedTurnCoordinator::default());
     coordinator.push_result(Err(TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
         active_run_id,
         status: TurnStatus::Running,
@@ -8395,6 +8452,12 @@ async fn webui_defer_retry_non_busy_error_message_stays_deferred_call_succeeds()
             } if id == active_run_id
         ),
         "retry non-busy error → DeferredBusy, call still succeeds"
+    );
+    // Both the initial submit (ThreadBusy) and the retry (Unavailable) must have run.
+    assert_eq!(
+        coordinator.submission_count(),
+        2,
+        "expected initial + retry submit_turn calls"
     );
     // Message stays DeferredBusy in thread store.
     let deferred_messages = thread_store
