@@ -752,6 +752,8 @@ mod tests {
             tool_result_provider_call: None,
             content: content.map(ToString::to_string),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         }
     }
 

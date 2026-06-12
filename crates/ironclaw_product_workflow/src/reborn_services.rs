@@ -1710,6 +1710,10 @@ impl RebornServicesApi for RebornServices {
             "webui-reply",
             &handoff.reply_target_binding_id,
         )?;
+        // Capture canonical ref strings before moving them into SubmitTurnRequest so
+        // the defer path can persist them verbatim for the drain.
+        let canonical_source_ref = source_binding_ref.as_str().to_string();
+        let canonical_reply_ref = reply_target_binding_ref.as_str().to_string();
         let submit = SubmitTurnRequest {
             scope: scope.clone(),
             actor,
@@ -1764,6 +1768,8 @@ impl RebornServicesApi for RebornServices {
                     &thread_scope,
                     &handoff,
                     &client_action_id,
+                    canonical_source_ref,
+                    canonical_reply_ref,
                 )
                 .await?;
 
@@ -2658,9 +2664,17 @@ async fn mark_message_deferred_busy_or_replay(
     thread_scope: &ThreadScope,
     handoff: &AcceptedWebUiMessage,
     client_action_id: &IdempotencyKey,
+    turn_source_binding_ref: String,
+    turn_reply_target_binding_ref: String,
 ) -> Result<(), RebornServicesError> {
     match thread_service
-        .mark_message_deferred_busy(thread_scope, &handoff.thread_id, handoff.message_id)
+        .mark_message_deferred_busy(
+            thread_scope,
+            &handoff.thread_id,
+            handoff.message_id,
+            Some(turn_source_binding_ref),
+            Some(turn_reply_target_binding_ref),
+        )
         .await
     {
         Ok(_) => Ok(()),

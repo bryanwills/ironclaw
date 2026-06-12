@@ -1031,6 +1031,8 @@ mod tests {
             _scope: &ThreadScope,
             _thread_id: &ThreadId,
             _message_id: ThreadMessageId,
+            _turn_source_binding_ref: Option<String>,
+            _turn_reply_target_binding_ref: Option<String>,
         ) -> Result<ThreadMessageRecord, SessionThreadError> {
             unimplemented!("trigger prompt recorder tests do not defer messages")
         }

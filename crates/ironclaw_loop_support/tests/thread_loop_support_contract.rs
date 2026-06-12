@@ -3959,9 +3959,17 @@ impl SessionThreadService for GatedFinalizeThreadService {
         scope: &ThreadScope,
         thread_id: &ThreadId,
         message_id: ThreadMessageId,
+        turn_source_binding_ref: Option<String>,
+        turn_reply_target_binding_ref: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.inner
-            .mark_message_deferred_busy(scope, thread_id, message_id)
+            .mark_message_deferred_busy(
+                scope,
+                thread_id,
+                message_id,
+                turn_source_binding_ref,
+                turn_reply_target_binding_ref,
+            )
             .await
     }
 
@@ -4147,6 +4155,8 @@ impl SessionThreadService for StaticContextThreadService {
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
+        _turn_source_binding_ref: Option<String>,
+        _turn_reply_target_binding_ref: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!("static context service does not defer messages")
     }

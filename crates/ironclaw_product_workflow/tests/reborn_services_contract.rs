@@ -160,6 +160,8 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             tool_result_provider_call: None,
             content: Some("timeline from fake M2 port".to_string()),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         }],
         summary_artifacts: vec![],
     }
@@ -1288,6 +1290,8 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
+        _turn_source_binding_ref: Option<String>,
+        _turn_reply_target_binding_ref: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
     }
@@ -1520,6 +1524,8 @@ impl SessionThreadService for ScriptedThreadService {
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
+        _turn_source_binding_ref: Option<String>,
+        _turn_reply_target_binding_ref: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         scripted_stub_unreachable("mark_message_deferred_busy")
     }
@@ -5622,6 +5628,8 @@ impl SessionThreadService for FirstMissBackendErrorThreadService {
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
+        _turn_source_binding_ref: Option<String>,
+        _turn_reply_target_binding_ref: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!(
             "FirstMissBackendErrorThreadService::mark_message_deferred_busy should not be reached"

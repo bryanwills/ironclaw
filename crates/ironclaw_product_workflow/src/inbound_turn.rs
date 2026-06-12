@@ -608,6 +608,8 @@ impl AcceptedProductInboundTurn {
             reason: format!("invalid turn ref: {e}"),
         })?;
 
+        let canonical_source_ref = source_binding_ref.as_str().to_string();
+        let canonical_reply_ref = reply_target_binding_ref.as_str().to_string();
         let request = SubmitTurnRequest {
             scope: turn_scope,
             actor,
@@ -647,7 +649,13 @@ impl AcceptedProductInboundTurn {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 thread_service
-                    .mark_message_deferred_busy(&thread_scope, &binding.thread_id, message_id)
+                    .mark_message_deferred_busy(
+                        &thread_scope,
+                        &binding.thread_id,
+                        message_id,
+                        Some(canonical_source_ref),
+                        Some(canonical_reply_ref),
+                    )
                     .await
                     .map_err(|e| ProductWorkflowError::Transient {
                         reason: format!("failed to mark message deferred: {e}"),

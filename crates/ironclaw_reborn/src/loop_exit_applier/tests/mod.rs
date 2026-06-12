@@ -836,6 +836,8 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
             tool_result_provider_call: None,
             content: Some("not-json".to_string()),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         });
         history.messages.push(ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
@@ -855,6 +857,8 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
                 unsafe_summary_result.as_str()
             )),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         });
         history
     };
