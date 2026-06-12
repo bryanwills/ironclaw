@@ -1,14 +1,21 @@
 use super::*;
 use ironclaw_reborn::failure_categories::{
-    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY, HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
+use ironclaw_turns::LoopFailureKind;
+
+const GENERIC_FAILURE_SUMMARY: &str = "The run failed before producing a reply. Retry the run, and contact support if it keeps happening.";
 
 #[tokio::test]
 async fn webui_event_stream_projects_failed_run_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-failed-thread",
         "lease_expired",
-        "The run failed because its runner lease expired.",
+        "The run failed because its runner lease expired. Retry the run.",
     )
     .await;
 }
@@ -18,7 +25,7 @@ async fn webui_event_stream_projects_no_progress_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-no-progress-thread",
         "no_progress_detected",
-        "The run stopped because it repeated the same step without making progress.",
+        "The run stopped because it repeated work without making progress. Retry with a clearer instruction or narrower scope.",
     )
     .await;
 }
@@ -28,9 +35,223 @@ async fn webui_event_stream_projects_iteration_limit_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-iteration-limit-thread",
         "iteration_limit",
-        "The run stopped after reaching its iteration limit before producing a reply.",
+        "The run stopped after reaching its iteration limit before producing a reply. Retry with a narrower request or increase the limit.",
     )
     .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_context_build_failed_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-context-build-thread",
+        "context_build_failed",
+        "The run failed while building the model context. Retry the run, and contact support if it keeps happening.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_host_stage_unavailable_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-host-stage-thread",
+        "host_stage_unavailable:checkpoint",
+        "The run failed because the host checkpoint stage was unavailable. Retry the run, and contact support if checkpoints remain unavailable.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_unknown_failure_summary_without_echoing_code() {
+    assert_failed_run_status_summary(
+        "webui-events-unknown-thread",
+        "unexpected_new_failure",
+        GENERIC_FAILURE_SUMMARY,
+    )
+    .await;
+}
+
+#[test]
+fn failure_summary_covers_every_loop_failure_kind_category() {
+    let expected = [
+        (
+            LoopFailureKind::ModelError.as_str(),
+            "The run failed while calling the model. Check the selected model provider and try again.",
+        ),
+        (
+            LoopFailureKind::ContextBuildFailed.as_str(),
+            "The run failed while building the model context. Retry the run, and contact support if it keeps happening.",
+        ),
+        (
+            LoopFailureKind::CapabilityProtocolError.as_str(),
+            "The run failed because a capability returned an invalid protocol response. Retry the run, and contact support if it keeps happening.",
+        ),
+        (
+            LoopFailureKind::IterationLimit.as_str(),
+            "The run stopped after reaching its iteration limit before producing a reply. Retry with a narrower request or increase the limit.",
+        ),
+        (
+            LoopFailureKind::InvalidModelOutput.as_str(),
+            "The run failed because the model returned output the runner could not use. Retry the run or choose a different model.",
+        ),
+        (
+            LoopFailureKind::CheckpointRejected.as_str(),
+            "The run failed because its checkpoint was rejected. Retry from the last available checkpoint or start a new run.",
+        ),
+        (
+            LoopFailureKind::CheckpointUnavailable.as_str(),
+            "The run failed because the checkpoint could not be loaded. Retry the run, and contact support if the checkpoint remains unavailable.",
+        ),
+        (
+            LoopFailureKind::TranscriptWriteFailed.as_str(),
+            "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
+        ),
+        (
+            LoopFailureKind::DriverBug.as_str(),
+            "The run failed because the execution driver hit an internal bug. Retry the run, and contact support if it happens again.",
+        ),
+        (
+            LoopFailureKind::InterruptedUnexpectedly.as_str(),
+            "The run stopped unexpectedly before it could finish. Retry the run.",
+        ),
+        (
+            LoopFailureKind::NoProgressDetected.as_str(),
+            "The run stopped because it repeated work without making progress. Retry with a clearer instruction or narrower scope.",
+        ),
+        (
+            LoopFailureKind::PolicyDenied.as_str(),
+            "The run stopped because a policy denied the requested action. Change the request or permissions and try again.",
+        ),
+        (
+            LoopFailureKind::CompactionUnavailable.as_str(),
+            "The run failed because context compaction was unavailable. Retry with a shorter request or start a new thread.",
+        ),
+    ];
+
+    let source_values = loop_failure_kind_as_str_values_from_source();
+    let expected_values = expected
+        .iter()
+        .map(|(category, _)| *category)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        source_values, expected_values,
+        "LoopFailureKind::as_str gained or lost a category; update the Tier-2 summary table"
+    );
+
+    for (category, expected_summary) in expected {
+        let summary = crate::failure_summary::reborn_failure_summary_for_category(Some(category));
+        assert_eq!(summary, expected_summary, "category {category}");
+        assert_ne!(summary, GENERIC_FAILURE_SUMMARY, "category {category}");
+        assert!(
+            !summary.trim().eq(category),
+            "summary must not be a raw failure category"
+        );
+    }
+}
+
+#[test]
+fn failure_summary_covers_reborn_failure_category_constants() {
+    let expected = [
+        (
+            MODEL_CREDITS_EXHAUSTED_CATEGORY,
+            "The AI provider account is out of credits. Add credits or switch providers and try again.",
+        ),
+        (
+            MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+            "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+        ),
+        (
+            HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
+            "The run failed because the host prompt stage was unavailable. Retry the run, and contact support if it keeps happening.",
+        ),
+        (
+            HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
+            "The run failed because the host model stage was unavailable. Check the model provider and try again.",
+        ),
+        (
+            HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY,
+            "The run failed because the host capability stage was unavailable. Retry the run, and check the tool integration if it keeps happening.",
+        ),
+        (
+            HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
+            "The run failed because the host transcript stage was unavailable. Retry the run, and contact support if saving still fails.",
+        ),
+        (
+            HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
+            "The run failed because the host checkpoint stage was unavailable. Retry the run, and contact support if checkpoints remain unavailable.",
+        ),
+        (
+            HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY,
+            "The run failed because the host input stage was unavailable. Check the submitted message and try again.",
+        ),
+        (
+            HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
+            "The run failed because a required host stage was unavailable. Retry the run, and contact support if it keeps happening.",
+        ),
+    ];
+    let source_values = reborn_failure_category_constant_values_from_source();
+    let expected_values = expected
+        .iter()
+        .map(|(category, _)| *category)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        source_values, expected_values,
+        "failure_categories.rs gained or lost a public category constant; update the Tier-2 summary table"
+    );
+
+    for (category, expected_summary) in expected {
+        assert_eq!(
+            crate::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            expected_summary,
+            "category {category}"
+        );
+    }
+}
+
+#[test]
+fn failure_summary_covers_host_stage_unavailable_categories() {
+    let expected = [
+        (
+            "host_stage_unavailable:prompt",
+            "The run failed because the host prompt stage was unavailable. Retry the run, and contact support if it keeps happening.",
+        ),
+        (
+            "host_stage_unavailable:model",
+            "The run failed because the host model stage was unavailable. Check the model provider and try again.",
+        ),
+        (
+            "host_stage_unavailable:capability",
+            "The run failed because the host capability stage was unavailable. Retry the run, and check the tool integration if it keeps happening.",
+        ),
+        (
+            "host_stage_unavailable:transcript",
+            "The run failed because the host transcript stage was unavailable. Retry the run, and contact support if saving still fails.",
+        ),
+        (
+            "host_stage_unavailable:checkpoint",
+            "The run failed because the host checkpoint stage was unavailable. Retry the run, and contact support if checkpoints remain unavailable.",
+        ),
+        (
+            "host_stage_unavailable:input",
+            "The run failed because the host input stage was unavailable. Check the submitted message and try again.",
+        ),
+    ];
+
+    for (category, expected_summary) in expected {
+        assert_eq!(
+            crate::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            expected_summary,
+            "category {category}"
+        );
+    }
+}
+
+#[test]
+fn failure_summary_uses_safe_generic_fallback_for_unknown_categories() {
+    let summary =
+        crate::failure_summary::reborn_failure_summary_for_category(Some("new_snake_case_code"));
+
+    assert_eq!(summary, GENERIC_FAILURE_SUMMARY);
+    assert_ne!(summary, "new_snake_case_code");
 }
 
 async fn assert_failed_run_status_summary(
@@ -138,7 +359,7 @@ async fn webui_event_stream_projects_model_credentials_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-model-credentials-thread",
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-        "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
+        "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
     )
     .await;
 }
@@ -148,7 +369,7 @@ async fn webui_event_stream_pins_model_credentials_summary_before_explainer() {
     assert_failed_run_status_summary_with_explainer(
         "webui-events-pinned-model-credentials-thread",
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-        "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
+        "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
         Some(Arc::new(FakeFailureExplainer {
             explanation: "SENTINEL explainer output should not be used".to_string(),
         })),
@@ -367,7 +588,7 @@ async fn webui_event_stream_projects_recovery_required_failure_summary() {
                 } if *run_id == turn_run
                     && status == "recovery_required"
                     && category.category() == "driver_failed"
-                    && summary == "The run failed because the execution driver reported an error."
+                    && summary == "The run failed because the execution driver reported an error. Retry the run, and contact support if it happens again."
             )
         }),
         _ => false,
@@ -437,7 +658,7 @@ async fn failure_details_returns_fallback_when_model_gateway_times_out() {
                     failure_summary: Some(summary),
                     ..
                 } if *run_id == turn_run
-                    && summary == "The run failed because the execution driver stopped unexpectedly."
+                    && summary == "The run failed because the execution driver stopped unexpectedly. Retry the run, and contact support if it happens again."
             )
         }),
         _ => false,
@@ -513,4 +734,56 @@ async fn model_failure_explainer_returns_none_when_gateway_fails() {
         .await;
 
     assert_eq!(explanation, None);
+}
+
+fn loop_failure_kind_as_str_values_from_source() -> std::collections::BTreeSet<&'static str> {
+    const SOURCE: &str = include_str!("../../../../ironclaw_turns/src/loop_exit.rs");
+    source_match_string_values(SOURCE, "impl LoopFailureKind")
+}
+
+fn reborn_failure_category_constant_values_from_source() -> std::collections::BTreeSet<&'static str>
+{
+    const SOURCE: &str = include_str!("../../../../ironclaw_reborn/src/failure_categories.rs");
+    SOURCE
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("pub const ") || !trimmed.contains("_CATEGORY") {
+                return None;
+            }
+            quoted_value(trimmed)
+        })
+        .collect()
+}
+
+fn source_match_string_values(
+    source: &'static str,
+    impl_header: &str,
+) -> std::collections::BTreeSet<&'static str> {
+    let mut in_impl = false;
+    let mut values = std::collections::BTreeSet::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(impl_header) {
+            in_impl = true;
+            continue;
+        }
+        if in_impl && trimmed.starts_with("fn to_sanitized_failure") {
+            break;
+        }
+        if in_impl
+            && trimmed.starts_with("Self::")
+            && trimmed.contains("=>")
+            && let Some(value) = quoted_value(trimmed)
+        {
+            values.insert(value);
+        }
+    }
+    values
+}
+
+fn quoted_value(line: &'static str) -> Option<&'static str> {
+    let start = line.find('"')? + 1;
+    let end = line[start..].find('"')? + start;
+    Some(&line[start..end])
 }

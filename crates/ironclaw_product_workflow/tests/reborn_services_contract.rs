@@ -55,8 +55,8 @@ use ironclaw_product_workflow::{
     StaticConnectableChannelsProductFacade, TriggerRunThreadScope, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -74,9 +74,9 @@ use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCapacityResource,
+    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -210,8 +210,11 @@ struct FakeTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
     resumptions: Mutex<Vec<ResumeTurnRequest>>,
+    retries: Mutex<Vec<RetryTurnRequest>>,
+    retry_attempts: Mutex<usize>,
     run_state_requests: Mutex<Vec<GetRunStateRequest>>,
     submit_error: Mutex<Option<TurnError>>,
+    retry_error: Mutex<Option<TurnError>>,
     run_state_error: Mutex<Option<TurnError>>,
     run_state_actor: Mutex<Option<TurnActor>>,
     explicit_run_status: Mutex<Option<TurnStatus>>,
@@ -226,8 +229,11 @@ impl Default for FakeTurnCoordinator {
             submissions: Mutex::default(),
             cancellations: Mutex::default(),
             resumptions: Mutex::default(),
+            retries: Mutex::default(),
+            retry_attempts: Mutex::default(),
             run_state_requests: Mutex::default(),
             submit_error: Mutex::default(),
+            retry_error: Mutex::default(),
             run_state_error: Mutex::default(),
             run_state_actor: Mutex::new(Some(turn_actor_for_user("user-alpha"))),
             explicit_run_status: Mutex::default(),
@@ -249,6 +255,13 @@ impl FakeTurnCoordinator {
     fn with_run_state_error(error: TurnError) -> Self {
         Self {
             run_state_error: Mutex::new(Some(error)),
+            ..Self::default()
+        }
+    }
+
+    fn with_retry_error(error: TurnError) -> Self {
+        Self {
+            retry_error: Mutex::new(Some(error)),
             ..Self::default()
         }
     }
@@ -295,6 +308,14 @@ impl FakeTurnCoordinator {
         self.resumptions.lock().expect("lock").len()
     }
 
+    fn retry_count(&self) -> usize {
+        self.retries.lock().expect("lock").len()
+    }
+
+    fn retry_attempt_count(&self) -> usize {
+        *self.retry_attempts.lock().expect("lock")
+    }
+
     fn run_state_request_count(&self) -> usize {
         self.run_state_requests.lock().expect("lock").len()
     }
@@ -313,6 +334,10 @@ impl FakeTurnCoordinator {
             .expect("lock")
             .last()
             .map(|request| request.precondition)
+    }
+
+    fn last_retry(&self) -> Option<RetryTurnRequest> {
+        self.retries.lock().expect("lock").last().cloned()
     }
 
     fn last_submission_scope(&self) -> Option<ironclaw_turns::TurnScope> {
@@ -390,6 +415,19 @@ impl TurnCoordinator for FakeTurnCoordinator {
             run_id: TurnRunId::new(),
             status: TurnStatus::Queued,
             event_cursor: EventCursor(11),
+        })
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        *self.retry_attempts.lock().expect("lock") += 1;
+        if let Some(error) = self.retry_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        self.retries.lock().expect("lock").push(request);
+        Ok(RetryTurnResponse {
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(19),
         })
     }
 
@@ -513,6 +551,13 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         panic!("resume_turn is not used by delete submit serialization tests")
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by delete submit serialization tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
@@ -3234,6 +3279,128 @@ async fn cancel_run_uses_turn_facade_and_stable_response() {
     assert_eq!(response.event_cursor, EventCursor(13));
     assert!(!response.already_terminal);
     assert_eq!(coordinator.cancellation_count(), 1);
+}
+
+#[tokio::test]
+async fn retry_run_uses_turn_facade_and_stable_response() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-1",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("retry succeeds");
+
+    assert_eq!(response.status, TurnStatus::Queued);
+    assert_eq!(response.event_cursor, EventCursor(19));
+    assert_eq!(coordinator.retry_count(), 1);
+    let retry = coordinator.last_retry().expect("retry request");
+    assert_eq!(
+        retry.run_id,
+        TurnRunId::parse(&run_id_string()).expect("run id")
+    );
+    assert_eq!(retry.actor, caller().actor());
+    assert_eq!(
+        retry.scope,
+        caller().turn_scope(ThreadId::new("thread-alpha").expect("thread"))
+    );
+    assert!(
+        retry
+            .source_binding_ref
+            .as_str()
+            .contains("webui-retry-src")
+    );
+    assert!(
+        retry
+            .reply_target_binding_ref
+            .as_str()
+            .contains("webui-retry-reply")
+    );
+    assert_eq!(retry.idempotency_key.as_str(), "retry-1");
+}
+
+#[tokio::test]
+async fn retry_run_maps_not_retryable_to_non_retryable_conflict() {
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let coordinator = Arc::new(FakeTurnCoordinator::with_retry_error(
+        TurnError::RunNotRetryable { run_id },
+    ));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-not-retryable",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("not retryable maps to conflict");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Conflict);
+    assert_eq!(err.status_code, 409);
+    assert!(!err.retryable);
+    assert_eq!(coordinator.retry_attempt_count(), 1);
+    assert_eq!(coordinator.retry_count(), 0);
+}
+
+#[tokio::test]
+async fn retry_run_rejects_cross_user_access() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    let alice = caller();
+    create_thread_for(&services, alice.clone(), "thread-alice").await;
+
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        alice.agent_id.clone(),
+        alice.project_id.clone(),
+    );
+
+    let err = services
+        .retry_run(
+            bob,
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-cross",
+                "thread_id": "thread-alice",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("cross-user retry must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        coordinator.retry_count(),
+        0,
+        "turn coordinator must NOT be called for cross-user retry"
+    );
 }
 
 #[tokio::test]

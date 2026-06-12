@@ -2186,6 +2186,15 @@ mod tests {
             })
         }
 
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ScriptedTurnCoordinator does not support retry_turn".to_string(),
+            })
+        }
+
         async fn get_run_state(
             &self,
             request: GetRunStateRequest,

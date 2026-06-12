@@ -914,6 +914,13 @@ mod tests {
             unreachable!("trigger submitter tests do not resume turns")
         }
 
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            unreachable!("trigger submitter tests do not retry turns")
+        }
+
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,
@@ -962,6 +969,13 @@ mod tests {
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
             unreachable!("trigger submitter tests do not resume turns")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            unreachable!("trigger submitter tests do not retry turns")
         }
 
         async fn cancel_run(

@@ -23,6 +23,7 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
 pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
+pub const WEBUI_V2_ROUTE_RETRY_RUN: &str = "webui.v2.retry_run";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
 pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
 pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
@@ -75,6 +76,8 @@ pub const WEBUI_V2_PATTERN_CANCEL_RUN: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel";
 pub const WEBUI_V2_PATTERN_RESOLVE_GATE: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve";
+pub const WEBUI_V2_PATTERN_RETRY_RUN: &str =
+    "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/retry";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
 pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
 pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
@@ -129,6 +132,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         stream_events_ws_descriptor(),
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
+        retry_run_descriptor(),
         list_automations_descriptor(),
         get_outbound_preferences_descriptor(),
         set_outbound_preferences_descriptor(),
@@ -315,6 +319,20 @@ fn resolve_gate_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_RESOLVE_GATE,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_RESOLVE_GATE,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::TurnCoordinator,
+        ),
+    )
+}
+
+fn retry_run_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_RETRY_RUN,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_RETRY_RUN,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),
