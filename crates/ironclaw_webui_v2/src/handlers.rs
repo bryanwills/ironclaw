@@ -38,7 +38,7 @@ use ironclaw_product_workflow::{
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, ThreadMessageRecord, UpsertLlmProviderRequest,
+    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -129,12 +129,10 @@ pub async fn get_timeline(
         limit: query.limit,
         cursor: query.cursor,
     };
-    let mut response = state.services().get_timeline(caller, request).await?;
-    response.messages = response
-        .messages
-        .into_iter()
-        .map(scrub_internal_refs)
-        .collect();
+    // Internal drain-replay refs (turn_source_binding_ref /
+    // turn_reply_target_binding_ref) are scrubbed by the product facade in
+    // RebornServices::get_timeline — no handler-level scrub needed here.
+    let response = state.services().get_timeline(caller, request).await?;
     Ok(Json(response))
 }
 
@@ -146,18 +144,6 @@ pub struct TimelineQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
-}
-
-/// Strips internal drain-replay routing fields from a [`ThreadMessageRecord`]
-/// before it is included in a public WebUI read response.
-///
-/// `turn_source_binding_ref` and `turn_reply_target_binding_ref` are internal
-/// metadata persisted so the deferred-busy drain can replay messages without
-/// re-deriving routing context. They must not reach browser clients.
-fn scrub_internal_refs(mut record: ThreadMessageRecord) -> ThreadMessageRecord {
-    record.turn_source_binding_ref = None;
-    record.turn_reply_target_binding_ref = None;
-    record
 }
 
 /// SSE polling cadence for `stream_events`. The facade only exposes a

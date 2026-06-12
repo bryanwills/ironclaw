@@ -1859,6 +1859,16 @@ impl RebornServicesApi for RebornServices {
 
         let (messages, next_cursor) = paginate_timeline_messages(history.messages, limit, cursor);
         let summary_artifacts = cap_summary_artifacts(history.summary_artifacts);
+        // Scrub internal drain-replay routing fields before returning to any
+        // product consumer. These fields are persisted so the deferred-busy drain
+        // can replay messages without re-deriving routing context; they must not
+        // reach product surfaces (WebUI, API, CLI). Scrubbing at the facade
+        // boundary ensures every caller — not just the webui_v2 handler — receives
+        // clean records.
+        let messages = messages
+            .into_iter()
+            .map(scrub_internal_timeline_refs)
+            .collect();
 
         Ok(RebornTimelineResponse {
             thread: history.thread,
@@ -3606,6 +3616,25 @@ fn cap_summary_artifacts(
         artifacts.truncate(TIMELINE_MAX_SUMMARY_ARTIFACTS);
     }
     artifacts
+}
+
+/// Strips internal drain-replay routing fields from a [`ThreadMessageRecord`]
+/// before it leaves the product facade boundary.
+///
+/// `turn_source_binding_ref` and `turn_reply_target_binding_ref` are persisted
+/// so the deferred-busy drain can replay messages without re-deriving routing
+/// context. They are internal metadata and must not reach product consumers
+/// (WebUI, API, CLI, or any other facade caller).
+///
+/// NOTE: the drain reads these fields via `list_deferred_busy_messages` on
+/// `SessionThreadService` directly — not through this facade — so scrubbing
+/// here does not affect the drain path.
+fn scrub_internal_timeline_refs(
+    mut record: ironclaw_threads::ThreadMessageRecord,
+) -> ironclaw_threads::ThreadMessageRecord {
+    record.turn_source_binding_ref = None;
+    record.turn_reply_target_binding_ref = None;
+    record
 }
 
 fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {

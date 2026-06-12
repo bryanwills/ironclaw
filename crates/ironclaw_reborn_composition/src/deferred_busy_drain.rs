@@ -1,23 +1,24 @@
-/// Drains [`MessageStatus::DeferredBusy`] messages when a blocking run reaches
-/// terminal state.
-///
-/// When a run terminates the thread's active lock is released.  Any messages
-/// that were parked with `DeferredBusy` because the thread was busy may now be
-/// submitted.  This observer fires once per terminal event, picks up the
-/// *oldest* deferred message for the affected thread, and resubmits it through
-/// the coordinator.  One-at-a-time cascade semantics follow naturally: when
-/// that resubmitted run terminates, this observer fires again and picks up the
-/// next deferred message.
-///
-/// # Failure contract
-///
-/// Drain failures must **never** poison the terminal-event path.  The observer
-/// logs a `warn!` and returns `Ok(())` so the run's own terminal state is
-/// always committed even when the drain step fails.
+//! Drains [`MessageStatus::DeferredBusy`] messages when a blocking run reaches
+//! terminal state.
+//!
+//! When a run terminates the thread's active lock is released.  Any messages
+//! that were parked with `DeferredBusy` because the thread was busy may now be
+//! submitted.  This observer fires once per terminal event, picks up the
+//! *oldest* deferred message for the affected thread, and resubmits it through
+//! the coordinator.  One-at-a-time cascade semantics follow naturally: when
+//! that resubmitted run terminates, this observer fires again and picks up the
+//! next deferred message.
+//!
+//! # Failure contract
+//!
+//! Drain failures must **never** poison the terminal-event path.  The observer
+//! logs a `warn!` and returns `Ok(())` so the run's own terminal state is
+//! always committed even when the drain step fails.
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_host_api::UserId;
+use ironclaw_reborn::thread_scope::ThreadScopeResolver;
 use ironclaw_threads::{ListDeferredBusyMessagesRequest, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest,
@@ -347,8 +348,8 @@ where
                         return Ok(());
                     }
                 }
-                // The submit succeeded — the `return Ok(())` above means we only
-                // reach here if we hit the loop-continue paths (validation skips).
+                // Reached only via the loop-continue paths above (validation skips);
+                // every submit arm returns before reaching here.
             }
 
             // Entire window was skipped (all validation failures).
@@ -375,7 +376,7 @@ where
             }
         };
 
-        let thread_scope = match thread_scope_from_event(event) {
+        let thread_scope = match ThreadScopeResolver::derive_for_terminal_event(event) {
             Ok(scope) => scope,
             Err(reason) => {
                 debug!(
@@ -403,7 +404,7 @@ where
             }
         };
 
-        let thread_scope = match thread_scope_from_state(state) {
+        let thread_scope = match ThreadScopeResolver::derive_for_terminal_state(state) {
             Ok(scope) => scope,
             Err(reason) => {
                 debug!(
@@ -472,50 +473,6 @@ where
     }
 }
 
-/// Derive a [`ThreadScope`] from a [`TurnLifecycleEvent`].
-///
-/// Returns `Err` with a human-readable reason when the scope cannot be derived
-/// (e.g. agentless turn, missing owner).  The caller handles this as a
-/// non-fatal skip.
-fn thread_scope_from_event(event: &TurnLifecycleEvent) -> Result<ThreadScope, &'static str> {
-    let Some(agent_id) = event.scope.agent_id.clone() else {
-        return Err("agentless turn scope — no ThreadScope");
-    };
-    let owner_user_id = event
-        .scope
-        .thread_owner
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| event.owner_user_id.clone());
-    Ok(ThreadScope {
-        tenant_id: event.scope.tenant_id.clone(),
-        agent_id,
-        project_id: event.scope.project_id.clone(),
-        owner_user_id,
-        mission_id: None,
-    })
-}
-
-/// Derive a [`ThreadScope`] from a [`TurnRunState`].
-fn thread_scope_from_state(state: &TurnRunState) -> Result<ThreadScope, &'static str> {
-    let Some(agent_id) = state.scope.agent_id.clone() else {
-        return Err("agentless turn scope — no ThreadScope");
-    };
-    let owner_user_id = state
-        .scope
-        .thread_owner
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| state.actor.as_ref().map(|a| a.user_id.clone()));
-    Ok(ThreadScope {
-        tenant_id: state.scope.tenant_id.clone(),
-        agent_id,
-        project_id: state.scope.project_id.clone(),
-        owner_user_id,
-        mission_id: None,
-    })
-}
-
 /// Resolve the actor `UserId` for the turn submission.
 ///
 /// The drained message must resubmit as its ORIGINAL sender. The inbound
@@ -548,11 +505,13 @@ mod tests {
         ThreadHistoryRequest, ThreadScope,
     };
     use ironclaw_turns::{
-        AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, DefaultTurnLifecycleEventBus,
-        IdempotencyKey, InMemoryTurnStateStore, LifecyclePublishingTurnStateStore,
-        ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-        SubmitTurnResponse, TurnActor, TurnCommittedEventObserver, TurnCoordinator, TurnLeaseToken,
-        TurnLifecycleEventBus, TurnRunId, TurnRunnerId, TurnScope,
+        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
+        DefaultTurnLifecycleEventBus, EventCursor, GetRunStateRequest, IdempotencyKey,
+        InMemoryTurnStateStore, LifecyclePublishingTurnStateStore, ReplyTargetBindingRef,
+        ResumeTurnRequest, ResumeTurnResponse, SanitizedCancelReason, SourceBindingRef,
+        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCommittedEventObserver,
+        TurnCoordinator, TurnError, TurnEventKind, TurnLeaseToken, TurnLifecycleEvent,
+        TurnLifecycleEventBus, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
         runner::{ClaimRunRequest, CompleteRunRequest, TurnRunTransitionPort},
     };
 
@@ -1977,6 +1936,505 @@ mod tests {
                 .status,
             MessageStatus::Submitted,
             "C must be Submitted after B's run terminates"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scenario J: submit_turn returns a non-ThreadBusy error during drain
+    //
+    // The observer must return Ok so the terminal path is not poisoned.
+    // The deferred message must NOT be marked submitted.
+    // -----------------------------------------------------------------------
+
+    /// Coordinator mock whose `submit_turn` always returns a non-ThreadBusy
+    /// error (Unavailable).  All other methods are unreachable.
+    struct FailingSubmitCoordinator;
+
+    #[async_trait::async_trait]
+    impl TurnCoordinator for FailingSubmitCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            unreachable!("FailingSubmitCoordinator: prepare_turn")
+        }
+
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "injected submit failure".to_string(),
+            })
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            unreachable!("FailingSubmitCoordinator: resume_turn")
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            unreachable!("FailingSubmitCoordinator: cancel_run")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            unreachable!("FailingSubmitCoordinator: get_run_state")
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_submit_error_returns_ok_and_leaves_deferred_busy() {
+        let message_id = ironclaw_threads::ThreadMessageId::new();
+
+        // Use NoActorListService shape but with valid actor_id so the drain
+        // actually reaches submit_turn.  Build a bespoke service inline.
+        struct ValidRecordListService {
+            message_id: ironclaw_threads::ThreadMessageId,
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_threads::SessionThreadService for ValidRecordListService {
+            async fn ensure_thread(
+                &self,
+                _: ironclaw_threads::EnsureThreadRequest,
+            ) -> Result<ironclaw_threads::SessionThreadRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: ensure_thread")
+            }
+            async fn accept_inbound_message(
+                &self,
+                _: ironclaw_threads::AcceptInboundMessageRequest,
+            ) -> Result<
+                ironclaw_threads::AcceptedInboundMessage,
+                ironclaw_threads::SessionThreadError,
+            > {
+                unreachable!("ValidRecordListService: accept_inbound_message")
+            }
+            async fn replay_accepted_inbound_message(
+                &self,
+                _: ironclaw_threads::ReplayAcceptedInboundMessageRequest,
+            ) -> Result<
+                Option<ironclaw_threads::AcceptedInboundMessageReplay>,
+                ironclaw_threads::SessionThreadError,
+            > {
+                unreachable!("ValidRecordListService: replay_accepted_inbound_message")
+            }
+            /// Must not be called — panics if drain attempts to mark submitted
+            /// after a coordinator error.
+            async fn mark_message_submitted(
+                &self,
+                _: &ThreadScope,
+                _: &ironclaw_host_api::ThreadId,
+                _: ironclaw_threads::ThreadMessageId,
+                _: String,
+                _: String,
+            ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!(
+                    "ValidRecordListService: mark_message_submitted — must not be called after submit error"
+                )
+            }
+            async fn mark_message_deferred_busy(
+                &self,
+                _: &ThreadScope,
+                _: &ironclaw_host_api::ThreadId,
+                _: ironclaw_threads::ThreadMessageId,
+                _: Option<String>,
+                _: Option<String>,
+            ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: mark_message_deferred_busy")
+            }
+            /// Returns one valid DeferredBusy record on first call, empty on
+            /// subsequent calls (after_sequence is Some once the drain advances).
+            async fn list_deferred_busy_messages(
+                &self,
+                request: ironclaw_threads::ListDeferredBusyMessagesRequest,
+            ) -> Result<
+                Vec<ironclaw_threads::ThreadMessageRecord>,
+                ironclaw_threads::SessionThreadError,
+            > {
+                if request.after_sequence.is_some() {
+                    return Ok(vec![]);
+                }
+                Ok(vec![ironclaw_threads::ThreadMessageRecord {
+                    message_id: self.message_id,
+                    thread_id: thread_id(),
+                    sequence: 1,
+                    kind: ironclaw_threads::MessageKind::User,
+                    status: ironclaw_threads::MessageStatus::DeferredBusy,
+                    actor_id: Some(actor().as_str().to_string()),
+                    source_binding_id: Some("binding-drain".to_string()),
+                    reply_target_binding_id: Some("binding-drain".to_string()),
+                    turn_id: None,
+                    turn_run_id: None,
+                    tool_result_ref: None,
+                    tool_result_provider_call: None,
+                    content: Some("submit-error test message".to_string()),
+                    redaction_ref: None,
+                    turn_source_binding_ref: Some("src:binding-drain".to_string()),
+                    turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+                }])
+            }
+            async fn append_assistant_draft(
+                &self,
+                _: ironclaw_threads::AppendAssistantDraftRequest,
+            ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: append_assistant_draft")
+            }
+            async fn append_tool_result_reference(
+                &self,
+                _: ironclaw_threads::AppendToolResultReferenceRequest,
+            ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: append_tool_result_reference")
+            }
+            async fn append_capability_display_preview(
+                &self,
+                _: ironclaw_threads::AppendCapabilityDisplayPreviewRequest,
+            ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: append_capability_display_preview")
+            }
+            async fn update_tool_result_reference(
+                &self,
+                _: ironclaw_threads::UpdateToolResultReferenceRequest,
+            ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: update_tool_result_reference")
+            }
+            async fn update_assistant_draft(
+                &self,
+                _: ironclaw_threads::UpdateAssistantDraftRequest,
+            ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: update_assistant_draft")
+            }
+            async fn finalize_assistant_message(
+                &self,
+                _: &ThreadScope,
+                _: &ironclaw_host_api::ThreadId,
+                _: ironclaw_threads::ThreadMessageId,
+                _: ironclaw_threads::MessageContent,
+            ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: finalize_assistant_message")
+            }
+            async fn redact_message(
+                &self,
+                _: ironclaw_threads::RedactMessageRequest,
+            ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: redact_message")
+            }
+            async fn load_context_window(
+                &self,
+                _: ironclaw_threads::LoadContextWindowRequest,
+            ) -> Result<ironclaw_threads::ContextWindow, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: load_context_window")
+            }
+            async fn load_context_messages(
+                &self,
+                _: ironclaw_threads::LoadContextMessagesRequest,
+            ) -> Result<ironclaw_threads::ContextMessages, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: load_context_messages")
+            }
+            async fn list_thread_history(
+                &self,
+                _: ironclaw_threads::ThreadHistoryRequest,
+            ) -> Result<ironclaw_threads::ThreadHistory, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: list_thread_history")
+            }
+            async fn create_summary_artifact(
+                &self,
+                _: ironclaw_threads::CreateSummaryArtifactRequest,
+            ) -> Result<ironclaw_threads::SummaryArtifact, ironclaw_threads::SessionThreadError>
+            {
+                unreachable!("ValidRecordListService: create_summary_artifact")
+            }
+            // Methods with default impls are inherited.
+        }
+
+        let svc: Arc<dyn ironclaw_threads::SessionThreadService> =
+            Arc::new(ValidRecordListService { message_id });
+        let drain = Arc::new(DeferredBusyDrainObserver::new_unbound(Arc::clone(&svc)));
+
+        // Bind a coordinator that always fails submit_turn with a non-ThreadBusy error.
+        let failing_coordinator: Arc<dyn TurnCoordinator> = Arc::new(FailingSubmitCoordinator);
+        drain
+            .bind_coordinator(Arc::clone(&failing_coordinator))
+            .expect("bind coordinator");
+
+        // Manually invoke observe_committed_event with a synthetic terminal event.
+        // The event scope must carry an agent_id so thread-scope derivation succeeds.
+        let event = TurnLifecycleEvent {
+            cursor: EventCursor(1),
+            scope: turn_scope(),
+            occurred_at: None,
+            owner_user_id: Some(owner()),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Cancelled,
+            kind: TurnEventKind::Cancelled,
+            blocked_gate: None,
+            sanitized_reason: None,
+        };
+
+        let result = drain.observe_committed_event(event).await;
+        assert!(
+            result.is_ok(),
+            "observe_committed_event must return Ok even when submit_turn fails: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scenario K: submit returns Accepted but mark_message_submitted fails
+    //
+    // The observer must still return Ok — mark failure is non-fatal and logged
+    // at warn.  The drain path is complete from the coordinator's perspective.
+    // -----------------------------------------------------------------------
+
+    /// Service mock: `list_deferred_busy_messages` returns one valid record on
+    /// the first call; `mark_message_submitted` always returns an error.
+    struct FailingMarkSubmittedService {
+        message_id: ironclaw_threads::ThreadMessageId,
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_threads::SessionThreadService for FailingMarkSubmittedService {
+        async fn ensure_thread(
+            &self,
+            _: ironclaw_threads::EnsureThreadRequest,
+        ) -> Result<ironclaw_threads::SessionThreadRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: ensure_thread")
+        }
+        async fn accept_inbound_message(
+            &self,
+            _: ironclaw_threads::AcceptInboundMessageRequest,
+        ) -> Result<ironclaw_threads::AcceptedInboundMessage, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: accept_inbound_message")
+        }
+        async fn replay_accepted_inbound_message(
+            &self,
+            _: ironclaw_threads::ReplayAcceptedInboundMessageRequest,
+        ) -> Result<
+            Option<ironclaw_threads::AcceptedInboundMessageReplay>,
+            ironclaw_threads::SessionThreadError,
+        > {
+            unreachable!("FailingMarkSubmittedService: replay_accepted_inbound_message")
+        }
+        /// Always fails — exercises the drain's mark-error handling path.
+        async fn mark_message_submitted(
+            &self,
+            _: &ThreadScope,
+            _: &ironclaw_host_api::ThreadId,
+            _: ironclaw_threads::ThreadMessageId,
+            _: String,
+            _: String,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "injected mark_message_submitted failure".to_string(),
+            ))
+        }
+        async fn mark_message_deferred_busy(
+            &self,
+            _: &ThreadScope,
+            _: &ironclaw_host_api::ThreadId,
+            _: ironclaw_threads::ThreadMessageId,
+            _: Option<String>,
+            _: Option<String>,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: mark_message_deferred_busy")
+        }
+        /// Returns one valid DeferredBusy record on first call, empty on
+        /// subsequent calls (after the drain succeeds with the coordinator and
+        /// continues past the mark failure).
+        async fn list_deferred_busy_messages(
+            &self,
+            request: ironclaw_threads::ListDeferredBusyMessagesRequest,
+        ) -> Result<Vec<ironclaw_threads::ThreadMessageRecord>, ironclaw_threads::SessionThreadError>
+        {
+            if request.after_sequence.is_some() {
+                return Ok(vec![]);
+            }
+            Ok(vec![ironclaw_threads::ThreadMessageRecord {
+                message_id: self.message_id,
+                thread_id: thread_id(),
+                sequence: 1,
+                kind: ironclaw_threads::MessageKind::User,
+                status: ironclaw_threads::MessageStatus::DeferredBusy,
+                actor_id: Some(actor().as_str().to_string()),
+                source_binding_id: Some("binding-drain".to_string()),
+                reply_target_binding_id: Some("binding-drain".to_string()),
+                turn_id: None,
+                turn_run_id: None,
+                tool_result_ref: None,
+                tool_result_provider_call: None,
+                content: Some("mark-fail test message".to_string()),
+                redaction_ref: None,
+                turn_source_binding_ref: Some("src:binding-drain".to_string()),
+                turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+            }])
+        }
+        async fn append_assistant_draft(
+            &self,
+            _: ironclaw_threads::AppendAssistantDraftRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: append_assistant_draft")
+        }
+        async fn append_tool_result_reference(
+            &self,
+            _: ironclaw_threads::AppendToolResultReferenceRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: append_tool_result_reference")
+        }
+        async fn append_capability_display_preview(
+            &self,
+            _: ironclaw_threads::AppendCapabilityDisplayPreviewRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: append_capability_display_preview")
+        }
+        async fn update_tool_result_reference(
+            &self,
+            _: ironclaw_threads::UpdateToolResultReferenceRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: update_tool_result_reference")
+        }
+        async fn update_assistant_draft(
+            &self,
+            _: ironclaw_threads::UpdateAssistantDraftRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: update_assistant_draft")
+        }
+        async fn finalize_assistant_message(
+            &self,
+            _: &ThreadScope,
+            _: &ironclaw_host_api::ThreadId,
+            _: ironclaw_threads::ThreadMessageId,
+            _: ironclaw_threads::MessageContent,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: finalize_assistant_message")
+        }
+        async fn redact_message(
+            &self,
+            _: ironclaw_threads::RedactMessageRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: redact_message")
+        }
+        async fn load_context_window(
+            &self,
+            _: ironclaw_threads::LoadContextWindowRequest,
+        ) -> Result<ironclaw_threads::ContextWindow, ironclaw_threads::SessionThreadError> {
+            unreachable!("FailingMarkSubmittedService: load_context_window")
+        }
+        async fn load_context_messages(
+            &self,
+            _: ironclaw_threads::LoadContextMessagesRequest,
+        ) -> Result<ironclaw_threads::ContextMessages, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: load_context_messages")
+        }
+        async fn list_thread_history(
+            &self,
+            _: ironclaw_threads::ThreadHistoryRequest,
+        ) -> Result<ironclaw_threads::ThreadHistory, ironclaw_threads::SessionThreadError> {
+            unreachable!("FailingMarkSubmittedService: list_thread_history")
+        }
+        async fn create_summary_artifact(
+            &self,
+            _: ironclaw_threads::CreateSummaryArtifactRequest,
+        ) -> Result<ironclaw_threads::SummaryArtifact, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingMarkSubmittedService: create_summary_artifact")
+        }
+        // Methods with default impls are inherited.
+    }
+
+    #[tokio::test]
+    async fn drain_mark_submitted_error_returns_ok_after_accept() {
+        let message_id = ironclaw_threads::ThreadMessageId::new();
+        let svc: Arc<dyn ironclaw_threads::SessionThreadService> =
+            Arc::new(FailingMarkSubmittedService { message_id });
+
+        let turn_store = Arc::new(InMemoryTurnStateStore::default());
+        let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+
+        let drain = Arc::new(DeferredBusyDrainObserver::new_unbound(Arc::clone(&svc)));
+        let drain_observer: Arc<dyn TurnCommittedEventObserver> =
+            Arc::clone(&drain) as Arc<dyn TurnCommittedEventObserver>;
+        lifecycle_bus
+            .subscribe_required(drain_observer)
+            .expect("subscribe drain");
+
+        let publishing_store = Arc::new(LifecyclePublishingTurnStateStore::new(
+            Arc::clone(&turn_store),
+            lifecycle_bus,
+        ));
+        // DefaultTurnCoordinator will succeed on submit_turn; the service mock
+        // only fails on mark_message_submitted.
+        let coordinator: Arc<dyn TurnCoordinator> =
+            Arc::new(DefaultTurnCoordinator::new(Arc::clone(&publishing_store)));
+        drain
+            .bind_coordinator(Arc::clone(&coordinator))
+            .expect("bind coordinator");
+
+        // Submit a run to acquire the thread lock, then cancel it to fire the
+        // drain.  The drain will: list → valid record → submit (Accepted) →
+        // mark_message_submitted fails → warn, return Ok.
+        let run_response = coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                accepted_message_ref: AcceptedMessageRef::new("msg:mark-fail-a").unwrap(),
+                source_binding_ref: SourceBindingRef::new("src:binding-drain").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:binding-drain")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("turn:mark-fail-a").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+            .expect("submit first turn");
+        let SubmitTurnResponse::Accepted { run_id, .. } = run_response;
+
+        // Cancel fires drain → list → valid record → submit Accepted →
+        // mark_message_submitted returns error → drain logs warn → returns Ok.
+        // The cancel itself must also return Ok (terminal path not poisoned).
+        let cancel_result = coordinator
+            .cancel_run(CancelRunRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new("cancel:mark-fail-a").unwrap(),
+            })
+            .await;
+        assert!(
+            cancel_result.is_ok(),
+            "cancel_run must not fail due to a mark_message_submitted error: {cancel_result:?}"
         );
     }
 }

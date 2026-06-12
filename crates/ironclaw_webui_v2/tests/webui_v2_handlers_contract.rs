@@ -3948,18 +3948,27 @@ async fn operator_setup_accepts_secret_request_without_echoing_values() {
 }
 
 // Regression: internal drain-replay routing refs must not reach browser clients.
-// Per `.claude/rules/testing.md` "Test Through the Caller", we drive the real
-// axum handler rather than testing `scrub_internal_refs` in isolation — the
-// point is to confirm the scrub is wired into the response assembly path, not
-// just that the helper compiles.
+// Scrubbing is now the responsibility of the product facade (RebornServices::get_timeline).
+// The stub used here bypasses the real facade, so it returns records already
+// reflecting the facade's post-scrub state (both internal refs None). The
+// assertions confirm that the handler correctly passes the facade response
+// through to the wire without re-introducing those fields.
+//
+// The authoritative test that the real facade scrubs stored Some(...) values
+// into None lives in ironclaw_product_workflow::tests::reborn_services_contract
+// (get_timeline_scrubs_internal_binding_refs_at_facade_boundary), where it
+// drives RebornServices against the in-memory thread store with both fields set.
 #[tokio::test]
 async fn get_timeline_scrubs_internal_binding_refs_from_wire_response() {
     use ironclaw_threads::{MessageKind, MessageStatus, ThreadMessageId, ThreadMessageRecord};
 
     let services = Arc::new(StubServices::default());
 
-    // Build a message record that carries both internal replay-routing fields.
-    let message_with_refs = ThreadMessageRecord {
+    // The stub simulates what the real facade returns: a record whose internal
+    // drain-replay fields are already None (the facade scrubs them before
+    // returning). Both fields use `skip_serializing_if = "Option::is_none"` so
+    // None means the key is absent from the wire JSON.
+    let message_from_facade = ThreadMessageRecord {
         message_id: ThreadMessageId::new(),
         thread_id: ThreadId::new("thread-deferred").expect("thread id"),
         sequence: 1,
@@ -3974,11 +3983,11 @@ async fn get_timeline_scrubs_internal_binding_refs_from_wire_response() {
         tool_result_provider_call: None,
         content: Some("hello".to_string()),
         redaction_ref: None,
-        // Internal fields the handler must strip before sending to the browser.
-        turn_source_binding_ref: Some("sbr://tenant/agent/source".to_string()),
-        turn_reply_target_binding_ref: Some("rtr://tenant/agent/reply".to_string()),
+        // Facade has already scrubbed these to None before the handler sees them.
+        turn_source_binding_ref: None,
+        turn_reply_target_binding_ref: None,
     };
-    services.set_next_timeline_messages(vec![message_with_refs]);
+    services.set_next_timeline_messages(vec![message_from_facade]);
 
     let router = router_with(services);
 
@@ -4005,9 +4014,10 @@ async fn get_timeline_scrubs_internal_binding_refs_from_wire_response() {
     assert_eq!(
         msg["content"].as_str(),
         Some("hello"),
-        "content must survive scrub"
+        "content must survive the route"
     );
-    // Internal refs must be absent from the wire JSON.
+    // Internal refs must be absent from the wire JSON (None + skip_serializing_if
+    // means the key is omitted entirely from the serialized response).
     assert!(
         msg.get("turn_source_binding_ref").is_none(),
         "turn_source_binding_ref must not appear in the timeline wire response"

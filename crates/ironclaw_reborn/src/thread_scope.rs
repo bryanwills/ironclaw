@@ -13,10 +13,10 @@
 //! removes.
 
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::{TurnActor, TurnScope};
+use ironclaw_turns::{TurnActor, TurnLifecycleEvent, TurnRunState, TurnScope};
 
 /// Canonical owner-scoping rule for per-caller thread isolation.
-pub(crate) struct ThreadScopeResolver;
+pub struct ThreadScopeResolver;
 
 impl ThreadScopeResolver {
     /// Re-point `base`'s `owner_user_id` at the run's authenticated
@@ -47,6 +47,62 @@ impl ThreadScopeResolver {
             return scope;
         }
         Self::resolve(base, actor)
+    }
+
+    /// Derive a [`ThreadScope`] from a [`TurnLifecycleEvent`].
+    ///
+    /// Returns `Err` when the scope cannot be derived (e.g. agentless turn).
+    /// The owner-fallback rule mirrors [`lifecycle_owner_user_id`]: prefer the
+    /// explicit thread owner from `scope.thread_owner`, fall back to
+    /// `event.owner_user_id` (which the event publisher already resolved as
+    /// `explicit_owner OR actor.user_id`).
+    ///
+    /// Call sites that handle derivation failure as a non-fatal skip must use
+    /// this method rather than re-implementing the owner-fallback locally.
+    pub fn derive_for_terminal_event(
+        event: &TurnLifecycleEvent,
+    ) -> Result<ThreadScope, &'static str> {
+        let Some(agent_id) = event.scope.agent_id.clone() else {
+            return Err("agentless turn scope — no ThreadScope");
+        };
+        let owner_user_id = event
+            .scope
+            .explicit_owner_user_id()
+            .cloned()
+            .or_else(|| event.owner_user_id.clone());
+        Ok(ThreadScope {
+            tenant_id: event.scope.tenant_id.clone(),
+            agent_id,
+            project_id: event.scope.project_id.clone(),
+            owner_user_id,
+            mission_id: None,
+        })
+    }
+
+    /// Derive a [`ThreadScope`] from a [`TurnRunState`].
+    ///
+    /// Returns `Err` when the scope cannot be derived (e.g. agentless turn).
+    /// Owner precedence: explicit thread owner from `scope.thread_owner`, then
+    /// the run's actor user id.
+    ///
+    /// Call sites that handle derivation failure as a non-fatal skip must use
+    /// this method rather than re-implementing the owner-fallback locally.
+    pub fn derive_for_terminal_state(state: &TurnRunState) -> Result<ThreadScope, &'static str> {
+        let Some(agent_id) = state.scope.agent_id.clone() else {
+            return Err("agentless turn scope — no ThreadScope");
+        };
+        let owner_user_id = state
+            .scope
+            .explicit_owner_user_id()
+            .cloned()
+            .or_else(|| state.actor.as_ref().map(|a| a.user_id.clone()));
+        Ok(ThreadScope {
+            tenant_id: state.scope.tenant_id.clone(),
+            agent_id,
+            project_id: state.scope.project_id.clone(),
+            owner_user_id,
+            mission_id: None,
+        })
     }
 }
 

@@ -7689,6 +7689,85 @@ async fn get_timeline_rejects_malformed_cursor() {
     );
 }
 
+// Regression: internal drain-replay routing refs must not leave the facade
+// boundary. `turn_source_binding_ref` and `turn_reply_target_binding_ref` are
+// persisted so the deferred-busy drain can replay messages without re-deriving
+// routing context; they are internal metadata and must always be None on records
+// returned by `RebornServices::get_timeline` regardless of what is stored.
+//
+// This test seeds a message with both fields set via `mark_message_deferred_busy`
+// (the same path the drain uses), then asserts the facade returns them as None.
+// It complements the handler-level test in ironclaw_webui_v2 — that test drives
+// the HTTP route through a stub; this one drives the real facade against the
+// in-memory thread store so the scrub is covered even for non-webui_v2 callers.
+#[tokio::test]
+async fn get_timeline_scrubs_internal_binding_refs_at_facade_boundary() {
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads.clone(), coordinator);
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-scrub-refs").await;
+
+    // Accept a user inbound message so there is a row to mark deferred.
+    let scope = thread_scope_for(&alice);
+    let thread_id = ironclaw_host_api::ThreadId::new("thread-scrub-refs").expect("thread id");
+    let accepted = threads
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: alice.user_id.as_str().to_string(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: ironclaw_threads::MessageContent::text("drain me"),
+        })
+        .await
+        .expect("accept inbound message");
+
+    // Mark it deferred-busy with both internal routing refs populated — the same
+    // operation the drain path performs before replaying.
+    threads
+        .mark_message_deferred_busy(
+            &scope,
+            &thread_id,
+            accepted.message_id,
+            Some("sbr://tenant/agent/source".to_string()),
+            Some("rtr://tenant/agent/reply".to_string()),
+        )
+        .await
+        .expect("mark message deferred-busy");
+
+    // The facade must scrub both fields before returning the response.
+    let response = services
+        .get_timeline(
+            alice,
+            RebornTimelineRequest {
+                thread_id: "thread-scrub-refs".to_string(),
+                limit: None,
+                cursor: None,
+            },
+        )
+        .await
+        .expect("get timeline");
+
+    assert_eq!(response.messages.len(), 1, "expected one message");
+    let msg = &response.messages[0];
+    assert!(
+        msg.turn_source_binding_ref.is_none(),
+        "turn_source_binding_ref must be None after facade scrub (was Some)"
+    );
+    assert!(
+        msg.turn_reply_target_binding_ref.is_none(),
+        "turn_reply_target_binding_ref must be None after facade scrub (was Some)"
+    );
+    // Verify the scrub did not destroy payload-bearing content.
+    assert_eq!(
+        msg.content.as_deref(),
+        Some("drain me"),
+        "message content must survive scrub"
+    );
+}
+
 #[test]
 fn facade_source_avoids_forbidden_runtime_dependencies() {
     let source = std::fs::read_to_string("src/reborn_services.rs").expect("facade source");
