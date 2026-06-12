@@ -1875,7 +1875,8 @@ async fn submit_turn_records_skill_activation_message_before_turn_wake() {
 
 #[tokio::test]
 async fn busy_submit_clears_skill_activation_message() {
-    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let thread_store = Arc::new(InMemorySessionThreadService::default());
+    let threads: Arc<dyn SessionThreadService> = thread_store.clone();
     let active_run_id = TurnRunId::new();
     let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
         TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
@@ -1928,6 +1929,39 @@ async fn busy_submit_clears_skill_activation_message() {
         } if id == active_run_id
     ));
     assert_eq!(coordinator.submission_count(), 0);
+    // Verify the deferred message was persisted with the canonical WebUI binding refs
+    // so the drain can replay it on the next terminal state.
+    let thread_scope = thread_scope_for(&caller());
+    let deferred_messages = thread_store
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: thread_scope,
+            thread_id: ThreadId::new("thread-alpha").expect("valid thread id"),
+            limit: Some(10),
+            after_sequence: None,
+        })
+        .await
+        .expect("list deferred busy messages");
+    assert_eq!(
+        deferred_messages.len(),
+        1,
+        "exactly one deferred message must be persisted"
+    );
+    assert!(
+        deferred_messages[0]
+            .turn_source_binding_ref
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("webui-src:"),
+        "deferred WebUI message must persist a canonical webui-src: source binding ref"
+    );
+    assert!(
+        deferred_messages[0]
+            .turn_reply_target_binding_ref
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("webui-reply:"),
+        "deferred WebUI message must persist a canonical webui-reply: reply target binding ref"
+    );
     let recorded = recorded.lock().expect("lock");
     let cleared = cleared.lock().expect("lock");
     assert_eq!(recorded.len(), 1);

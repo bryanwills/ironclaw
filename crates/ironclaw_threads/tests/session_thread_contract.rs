@@ -2769,6 +2769,166 @@ async fn list_deferred_busy_messages_limit_caps_results() {
     assert!(empty.is_empty(), "limit=0 must return empty");
 }
 
+#[tokio::test]
+async fn list_deferred_busy_messages_after_sequence_filters_earlier_records() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("after-seq"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Accept and defer three messages; capture each returned record so we
+    // can inspect sequence numbers without mutable sentinels.
+    let msg_a = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("after-seq"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("first"),
+        })
+        .await
+        .unwrap();
+    let rec_a = service
+        .mark_message_deferred_busy(
+            &scope("after-seq"),
+            &thread.thread_id,
+            msg_a.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let msg_b = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("after-seq"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("second"),
+        })
+        .await
+        .unwrap();
+    let rec_b = service
+        .mark_message_deferred_busy(
+            &scope("after-seq"),
+            &thread.thread_id,
+            msg_b.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let msg_c = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("after-seq"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("third"),
+        })
+        .await
+        .unwrap();
+    let rec_c = service
+        .mark_message_deferred_busy(
+            &scope("after-seq"),
+            &thread.thread_id,
+            msg_c.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Sanity: sequences must be strictly ascending.
+    assert!(
+        rec_b.sequence < rec_c.sequence,
+        "test setup: sequences must be ascending"
+    );
+
+    // ── Main assertion: only the third record is returned after second_seq. ──
+
+    let second_seq = rec_b.sequence;
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("after-seq"),
+            thread_id: thread.thread_id.clone(),
+            limit: None,
+            after_sequence: Some(second_seq),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.len(),
+        1,
+        "after_sequence={second_seq}: only the third message should be returned"
+    );
+    assert!(
+        result[0].sequence > second_seq,
+        "returned record must have sequence > cursor: got {}",
+        result[0].sequence
+    );
+    assert_eq!(
+        result[0].sequence, rec_c.sequence,
+        "returned record must be exactly the third message"
+    );
+
+    // ── Combined cursor+limit: after=rec_a, limit=1 returns only rec_b. ──
+
+    let result_cl = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("after-seq"),
+            thread_id: thread.thread_id.clone(),
+            limit: Some(1),
+            after_sequence: Some(rec_a.sequence),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result_cl.len(),
+        1,
+        "after=rec_a, limit=1: expected exactly one record"
+    );
+    assert_eq!(
+        result_cl[0].sequence, rec_b.sequence,
+        "after=rec_a, limit=1: expected rec_b, got sequence {}",
+        result_cl[0].sequence
+    );
+
+    // ── Boundary assertion: after=rec_c must return empty (strictly >, not >=). ──
+
+    let empty = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("after-seq"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: Some(rec_c.sequence),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        empty.is_empty(),
+        "after_sequence equal to last record's sequence must return empty (strict >)"
+    );
+}
+
 // ── Presence-marker fast path ─────────────────────────────────────────────
 
 #[tokio::test]

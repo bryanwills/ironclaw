@@ -24,6 +24,7 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCommittedEventObserver, TurnCoordinator, TurnError,
     TurnLifecycleEvent, TurnRunState, TurnScope,
 };
+use tracing::{debug, warn};
 
 /// Maximum number of `DeferredBusy` records loaded per drain window.
 ///
@@ -143,6 +144,14 @@ where
             let window_last_sequence = window.last().map(|m| m.sequence).unwrap_or(0);
 
             for message in window {
+                if total_examined >= DRAIN_TOTAL_CAP {
+                    debug!(
+                        run_id = %run_id,
+                        total_examined,
+                        "DeferredBusyDrainObserver: total examined cap reached, leaving rest for next drain"
+                    );
+                    return Ok(());
+                }
                 total_examined += 1;
 
                 // Build the coordinator submission from the thread record fields.
@@ -161,9 +170,9 @@ where
                     }
                 };
 
-                // Use the canonical refs persisted at defer time.  Records written
-                // before this field was added (legacy branch — no production data,
-                // branch unmerged) have `None` here and are skipped.
+                // Use the canonical refs persisted at defer time.  Records
+                // persisted before canonical binding refs existed have `None`
+                // here and are skipped.
                 let source_binding_ref = match message.turn_source_binding_ref.as_deref() {
                     Some(canonical) => match SourceBindingRef::new(canonical) {
                         Ok(r) => r,
@@ -524,11 +533,6 @@ fn resolve_actor_user_id(
     }
 }
 
-// Tracing macros used in this module come from the `tracing` crate which is
-// already a dependency of `ironclaw_reborn_composition` transitively via the
-// `ironclaw_turns` and `ironclaw_threads` crate graph.
-use tracing::{debug, warn};
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -539,8 +543,9 @@ mod tests {
 
     use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
     use ironclaw_threads::{
-        AcceptInboundMessageRequest, AcceptedInboundMessage, EnsureThreadRequest, InMemorySessionThreadService,
-        MessageContent, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
+        AcceptInboundMessageRequest, AcceptedInboundMessage, EnsureThreadRequest,
+        InMemorySessionThreadService, MessageContent, MessageStatus, SessionThreadService,
+        ThreadHistoryRequest, ThreadScope,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, DefaultTurnLifecycleEventBus,
@@ -1590,6 +1595,248 @@ mod tests {
         // The cancel_run path above already exercised observe_committed_event via the lifecycle
         // bus.  observe_committed_state (the non-terminal path) doesn't call the list service
         // at all, so no extra assertion is needed here.
+    }
+
+    // -----------------------------------------------------------------------
+    // Scenario I: actor_id = None — drain skips the record, never submits
+    // -----------------------------------------------------------------------
+
+    /// Mock that returns one `DeferredBusy` message with `actor_id: None` on
+    /// the first call and an empty list on subsequent calls (after_sequence
+    /// will be `Some` once the drain advances past the skipped window).
+    /// Panics on `mark_message_submitted` so any submission attempt fails
+    /// the test loudly.
+    struct NoActorListService {
+        message_id: ironclaw_threads::ThreadMessageId,
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_threads::SessionThreadService for NoActorListService {
+        async fn ensure_thread(
+            &self,
+            _: ironclaw_threads::EnsureThreadRequest,
+        ) -> Result<ironclaw_threads::SessionThreadRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: ensure_thread")
+        }
+        async fn accept_inbound_message(
+            &self,
+            _: ironclaw_threads::AcceptInboundMessageRequest,
+        ) -> Result<ironclaw_threads::AcceptedInboundMessage, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: accept_inbound_message")
+        }
+        async fn replay_accepted_inbound_message(
+            &self,
+            _: ironclaw_threads::ReplayAcceptedInboundMessageRequest,
+        ) -> Result<
+            Option<ironclaw_threads::AcceptedInboundMessageReplay>,
+            ironclaw_threads::SessionThreadError,
+        > {
+            unreachable!("NoActorListService: replay_accepted_inbound_message")
+        }
+        /// Must never be called — panics if drain attempts to submit the no-actor record.
+        async fn mark_message_submitted(
+            &self,
+            _: &ThreadScope,
+            _: &ironclaw_host_api::ThreadId,
+            _: ironclaw_threads::ThreadMessageId,
+            _: String,
+            _: String,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!(
+                "NoActorListService: mark_message_submitted — drain must not submit a no-actor message"
+            )
+        }
+        async fn mark_message_deferred_busy(
+            &self,
+            _: &ThreadScope,
+            _: &ironclaw_host_api::ThreadId,
+            _: ironclaw_threads::ThreadMessageId,
+            _: Option<String>,
+            _: Option<String>,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: mark_message_deferred_busy")
+        }
+        /// Returns the single no-actor record on the first call (after_sequence = None).
+        /// Returns an empty list on subsequent calls (after_sequence = Some) so the
+        /// drain exits cleanly via the empty-window path rather than looping to cap.
+        async fn list_deferred_busy_messages(
+            &self,
+            request: ironclaw_threads::ListDeferredBusyMessagesRequest,
+        ) -> Result<Vec<ironclaw_threads::ThreadMessageRecord>, ironclaw_threads::SessionThreadError>
+        {
+            if request.after_sequence.is_some() {
+                return Ok(vec![]);
+            }
+            Ok(vec![ironclaw_threads::ThreadMessageRecord {
+                message_id: self.message_id,
+                thread_id: thread_id(),
+                sequence: 1,
+                kind: ironclaw_threads::MessageKind::User,
+                status: ironclaw_threads::MessageStatus::DeferredBusy,
+                actor_id: None, // <- the branch under test
+                source_binding_id: Some("binding-drain".to_string()),
+                reply_target_binding_id: Some("binding-drain".to_string()),
+                turn_id: None,
+                turn_run_id: None,
+                tool_result_ref: None,
+                tool_result_provider_call: None,
+                content: Some("no-actor message".to_string()),
+                redaction_ref: None,
+                turn_source_binding_ref: Some("src:binding-drain".to_string()),
+                turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+            }])
+        }
+        async fn append_assistant_draft(
+            &self,
+            _: ironclaw_threads::AppendAssistantDraftRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: append_assistant_draft")
+        }
+        async fn append_tool_result_reference(
+            &self,
+            _: ironclaw_threads::AppendToolResultReferenceRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: append_tool_result_reference")
+        }
+        async fn append_capability_display_preview(
+            &self,
+            _: ironclaw_threads::AppendCapabilityDisplayPreviewRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: append_capability_display_preview")
+        }
+        async fn update_tool_result_reference(
+            &self,
+            _: ironclaw_threads::UpdateToolResultReferenceRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: update_tool_result_reference")
+        }
+        async fn update_assistant_draft(
+            &self,
+            _: ironclaw_threads::UpdateAssistantDraftRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: update_assistant_draft")
+        }
+        async fn finalize_assistant_message(
+            &self,
+            _: &ThreadScope,
+            _: &ironclaw_host_api::ThreadId,
+            _: ironclaw_threads::ThreadMessageId,
+            _: ironclaw_threads::MessageContent,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: finalize_assistant_message")
+        }
+        async fn redact_message(
+            &self,
+            _: ironclaw_threads::RedactMessageRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: redact_message")
+        }
+        async fn load_context_window(
+            &self,
+            _: ironclaw_threads::LoadContextWindowRequest,
+        ) -> Result<ironclaw_threads::ContextWindow, ironclaw_threads::SessionThreadError> {
+            unreachable!("NoActorListService: load_context_window")
+        }
+        async fn load_context_messages(
+            &self,
+            _: ironclaw_threads::LoadContextMessagesRequest,
+        ) -> Result<ironclaw_threads::ContextMessages, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: load_context_messages")
+        }
+        async fn list_thread_history(
+            &self,
+            _: ironclaw_threads::ThreadHistoryRequest,
+        ) -> Result<ironclaw_threads::ThreadHistory, ironclaw_threads::SessionThreadError> {
+            unreachable!("NoActorListService: list_thread_history")
+        }
+        async fn create_summary_artifact(
+            &self,
+            _: ironclaw_threads::CreateSummaryArtifactRequest,
+        ) -> Result<ironclaw_threads::SummaryArtifact, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("NoActorListService: create_summary_artifact")
+        }
+        // Methods with default impls (read_thread, delete_thread, latest_thread_message,
+        // finalized_assistant_message_by_run, list_thread_messages_range, update_thread_goal,
+        // read_thread_by_id, list_threads_for_scope) are inherited as-is.
+    }
+
+    #[tokio::test]
+    async fn drain_skips_deferred_message_with_no_actor_id_and_leaves_it_deferred_busy() {
+        let message_id = ironclaw_threads::ThreadMessageId::new();
+        let no_actor_service: Arc<dyn ironclaw_threads::SessionThreadService> =
+            Arc::new(NoActorListService { message_id });
+
+        let turn_store = Arc::new(InMemoryTurnStateStore::default());
+        let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+
+        let drain = Arc::new(DeferredBusyDrainObserver::new_unbound(Arc::clone(
+            &no_actor_service,
+        )));
+        let drain_observer: Arc<dyn TurnCommittedEventObserver> =
+            Arc::clone(&drain) as Arc<dyn TurnCommittedEventObserver>;
+        lifecycle_bus
+            .subscribe_required(drain_observer)
+            .expect("subscribe drain");
+
+        let publishing_store = Arc::new(LifecyclePublishingTurnStateStore::new(
+            Arc::clone(&turn_store),
+            lifecycle_bus,
+        ));
+        let coordinator: Arc<dyn TurnCoordinator> =
+            Arc::new(DefaultTurnCoordinator::new(Arc::clone(&publishing_store)));
+        drain
+            .bind_coordinator(Arc::clone(&coordinator))
+            .expect("bind coordinator");
+
+        // Submit a run so we have a run_id to cancel.
+        let run_response = coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                accepted_message_ref: AcceptedMessageRef::new("msg:no-actor-a").unwrap(),
+                source_binding_ref: SourceBindingRef::new("src:binding-drain").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:binding-drain")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("turn:no-actor-test-a").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+            .expect("submit turn");
+        let SubmitTurnResponse::Accepted { run_id, .. } = run_response;
+
+        // Cancel fires drain → drain sees actor_id = None → skips → no submit.
+        // If mark_message_submitted were called, NoActorListService would panic.
+        let cancel_result = coordinator
+            .cancel_run(CancelRunRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new("cancel:no-actor-a").unwrap(),
+            })
+            .await;
+        assert!(
+            cancel_result.is_ok(),
+            "cancel_run must not fail even when drain skips a no-actor message: {cancel_result:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

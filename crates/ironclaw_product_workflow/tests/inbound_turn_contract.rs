@@ -1094,6 +1094,22 @@ async fn busy_thread_persists_second_message_as_deferred() {
     assert_eq!(history.messages.len(), 2);
     assert_eq!(history.messages[1].content.as_deref(), Some("second"));
     assert_eq!(history.messages[1].status, MessageStatus::DeferredBusy);
+    assert!(
+        history.messages[1]
+            .turn_source_binding_ref
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("src:"),
+        "deferred message must persist a canonical source binding ref with src: prefix"
+    );
+    assert!(
+        history.messages[1]
+            .turn_reply_target_binding_ref
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("reply:"),
+        "deferred message must persist a canonical reply target binding ref with reply: prefix"
+    );
 }
 
 #[tokio::test]
