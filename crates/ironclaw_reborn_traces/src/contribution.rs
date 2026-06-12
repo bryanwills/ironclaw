@@ -5243,9 +5243,17 @@ fn validate_trace_upload_claim_issuer_url(
     url: &reqwest::Url,
     allowed_hosts: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow::anyhow!("Trace Commons upload token issuer URL requires a host"))?;
+    // Literal-loopback hosts get the same dev exception as the loopback-HTTP
+    // invite form in onboarding — otherwise a successful loopback onboarding
+    // writes a policy whose claim endpoint can never be used.
+    let loopback_dev = crate::onboarding::invite::is_loopback_host(&host);
     anyhow::ensure!(
-        url.scheme() == "https",
-        "Trace Commons upload token issuer URL must use https"
+        url.scheme() == "https" || (url.scheme() == "http" && loopback_dev),
+        "Trace Commons upload token issuer URL must use https (or http to a loopback host for local dev)"
     );
     anyhow::ensure!(
         url.username().is_empty() && url.password().is_none(),
@@ -5255,19 +5263,17 @@ fn validate_trace_upload_claim_issuer_url(
         url.query().is_none() && url.fragment().is_none(),
         "Trace Commons upload token issuer URL must not include query strings or fragments"
     );
-    let host = url
-        .host_str()
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| anyhow::anyhow!("Trace Commons upload token issuer URL requires a host"))?;
-    anyhow::ensure!(
-        !is_internal_trace_upload_claim_issuer_hostname(&host),
-        "Trace Commons upload token issuer URL must not use localhost or internal hostnames"
-    );
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    if !loopback_dev {
         anyhow::ensure!(
-            !is_disallowed_trace_upload_claim_issuer_ip(ip),
-            "Trace Commons upload token issuer URL must not use private, local, or reserved IP addresses"
+            !is_internal_trace_upload_claim_issuer_hostname(&host),
+            "Trace Commons upload token issuer URL must not use localhost or internal hostnames"
         );
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            anyhow::ensure!(
+                !is_disallowed_trace_upload_claim_issuer_ip(ip),
+                "Trace Commons upload token issuer URL must not use private, local, or reserved IP addresses"
+            );
+        }
     }
     anyhow::ensure!(
         !allowed_hosts.is_empty(),
@@ -5294,7 +5300,17 @@ async fn resolve_trace_upload_claim_issuer_host(
         !addrs.is_empty(),
         "Trace Commons upload token issuer host {host} resolved to no addresses"
     );
+    // For a literal-loopback host (the local-dev exception) the pinned
+    // resolution must stay on loopback — anything else is DNS tampering.
+    let loopback_dev = crate::onboarding::invite::is_loopback_host(host);
     for addr in &addrs {
+        if loopback_dev {
+            anyhow::ensure!(
+                addr.ip().is_loopback(),
+                "Trace Commons upload token issuer loopback host {host} resolved to non-loopback address"
+            );
+            continue;
+        }
         anyhow::ensure!(
             !is_disallowed_trace_upload_claim_issuer_ip(addr.ip()),
             "Trace Commons upload token issuer host {host} resolved to disallowed address"
@@ -5496,9 +5512,16 @@ fn community_profile_url_from_policy(
 }
 
 fn validate_trace_commons_ingest_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow::anyhow!("Trace Commons ingest endpoint requires a host"))?;
+    // Same literal-loopback dev exception as the claim-issuer validator: a
+    // loopback-HTTP invite stores a loopback ingest endpoint in the policy.
+    let loopback_dev = crate::onboarding::invite::is_loopback_host(&host);
     anyhow::ensure!(
-        url.scheme() == "https",
-        "Trace Commons ingest endpoint must use https"
+        url.scheme() == "https" || (url.scheme() == "http" && loopback_dev),
+        "Trace Commons ingest endpoint must use https (or http to a loopback host for local dev)"
     );
     anyhow::ensure!(
         url.username().is_empty() && url.password().is_none(),
@@ -5508,19 +5531,17 @@ fn validate_trace_commons_ingest_url(url: &reqwest::Url) -> anyhow::Result<()> {
         url.query().is_none() && url.fragment().is_none(),
         "Trace Commons ingest endpoint must not include query strings or fragments"
     );
-    let host = url
-        .host_str()
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| anyhow::anyhow!("Trace Commons ingest endpoint requires a host"))?;
-    anyhow::ensure!(
-        !is_internal_trace_upload_claim_issuer_hostname(&host),
-        "Trace Commons ingest endpoint must not use localhost or internal hostnames"
-    );
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    if !loopback_dev {
         anyhow::ensure!(
-            !is_disallowed_trace_upload_claim_issuer_ip(ip),
-            "Trace Commons ingest endpoint must not use private, local, or reserved IP addresses"
+            !is_internal_trace_upload_claim_issuer_hostname(&host),
+            "Trace Commons ingest endpoint must not use localhost or internal hostnames"
         );
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            anyhow::ensure!(
+                !is_disallowed_trace_upload_claim_issuer_ip(ip),
+                "Trace Commons ingest endpoint must not use private, local, or reserved IP addresses"
+            );
+        }
     }
     Ok(())
 }
@@ -11953,8 +11974,6 @@ mod tests {
             "https://user:secret@issuer.example.com/v1/claims",
             "https://issuer.example.com/v1/claims?token=secret",
             "https://issuer.example.com/v1/claims#fragment",
-            "https://localhost/v1/claims",
-            "https://127.0.0.1/v1/claims",
             "https://metadata.google.internal/v1/claims",
         ] {
             assert!(
@@ -11966,6 +11985,140 @@ mod tests {
                 "{unsafe_url} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn upload_claim_issuer_url_validation_allows_literal_loopback_dev() {
+        // The loopback-HTTP dev invite form writes a loopback claim endpoint
+        // into the policy; the validator must accept the same exception or a
+        // successful loopback onboarding can never mint a claim.
+        for (url, host) in [
+            ("http://127.0.0.1:3917/v1/trace-upload-claim", "127.0.0.1"),
+            ("http://localhost:3917/v1/trace-upload-claim", "localhost"),
+            ("http://[::1]:3917/v1/trace-upload-claim", "[::1]"),
+            ("https://127.0.0.1/v1/trace-upload-claim", "127.0.0.1"),
+        ] {
+            let allowed_hosts = BTreeSet::from([host.to_string()]);
+            assert!(
+                validate_trace_upload_claim_issuer_url(
+                    &reqwest::Url::parse(url).expect("url"),
+                    &allowed_hosts,
+                )
+                .is_ok(),
+                "{url} should be accepted under the loopback dev exception"
+            );
+        }
+
+        // The exception is literal loopback only: plain-HTTP private/internal
+        // hosts and loopback-suffixed hostnames stay rejected, and loopback
+        // still has to pass the allowlist.
+        let allowed = BTreeSet::from(["10.0.0.5".to_string(), "foo.localhost".to_string()]);
+        for unsafe_url in [
+            "http://10.0.0.5/v1/trace-upload-claim",
+            "http://192.168.1.10/v1/trace-upload-claim",
+            "http://foo.localhost/v1/trace-upload-claim",
+            "https://foo.localhost/v1/trace-upload-claim",
+        ] {
+            assert!(
+                validate_trace_upload_claim_issuer_url(
+                    &reqwest::Url::parse(unsafe_url).expect("url"),
+                    &allowed,
+                )
+                .is_err(),
+                "{unsafe_url} should be rejected"
+            );
+        }
+        assert!(
+            validate_trace_upload_claim_issuer_url(
+                &reqwest::Url::parse("http://127.0.0.1:3917/v1/trace-upload-claim").expect("url"),
+                &BTreeSet::from(["issuer.example.com".to_string()]),
+            )
+            .is_err(),
+            "loopback host not on the allowlist should be rejected"
+        );
+    }
+
+    #[test]
+    fn ingest_url_validation_allows_literal_loopback_dev() {
+        assert!(
+            validate_trace_commons_ingest_url(
+                &reqwest::Url::parse("http://127.0.0.1:3917/v1/traces").expect("url")
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_trace_commons_ingest_url(
+                &reqwest::Url::parse("http://10.0.0.5/v1/traces").expect("url")
+            )
+            .is_err()
+        );
+        assert!(
+            validate_trace_commons_ingest_url(
+                &reqwest::Url::parse("https://ingest.example.com/v1/traces").expect("url")
+            )
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_trace_upload_claim_from_issuer_accepts_loopback_dev_issuer() {
+        // Regression: a loopback-HTTP dev onboarding writes
+        // `http://127.0.0.1:<port>/v1/trace-upload-claim` into the policy. The
+        // real claim fetch must honor the same loopback exception end-to-end
+        // (URL validator + pinned DNS resolution), or a successfully onboarded
+        // loopback enrollment can never mint a claim.
+        let token = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "dev-key-1"}));
+        let claim_token = token.clone();
+        let app = axum::Router::new().route(
+            "/v1/trace-upload-claim",
+            axum::routing::post(move || {
+                let token = claim_token.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "access_token": token,
+                        "token_type": "Bearer",
+                        "expires_in": 300,
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock issuer listener binds");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let scope_dir = tempfile::tempdir().expect("tempdir");
+        crate::onboarding::DeviceKeypair::load_or_generate_pending(
+            scope_dir.path(),
+            "loopback-invite-hash",
+        )
+        .expect("generate pending device key")
+        .promote(scope_dir.path(), "tenant-dev")
+        .expect("promote device key");
+
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
+            upload_token_issuer_allowed_hosts: BTreeSet::from(["127.0.0.1".to_string()]),
+            upload_token_tenant_id: Some("tenant-dev".to_string()),
+            upload_token_audience: Some("trace-commons".to_string()),
+            ..Default::default()
+        };
+        let context = TraceUploadClaimContext {
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: Vec::new(),
+            scope_dir: Some(scope_dir.path().to_path_buf()),
+        };
+        let claim = fetch_trace_upload_claim_from_issuer(&policy, &context)
+            .await
+            .expect("loopback dev issuer mints a claim");
+        assert_eq!(claim.access_token, token);
     }
 
     #[test]
@@ -13057,12 +13210,10 @@ mod tests {
     #[tokio::test]
     async fn fetch_trace_upload_claim_from_issuer_returns_typed_pilot_allowlist_error() {
         // Spin up a mock HTTP server that returns the issuer's typed
-        // PilotAllowlistNotMatched refusal. The URL-validation seam in
-        // fetch_trace_upload_claim_from_issuer requires https + non-loopback
-        // hosts, so we exercise the same error-formatting path via the
-        // factored-out helper directly. The mock server confirms the body
-        // shape the real issuer emits, then we drive the helper with that
-        // body to assert the user-actionable diagnostic.
+        // PilotAllowlistNotMatched refusal, then drive the factored-out
+        // error-formatting helper directly with that body to assert the
+        // user-actionable diagnostic (the helper is the unit under test;
+        // the mock confirms the body shape the real issuer emits).
         let app = axum::Router::new().route(
             "/v1/trace-upload-claim",
             axum::routing::post(|| async {
@@ -13454,12 +13605,25 @@ mod tests {
         };
         assert!(community_profile_url_from_policy(&insecure).is_err());
 
-        // Internal ingest hosts are rejected.
+        // Internal (non-loopback) ingest hosts are rejected.
         let internal = StandingTraceContributionPolicy {
-            ingestion_endpoint: Some("https://localhost/v1/traces".to_string()),
+            ingestion_endpoint: Some("https://ingest.corp.internal/v1/traces".to_string()),
             ..Default::default()
         };
         assert!(community_profile_url_from_policy(&internal).is_err());
+
+        // Literal loopback gets the dev exception (loopback-HTTP onboarding
+        // stores a loopback ingest endpoint).
+        let loopback = StandingTraceContributionPolicy {
+            ingestion_endpoint: Some("http://127.0.0.1:3917/v1/traces".to_string()),
+            ..Default::default()
+        };
+        let loopback_url =
+            community_profile_url_from_policy(&loopback).expect("loopback dev ingest derives");
+        assert_eq!(
+            loopback_url.as_str(),
+            "http://127.0.0.1:3917/v1/community/profile"
+        );
     }
 
     #[tokio::test]
@@ -13500,11 +13664,11 @@ mod tests {
 
     #[tokio::test]
     async fn profile_attribution_claim_request_wire_shape_and_mock_issuer_roundtrip() {
-        // The issuer-URL hardening (https + non-loopback) keeps the real
-        // fetch path off local mock servers, so — like the PilotAllowlist
-        // tests above — we assert the wire shape via the factored-out
-        // request builder and confirm a real issuer round-trip of exactly
-        // that body against a mock that rejects any drift.
+        // Like the PilotAllowlist tests above, we assert the wire shape via
+        // the factored-out request builder and confirm a real issuer
+        // round-trip of exactly that body against a mock that rejects any
+        // drift (the full fetch path is covered separately by
+        // fetch_trace_upload_claim_from_issuer_accepts_loopback_dev_issuer).
         let scope = format!("trace-profile-test-{}", Uuid::new_v4());
         let context = profile_attribution_claim_context(Some(&scope));
         let policy = StandingTraceContributionPolicy {

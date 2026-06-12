@@ -229,6 +229,10 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "bio": {
                     "type": "string",
                     "description": "Optional short public bio, at most 280 bytes"
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly approved publishing this handle/bio in this conversation (default: false)"
                 }
             },
             "required": ["display_handle"],

@@ -132,13 +132,22 @@ pub(crate) fn is_https_or_loopback(scheme: &str, host_only: &str) -> bool {
         return true;
     }
     if scheme == "http" {
-        let loopback = host_only == "localhost"
-            || host_only
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback());
-        return loopback;
+        return is_loopback_host(host_only);
     }
     false
+}
+
+/// Returns true if the host is literally loopback: `localhost` or a loopback
+/// IP. Accepts bracketed IPv6 (`[::1]`) and mixed case. This is the only host
+/// shape for which a non-HTTPS Trace Commons endpoint can enter the policy
+/// (the loopback-HTTP dev invite form above), so the claim/profile/ingest
+/// validators in `contribution.rs` honor the same exception.
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    let bare = host_only(host).to_ascii_lowercase();
+    bare == "localhost"
+        || bare
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Given a fully-parsed `reqwest::Url`, return the scheme://host[:port] origin

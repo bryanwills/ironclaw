@@ -129,7 +129,9 @@ pub(super) fn profile_set_manifest() -> Result<CapabilityManifest, ExtensionErro
     first_party_capability_manifest(
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         "Create or update the current user's public Trace Commons community profile. \
-         Use only after the user chooses a pseudonymous display handle and optional short bio. \
+         ONLY call after the user has explicitly chosen a pseudonymous display handle \
+         (and optional short bio) and confirmed they want it published. Pass \
+         confirmed=true only when that consent was given in this conversation. \
          This is a separate public-profile opt-in and cannot submit traces.",
         vec![
             EffectKind::ReadFilesystem,
@@ -160,6 +162,7 @@ struct OnboardToolInput {
 struct ProfileSetToolInput {
     display_handle: String,
     bio: Option<String>,
+    confirmed: bool,
 }
 
 fn parse_onboard_input(input: &Value) -> Result<OnboardToolInput, FirstPartyCapabilityError> {
@@ -207,9 +210,14 @@ fn parse_profile_set_input(
         .map(str::trim)
         .filter(|bio| !bio.is_empty())
         .map(str::to_string);
+    let confirmed = input
+        .get("confirmed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     Ok(ProfileSetToolInput {
         display_handle: display_handle.to_string(),
         bio,
+        confirmed,
     })
 }
 
@@ -575,6 +583,22 @@ pub(super) async fn dispatch_profile_set(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input = parse_profile_set_input(&request.input)?;
+
+    // Consent gate: publishing/updating the public community profile is a
+    // separate public-attribution opt-in, and this capability is exempt from
+    // approval gates in local-dev policy — so the hard invariant lives here,
+    // mirroring dispatch_onboard. Never reach the network without explicit
+    // per-conversation confirmation.
+    if !input.confirmed {
+        return Ok(json!({
+            "updated": false,
+            "consent_required": true,
+            "message": "Publishing or updating the public Trace Commons community profile is a \
+        separate public-attribution opt-in. Confirm the display handle (and optional bio) with \
+        the user first, then call again with confirmed=true."
+        }));
+    }
+
     let scope = request.scope.user_id.as_str().to_string();
     match read_trace_policy_for_scope(Some(scope.as_str())) {
         Ok(policy) if policy.enabled => {}
@@ -982,11 +1006,38 @@ mod tests {
     fn parse_profile_set_input_trims_handle_and_optional_bio() {
         let parsed = parse_profile_set_input(&json!({
             "display_handle": "  pilot_zaki  ",
-            "bio": "  Repair loop enjoyer  "
+            "bio": "  Repair loop enjoyer  ",
+            "confirmed": true
         }))
         .unwrap();
         assert_eq!(parsed.display_handle, "pilot_zaki");
         assert_eq!(parsed.bio.as_deref(), Some("Repair loop enjoyer"));
+        assert!(parsed.confirmed);
+    }
+
+    #[test]
+    fn parse_profile_set_input_defaults_confirmed_to_false() {
+        let parsed = parse_profile_set_input(&json!({"display_handle": "pilot_zaki"})).unwrap();
+        assert!(!parsed.confirmed);
+    }
+
+    #[tokio::test]
+    async fn dispatch_profile_set_without_confirmed_returns_consent_required_no_write() {
+        // confirmed=false short-circuits before the enrollment check and any
+        // network call — the public-attribution opt-in is a hard input gate,
+        // mirroring dispatch_onboard.
+        let request = test_request(json!({
+            "display_handle": "pilot_zaki",
+            "bio": "Trace Commons pilot contributor",
+        }));
+        let result = dispatch_profile_set(&request).await.unwrap();
+        assert_eq!(result["updated"], json!(false));
+        assert_eq!(result["consent_required"], json!(true));
+        assert!(
+            result["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("confirmed=true"))
+        );
     }
 
     #[test]
@@ -1000,6 +1051,7 @@ mod tests {
         let input = ProfileSetToolInput {
             display_handle: "pilot_zaki".to_string(),
             bio: Some("Trace Commons pilot contributor".to_string()),
+            confirmed: true,
         };
         let v = profile_set_success_value(&input);
         assert_eq!(v["updated"], json!(true));
@@ -1047,7 +1099,8 @@ mod tests {
     async fn dispatch_profile_set_without_enrollment_returns_onboard_guidance() {
         let request = test_request(json!({
             "display_handle": "pilot_zaki",
-            "bio": "Trace Commons pilot contributor"
+            "bio": "Trace Commons pilot contributor",
+            "confirmed": true
         }));
         let result = dispatch_profile_set(&request).await.unwrap();
         assert_eq!(result["updated"], json!(false));
