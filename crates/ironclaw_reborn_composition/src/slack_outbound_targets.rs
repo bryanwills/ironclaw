@@ -635,6 +635,7 @@ impl SlackHostBetaOutboundTargetProvider {
                 self.team_id.as_str(),
                 &caller.user_id,
                 SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
+                SLACK_OUTBOUND_TARGET_LIST_MAX_TOTAL_ROUTES,
             )
             .await
             .map_err(map_slack_target_route_error)?

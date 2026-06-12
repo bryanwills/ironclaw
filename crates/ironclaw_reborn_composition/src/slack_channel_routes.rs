@@ -255,11 +255,26 @@ pub(crate) trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
         team_id: &str,
         subject_user_id: &UserId,
         page_size: usize,
+        max_total_routes: usize,
     ) -> Result<bool, SlackChannelRouteError> {
+        if page_size == 0 || max_total_routes == 0 {
+            return Err(SlackChannelRouteError::StoreUnavailable);
+        }
+        let page_size = page_size.clamp(1, max_total_routes);
         let mut cursor = 0;
         loop {
+            if cursor >= max_total_routes {
+                return Ok(false);
+            }
+            let remaining = max_total_routes - cursor;
             let page = self
-                .list_routes(tenant_id, installation_id, team_id, cursor, page_size)
+                .list_routes(
+                    tenant_id,
+                    installation_id,
+                    team_id,
+                    cursor,
+                    page_size.min(remaining),
+                )
                 .await?;
             if page
                 .routes
@@ -273,6 +288,9 @@ pub(crate) trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
             };
             if next_cursor <= cursor {
                 return Err(SlackChannelRouteError::StoreUnavailable);
+            }
+            if next_cursor >= max_total_routes {
+                return Ok(false);
             }
             cursor = next_cursor;
         }
@@ -407,6 +425,7 @@ impl SlackChannelRouteStore for InMemorySlackChannelRouteStore {
         team_id: &str,
         subject_user_id: &UserId,
         _page_size: usize,
+        _max_total_routes: usize,
     ) -> Result<bool, SlackChannelRouteError> {
         Ok(self
             .routes

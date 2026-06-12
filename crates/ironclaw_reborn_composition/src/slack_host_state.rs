@@ -1211,30 +1211,48 @@ where
         team_id: &str,
         subject_user_id: &UserId,
         page_size: usize,
+        max_total_routes: usize,
     ) -> Result<bool, SlackChannelRouteError> {
         if tenant_id != &self.scope.tenant_id {
             return Ok(false);
         }
-        let page = self
-            .list_routes(
-                tenant_id,
-                installation_id,
-                team_id,
-                0,
-                page_size.clamp(1, CHANNEL_ROUTE_REPLACE_LIST_LIMIT),
-            )
-            .await?;
-        if page
-            .routes
-            .iter()
-            .any(|route| route.subject_user_id == subject_user_id.as_str())
-        {
-            return Ok(true);
+        if page_size == 0 || max_total_routes == 0 {
+            return Err(SlackChannelRouteError::StoreUnavailable);
         }
-        if page.next_cursor.is_some() {
-            return Ok(false);
+        let page_size = page_size.min(CHANNEL_ROUTE_REPLACE_LIST_LIMIT);
+        let mut cursor = 0;
+        loop {
+            if cursor >= max_total_routes {
+                return Ok(false);
+            }
+            let remaining = max_total_routes - cursor;
+            let page = self
+                .list_routes(
+                    tenant_id,
+                    installation_id,
+                    team_id,
+                    cursor,
+                    page_size.min(remaining),
+                )
+                .await?;
+            if page
+                .routes
+                .iter()
+                .any(|route| route.subject_user_id == subject_user_id.as_str())
+            {
+                return Ok(true);
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(false);
+            };
+            if next_cursor <= cursor {
+                return Err(SlackChannelRouteError::StoreUnavailable);
+            }
+            if next_cursor >= max_total_routes {
+                return Ok(false);
+            }
+            cursor = next_cursor;
         }
-        Ok(false)
     }
 }
 
@@ -2958,7 +2976,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_slack_host_state_has_route_for_subject_fails_closed_beyond_page_cap() {
+    async fn filesystem_slack_host_state_has_route_for_subject_finds_match_after_first_page() {
         let root = Arc::new(RouteLockTestBackend::normal());
         let state = state_with_backend(root.clone());
         let tenant_id = TenantId::new("tenant-alpha").unwrap();
@@ -2996,18 +3014,73 @@ mod tests {
                 "T123",
                 &subject,
                 CHANNEL_ROUTE_REPLACE_LIST_LIMIT,
+                CHANNEL_ROUTE_REPLACE_LIST_LIMIT * 2,
+            )
+            .await
+            .expect("route lookup");
+
+        assert!(
+            has_route,
+            "lookup must keep paging until it finds a route within the inventory cap"
+        );
+        assert_eq!(
+            root.get_calls(),
+            CHANNEL_ROUTE_REPLACE_LIST_LIMIT + 1,
+            "lookup should read into the second page to find the matching route"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_has_route_for_subject_fails_closed_beyond_inventory_cap() {
+        let root = Arc::new(RouteLockTestBackend::normal());
+        let state = state_with_backend(root.clone());
+        let tenant_id = TenantId::new("tenant-alpha").unwrap();
+        let installation_id = installation();
+        let subject = user("user:match");
+
+        for index in 0..=CHANNEL_ROUTE_REPLACE_LIST_LIMIT {
+            let key = SlackChannelRouteKey::new(
+                tenant_id.clone(),
+                installation_id.clone(),
+                "T123".to_string(),
+                if index == CHANNEL_ROUTE_REPLACE_LIST_LIMIT {
+                    "zzzz".to_string()
+                } else {
+                    format!("a{index:04}")
+                },
+            )
+            .unwrap();
+            let current_subject = if index == CHANNEL_ROUTE_REPLACE_LIST_LIMIT {
+                subject.clone()
+            } else {
+                user(&format!("user:{index}"))
+            };
+            state
+                .upsert_route_record(key, current_subject)
+                .await
+                .expect("seed route");
+        }
+
+        let has_route = state
+            .has_route_for_subject(
+                &tenant_id,
+                &installation_id,
+                "T123",
+                &subject,
+                CHANNEL_ROUTE_REPLACE_LIST_LIMIT,
+                CHANNEL_ROUTE_REPLACE_LIST_LIMIT,
             )
             .await
             .expect("route lookup");
 
         assert!(
             !has_route,
-            "lookup must fail closed once the first page is exhausted"
+            "lookup must fail closed once the inventory cap is reached"
         );
         assert_eq!(
             root.get_calls(),
             CHANNEL_ROUTE_REPLACE_LIST_LIMIT,
-            "lookup must stop after the first capped page"
+            "lookup must stop once the inventory cap is reached"
         );
     }
 }
