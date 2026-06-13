@@ -1082,10 +1082,11 @@ mod tests {
     };
     use ironclaw_turns::{
         AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-        GetRunStateRequest, LoopResultRef, ReplyTargetBindingRef, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SourceBindingRef, SpawnTreeReservation, SubmitTurnRequest,
-        SubmitTurnResponse, TurnEventKind, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState,
-        TurnScope, TurnStateStore, events::TurnLifecycleEvent,
+        GetRunStateRequest, LoopResultRef, ReplyTargetBindingRef, ResumeTurnResponse,
+        RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
+        SpawnTreeReservation, SubmitTurnRequest, SubmitTurnResponse, TurnEventKind, TurnRunId,
+        TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnStateStore,
+        events::TurnLifecycleEvent,
     };
 
     use crate::subagent::goal_store::{
@@ -1123,6 +1124,18 @@ mod tests {
                 run_id: request.run_id,
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(10),
+            })
+        }
+
+        async fn retry_turn(
+            &self,
+            request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: format!(
+                    "retry not used by completion observer tests: {}",
+                    request.run_id
+                ),
             })
         }
 
@@ -1198,6 +1211,18 @@ mod tests {
                 run_id: request.run_id,
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(10),
+            })
+        }
+
+        async fn retry_turn(
+            &self,
+            request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: format!(
+                    "retry not used by completion observer tests: {}",
+                    request.run_id
+                ),
             })
         }
 

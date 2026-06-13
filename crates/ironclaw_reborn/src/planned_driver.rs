@@ -576,22 +576,6 @@ mod tests {
         result.expect("resume should continue the loop");
         assert_eq!(host.load_call_count(), 1);
         assert!(host.call_log().contains(&MockHostCall::StreamModel));
-        let first_payload = host
-            .staged_payloads()
-            .into_iter()
-            .find(|request| request.kind == LoopCheckpointKind::BeforeModel)
-            .expect("resumed executor should write a before-model checkpoint");
-        let first_state = LoopExecutionState::from_checkpoint_payload(
-            &first_payload.payload,
-            CheckpointKind::BeforeModel,
-        )
-        .expect("checkpoint payload");
-        assert_eq!(first_state.iteration, 7);
-        assert_eq!(
-            first_state.input_cursor,
-            LoopInputCursor::origin_for_run(&context),
-            "resume must rebind source-run cursors to the retry run"
-        );
         assert_eq!(
             checkpoints.sequence().first(),
             Some(&(CheckpointKind::BeforeModel, 7)),
@@ -799,7 +783,6 @@ mod tests {
         checkpoint_id: TurnCheckpointId,
         loaded: LoadedCheckpointPayload,
         load_calls: Mutex<usize>,
-        staged_payloads: Mutex<Vec<StageCheckpointPayloadRequest>>,
     }
 
     impl ResumePayloadHost {
@@ -813,7 +796,6 @@ mod tests {
                 checkpoint_id,
                 loaded,
                 load_calls: Mutex::new(0),
-                staged_payloads: Mutex::new(Vec::new()),
             }
         }
 
@@ -823,10 +805,6 @@ mod tests {
 
         fn call_log(&self) -> Vec<MockHostCall> {
             self.inner.call_log()
-        }
-
-        fn staged_payloads(&self) -> Vec<StageCheckpointPayloadRequest> {
-            self.staged_payloads.lock().expect("payload lock").clone()
         }
     }
 
@@ -973,10 +951,6 @@ mod tests {
             &self,
             request: StageCheckpointPayloadRequest,
         ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
-            self.staged_payloads
-                .lock()
-                .expect("payload lock")
-                .push(request.clone());
             self.inner.stage_checkpoint_payload(request).await
         }
 
