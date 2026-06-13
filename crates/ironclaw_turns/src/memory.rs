@@ -2275,7 +2275,18 @@ impl Inner {
             }
             record.status = status;
             if status == TurnStatus::Failed {
-                record.checkpoint_id = None;
+                // Preserve retryability: resolve to the latest resumable
+                // checkpoint (BeforeModel/BeforeBlock) so lease-expired and
+                // externally-failed runs can be retried, matching their
+                // user-facing "Retry the run." summary. Resolves to None when
+                // no resumable checkpoint exists, keeping the projected
+                // `retryable` flag consistent with `retry_turn` validation
+                // (both gate on a resumable-kind checkpoint).
+                record.checkpoint_id = self.latest_resumable_loop_checkpoint(
+                    &record.scope,
+                    record.turn_id,
+                    record.run_id,
+                );
             }
             record.failure = failure.clone();
             record.runner_id = None;
@@ -2506,7 +2517,17 @@ impl Inner {
     ) -> AppliedLoopTransition {
         let from = record.status;
         match from {
-            TurnStatus::Running => self.fail_claimed_record(record, failure, None),
+            TurnStatus::Running => {
+                // Mirror terminal_transition: a runner-reported failure keeps the
+                // run retryable from its latest resumable checkpoint rather than
+                // discarding it.
+                let resume = self.latest_resumable_loop_checkpoint(
+                    &record.scope,
+                    record.turn_id,
+                    record.run_id,
+                );
+                self.fail_claimed_record(record, failure, resume)
+            }
             TurnStatus::CancelRequested => self.cancel_claimed_record(record),
             _ => AppliedLoopTransition::Rejected {
                 record: Box::new(record),

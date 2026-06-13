@@ -15,8 +15,8 @@ use ironclaw_turns::{
     SubmitTurnResponse, ThreadBusy, TurnActor, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
     TurnScope, TurnStateStore, TurnStatus,
     runner::{
-        ApplyValidatedLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ApplyValidatedLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, FailRunRequest,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -478,4 +478,102 @@ async fn filesystem_retry_failed_turn_reacquires_thread_active_lock() {
     let backend = Arc::new(engine_filesystem());
     let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
     assert_retry_reacquires_thread_active_lock(&store, "filesystem").await;
+}
+
+/// Regression for the lease-expired / externally-failed path: `fail_run`
+/// (and lease-expiry recovery, which shares `terminal_transition`) must keep
+/// the run retryable from its latest resumable checkpoint, matching the
+/// user-facing "Retry the run." summary. A failure with only a non-resumable
+/// checkpoint resolves to non-retryable so the projected `retryable` flag and
+/// `retry_turn` validation stay in agreement.
+async fn assert_external_fail_preserves_retryability<S>(store: &S, thread: &str)
+where
+    S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
+{
+    // Resumable checkpoint present -> failed run stays retryable.
+    let retryable_thread = format!("{thread}-extfail-retryable");
+    let claimed = submit_and_claim(
+        store,
+        &retryable_thread,
+        &format!("idem-{retryable_thread}"),
+    )
+    .await;
+    let checkpoint = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::BeforeModel).await;
+    let failed = store
+        .fail_run(FailRunRequest {
+            run_id: claimed.state.run_id,
+            runner_id: claimed.runner_id,
+            lease_token: claimed.lease_token,
+            failure: SanitizedFailure::new("lease_expired").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert_eq!(
+        failed.checkpoint_id,
+        Some(checkpoint.checkpoint_id),
+        "external/lease failure must preserve the resumable checkpoint"
+    );
+    let response = store
+        .retry_turn(retry_request(
+            &retryable_thread,
+            claimed.state.run_id,
+            &format!("idem-{retryable_thread}-retry"),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(response.run_id, claimed.state.run_id);
+    assert_eq!(response.status, TurnStatus::Queued);
+
+    // Only a non-resumable checkpoint present -> failed run is not retryable,
+    // and the recorded checkpoint is cleared so the flag matches retry_turn.
+    let nonretryable_thread = format!("{thread}-extfail-final");
+    let claimed = submit_and_claim(
+        store,
+        &nonretryable_thread,
+        &format!("idem-{nonretryable_thread}"),
+    )
+    .await;
+    put_loop_checkpoint(store, &claimed, LoopCheckpointKind::Final).await;
+    let failed = store
+        .fail_run(FailRunRequest {
+            run_id: claimed.state.run_id,
+            runner_id: claimed.runner_id,
+            lease_token: claimed.lease_token,
+            failure: SanitizedFailure::new("lease_expired").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert_eq!(
+        failed.checkpoint_id, None,
+        "a run with only a non-resumable checkpoint must not advertise retryability"
+    );
+    let error = store
+        .retry_turn(retry_request(
+            &nonretryable_thread,
+            claimed.state.run_id,
+            &format!("idem-{nonretryable_thread}-retry"),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        TurnError::RunNotRetryable {
+            run_id: claimed.state.run_id
+        }
+    );
+}
+
+#[tokio::test]
+async fn inmemory_external_fail_preserves_retryability() {
+    let store = InMemoryTurnStateStore::default();
+    assert_external_fail_preserves_retryability(&store, "memory").await;
+}
+
+#[tokio::test]
+async fn filesystem_external_fail_preserves_retryability() {
+    let backend = Arc::new(engine_filesystem());
+    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    assert_external_fail_preserves_retryability(&store, "filesystem").await;
 }
