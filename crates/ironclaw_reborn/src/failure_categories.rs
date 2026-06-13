@@ -6,13 +6,13 @@ pub const MODEL_CREDITS_EXHAUSTED_CATEGORY: &str = "model_credits_exhausted";
 /// Exposed for cross-crate consumers that project this category to a user-facing message.
 pub const MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY: &str = "model_credentials_unavailable";
 
-pub const HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY: &str = "host_stage_unavailable:prompt";
-pub const HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY: &str = "host_stage_unavailable:model";
-pub const HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY: &str = "host_stage_unavailable:capability";
-pub const HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY: &str = "host_stage_unavailable:transcript";
-pub const HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY: &str = "host_stage_unavailable:checkpoint";
-pub const HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY: &str = "host_stage_unavailable:input";
-pub const HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY: &str = "host_stage_unavailable:unknown";
+pub const HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY: &str = "host_stage_unavailable_prompt";
+pub const HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY: &str = "host_stage_unavailable_model";
+pub const HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY: &str = "host_stage_unavailable_capability";
+pub const HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY: &str = "host_stage_unavailable_transcript";
+pub const HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY: &str = "host_stage_unavailable_checkpoint";
+pub const HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY: &str = "host_stage_unavailable_input";
+pub const HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY: &str = "host_stage_unavailable_unknown";
 
 pub(crate) const MODEL_CREDITS_EXHAUSTED_REASON_KIND:
     ironclaw_turns::run_profile::AgentLoopHostErrorReasonKind =

@@ -151,6 +151,7 @@ impl LoopExitApplier {
             completion_refs_verified: false,
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
+            failure_resume_checkpoint_id: None,
         };
 
         match exit {
@@ -220,6 +221,21 @@ impl LoopExitApplier {
                         failed.checkpoint_id.as_ref(),
                     )
                     .await?;
+                policy.failure_resume_checkpoint_id = match self
+                    .transition_port
+                    .latest_resumable_checkpoint(scope, turn_id, run_id)
+                    .await
+                {
+                    Ok(checkpoint_id) => checkpoint_id,
+                    Err(error) => {
+                        tracing::warn!(
+                            run_id = ?run_id,
+                            error = %error,
+                            "failed to resolve failed-run retry checkpoint; recording failure as non-retryable"
+                        );
+                        None
+                    }
+                };
             }
         }
 
@@ -498,6 +514,8 @@ pub(crate) struct LoopExitValidationPolicy {
     completion_refs_verified: bool,
     blocked_evidence_verified: bool,
     failure_evidence_verified: bool,
+    #[serde(skip_serializing)]
+    failure_resume_checkpoint_id: Option<TurnCheckpointId>,
 }
 
 impl LoopExitValidationPolicy {
@@ -549,6 +567,15 @@ impl LoopExitValidationPolicy {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_host_verified_failure_resume_checkpoint(
+        mut self,
+        checkpoint_id: TurnCheckpointId,
+    ) -> Self {
+        self.failure_resume_checkpoint_id = Some(checkpoint_id);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn requires_final_checkpoint(&self) -> bool {
         self.require_final_checkpoint
     }
@@ -581,6 +608,11 @@ impl LoopExitValidationPolicy {
     #[cfg(test)]
     pub(crate) fn failure_evidence_verified(&self) -> bool {
         self.failure_evidence_verified
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failure_resume_checkpoint_id(&self) -> Option<TurnCheckpointId> {
+        self.failure_resume_checkpoint_id
     }
 }
 
@@ -830,15 +862,6 @@ fn validate_failed_exit(
     {
         return invalid_exit_decision(exit_id, LoopExitViolationKind::MissingFinalCheckpoint);
     }
-    let resume_checkpoint_id = if policy.require_final_checkpoint {
-        if policy.final_checkpoint_verified {
-            exit.checkpoint_id
-        } else {
-            None
-        }
-    } else {
-        exit.checkpoint_id
-    };
     let failure = exit
         .safe_summary
         .unwrap_or_else(|| exit.reason_kind.to_sanitized_failure());
@@ -847,7 +870,7 @@ fn validate_failed_exit(
         TurnRunnerOutcome::Failed {
             failure,
             explanation_message_refs: exit.explanation_message_refs,
-            resume_checkpoint_id,
+            resume_checkpoint_id: policy.failure_resume_checkpoint_id,
         },
     )
 }

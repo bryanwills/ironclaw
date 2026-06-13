@@ -179,6 +179,18 @@ impl LoopExecutionState {
             reason: error.to_string(),
         })
     }
+
+    /// Rebinds run-scoped host cursors after loading a checkpoint into a new
+    /// retry run.
+    ///
+    /// Retryable failed runs intentionally reuse the source run's checkpoint
+    /// payload. The input cursor inside that payload is scoped to the source
+    /// `(scope, run_id)`, so it cannot be submitted to the retry host. Reset it
+    /// to the new run origin and let the host drain fresh queued inputs.
+    pub fn rebase_for_run(mut self, context: &LoopRunContext) -> Self {
+        self.input_cursor = LoopInputCursor::origin_for_run(context);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -553,6 +565,28 @@ mod tests {
         let result = LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::Final);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), state);
+    }
+
+    #[test]
+    fn rebase_for_run_resets_run_scoped_input_cursor() {
+        let source_context = test_run_context();
+        let target_context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&source_context);
+        state.input_cursor = LoopInputCursor::from_host_token(
+            &source_context,
+            ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:source-seen")
+                .unwrap(),
+        );
+        state.iteration = 4;
+
+        let rebased = state.clone().rebase_for_run(&target_context);
+
+        assert_eq!(rebased.iteration, state.iteration);
+        assert!(rebased.input_cursor.is_for_run(&target_context));
+        assert_eq!(
+            rebased.input_cursor,
+            LoopInputCursor::origin_for_run(&target_context)
+        );
     }
 
     #[test]

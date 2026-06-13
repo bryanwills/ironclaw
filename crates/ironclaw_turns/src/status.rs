@@ -217,15 +217,10 @@ fn validate_sanitized_category(kind: &'static str, value: &str) -> Result<(), St
     }
     if !value
         .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == ':')
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
     {
         return Err(format!(
-            "{kind} must contain only lowercase ASCII letters, digits, underscores, or colons"
-        ));
-    }
-    if value.split(':').any(str::is_empty) {
-        return Err(format!(
-            "{kind} must not contain empty colon-delimited segments"
+            "{kind} must contain only lowercase ASCII letters, digits, or underscores"
         ));
     }
     Ok(())
@@ -444,18 +439,24 @@ mod tests {
     use super::SanitizedFailure;
 
     #[test]
-    fn sanitized_failure_accepts_colon_delimited_category() {
-        let failure = SanitizedFailure::new("host_stage_unavailable:model")
-            .expect("colon-delimited category is valid");
-        assert_eq!(failure.category(), "host_stage_unavailable:model");
+    fn sanitized_failure_accepts_snake_case_category() {
+        let failure =
+            SanitizedFailure::new("host_stage_unavailable_model").expect("category is valid");
+        assert_eq!(failure.category(), "host_stage_unavailable_model");
     }
 
     #[test]
-    fn sanitized_failure_rejects_empty_colon_segments() {
-        for invalid in ["a::b", ":model", "host_stage_unavailable:", ":"] {
+    fn sanitized_failure_rejects_colons() {
+        for invalid in [
+            "host_stage_unavailable:model",
+            "a::b",
+            ":model",
+            "host_stage_unavailable:",
+            ":",
+        ] {
             assert!(
                 SanitizedFailure::new(invalid).is_err(),
-                "category {invalid:?} with an empty colon segment must be rejected"
+                "category {invalid:?} with a colon must be rejected"
             );
         }
     }

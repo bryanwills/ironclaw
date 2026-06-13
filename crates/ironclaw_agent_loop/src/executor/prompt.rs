@@ -599,6 +599,13 @@ async fn compaction_failed_exit(
         )
         .await;
     let mut state = state;
+    state = match CheckpointStage
+        .cancel_if_requested_after_pending_input_ack(ctx, state, pending_input_ack)
+        .await?
+    {
+        CancelCheck::Continue(state) => *state,
+        CancelCheck::Exit(exit) => return Ok(PromptCompactionOutcome::Exited(exit)),
+    };
     let explanation_message_ref =
         attach_failure_explanation(ctx, &mut state, LoopFailureKind::CompactionUnavailable).await?;
     let checked = CheckpointStage

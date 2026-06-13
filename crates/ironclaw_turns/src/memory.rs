@@ -1805,6 +1805,10 @@ impl Inner {
             };
             let outcome = expired_lease_terminal_outcome(record.status);
             record.status = outcome.status;
+            if record.status == TurnStatus::Failed {
+                record.checkpoint_id =
+                    self.latest_resumable_loop_checkpoint(&record.scope, record.turn_id, run_id);
+            }
             record.failure = outcome.failure;
             record.runner_id = None;
             record.lease_token = None;

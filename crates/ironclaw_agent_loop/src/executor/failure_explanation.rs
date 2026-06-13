@@ -2,7 +2,7 @@ use ironclaw_turns::{
     LoopFailureKind, LoopMessageRef,
     run_profile::{
         AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopInlineMessage, LoopInlineMessageRole,
-        LoopModelRequest, LoopPromptBundleRequest, LoopSafeSummary, ParentLoopOutput,
+        LoopModelRequest, LoopPromptBundleRequest, LoopSafeSummary, ParentLoopOutput, PromptMode,
     },
 };
 
@@ -41,7 +41,7 @@ pub(super) async fn explain_failure(
         return Ok(None);
     }
 
-    let request = match build_explanation_prompt_request(ctx, state, reason_kind).await {
+    let request = match build_explanation_prompt_request(state, reason_kind) {
         Some(request) => request,
         None => return Ok(None),
     };
@@ -118,29 +118,28 @@ pub(super) async fn explain_failure(
     }
 }
 
-async fn build_explanation_prompt_request(
-    ctx: StageContext<'_>,
+fn build_explanation_prompt_request(
     state: &LoopExecutionState,
     reason_kind: LoopFailureKind,
 ) -> Option<LoopPromptBundleRequest> {
-    let mut request = ctx
-        .planner
-        .context()
-        .plan_context_request(state)
-        .await
-        .request;
-    request.surface_version = None;
-    request.capability_view = None;
-    request.checkpoint_state_ref = None;
-    request.inline_messages.push(LoopInlineMessage {
-        role: LoopInlineMessageRole::System,
-        safe_body: safe_summary(failure_context(state, reason_kind), reason_kind)?,
-    });
-    request.inline_messages.push(LoopInlineMessage {
-        role: LoopInlineMessageRole::User,
-        safe_body: safe_summary(final_instruction(reason_kind), reason_kind)?,
-    });
-    Some(request)
+    Some(LoopPromptBundleRequest {
+        mode: PromptMode::TextOnly,
+        context_cursor: None,
+        surface_version: None,
+        capability_view: None,
+        checkpoint_state_ref: None,
+        max_messages: Some(0),
+        inline_messages: vec![
+            LoopInlineMessage {
+                role: LoopInlineMessageRole::System,
+                safe_body: safe_summary(failure_context(state, reason_kind), reason_kind)?,
+            },
+            LoopInlineMessage {
+                role: LoopInlineMessageRole::User,
+                safe_body: safe_summary(final_instruction(reason_kind), reason_kind)?,
+            },
+        ],
+    })
 }
 
 fn failure_context(state: &LoopExecutionState, reason_kind: LoopFailureKind) -> String {

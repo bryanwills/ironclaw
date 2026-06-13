@@ -43,11 +43,43 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "model_error" => {
             "The run failed while calling the model. Check the selected model provider and try again."
         }
+        "model_transient" => "The run failed after a temporary model error. Retry the run.",
+        "model_context_overflow" => {
+            "The run failed because the model context was too large. Retry with a shorter request or start a new thread."
+        }
+        "model_content_filtered" => {
+            "The run failed because the model provider filtered the response. Change the request and try again."
+        }
+        "model_unavailable" => {
+            "The run failed because the model provider was unavailable. Check the selected provider and retry the run."
+        }
+        "model_internal" => {
+            "The run failed because the model provider returned an internal error. Retry the run or choose a different provider."
+        }
         "context_build_failed" => {
             "The run failed while building the model context. Retry the run, and contact support if it keeps happening."
         }
         "capability_protocol_error" => {
             "The run failed because a capability returned an invalid protocol response. Retry the run, and contact support if it keeps happening."
+        }
+        "capability_transient" => "The run failed after a temporary tool error. Retry the run.",
+        "capability_permanent" => {
+            "The run failed because a tool reported a permanent error. Change the request or tool configuration and try again."
+        }
+        "capability_input_invalid" => {
+            "The run failed because a tool rejected its input. Retry with a clearer or narrower request."
+        }
+        "capability_operation_failed" => {
+            "The run failed because a tool operation did not complete. Retry the run, and check the tool integration if it keeps happening."
+        }
+        "capability_policy_denied" => {
+            "The run failed because a tool policy denied the requested action. Change the request or permissions and try again."
+        }
+        "capability_unavailable" => {
+            "The run failed because a required tool was unavailable. Retry the run, and check the tool integration if it keeps happening."
+        }
+        "capability_internal" => {
+            "The run failed because a tool returned an internal error. Retry the run, and check the tool integration if it keeps happening."
         }
         "iteration_limit" => {
             "The run stopped after reaching its iteration limit before producing a reply. Retry with a narrower request or increase the limit."
@@ -79,25 +111,46 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "compaction_unavailable" => {
             "The run failed because context compaction was unavailable. Retry with a shorter request or start a new thread."
         }
-        "host_stage_unavailable:prompt" => {
+        "compaction_invalid_cut_point" => {
+            "The run failed because context compaction selected an invalid cut point. Retry the run, and contact support if it keeps happening."
+        }
+        "compaction_unsupported_mode" => {
+            "The run failed because the requested context compaction mode is unsupported. Retry with a shorter request or start a new thread."
+        }
+        "compaction_input_too_large" => {
+            "The run failed because context compaction input was too large. Retry with a shorter request or start a new thread."
+        }
+        "compaction_security_rejected" => {
+            "The run failed because context compaction was rejected by a safety check. Change the request and try again."
+        }
+        "compaction_inference_failed" => {
+            "The run failed because context compaction could not complete. Retry with a shorter request or start a new thread."
+        }
+        "compaction_cancelled" => {
+            "The run stopped while context compaction was being cancelled. Retry the run if you still need a response."
+        }
+        "compaction_persistence_failed" => {
+            "The run failed while saving compacted context. Retry the run, and contact support if saving still fails."
+        }
+        "host_stage_unavailable_prompt" => {
             "The run failed because the host prompt stage was unavailable. Retry the run, and contact support if it keeps happening."
         }
-        "host_stage_unavailable:model" => {
+        "host_stage_unavailable_model" => {
             "The run failed because the host model stage was unavailable. Check the model provider and try again."
         }
-        "host_stage_unavailable:capability" => {
+        "host_stage_unavailable_capability" => {
             "The run failed because the host capability stage was unavailable. Retry the run, and check the tool integration if it keeps happening."
         }
-        "host_stage_unavailable:transcript" => {
+        "host_stage_unavailable_transcript" => {
             "The run failed because the host transcript stage was unavailable. Retry the run, and contact support if saving still fails."
         }
-        "host_stage_unavailable:checkpoint" => {
+        "host_stage_unavailable_checkpoint" => {
             "The run failed because the host checkpoint stage was unavailable. Retry the run, and contact support if checkpoints remain unavailable."
         }
-        "host_stage_unavailable:input" => {
+        "host_stage_unavailable_input" => {
             "The run failed because the host input stage was unavailable. Check the submitted message and try again."
         }
-        "host_stage_unavailable:unknown" => {
+        "host_stage_unavailable_unknown" => {
             "The run failed because a required host stage was unavailable. Retry the run, and contact support if it keeps happening."
         }
         "unknown_failure" => unknown_failure_summary(),

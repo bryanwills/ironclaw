@@ -13,8 +13,9 @@ use ironclaw_turns::{
         LoopCompactionOutcome, LoopCompactionResponse, LoopContextCompactionKind, LoopInput,
         LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef,
         LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId, ObservationTrust,
-        ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay, SameCallRetryConstraint,
-        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
+        ParentLoopOutput, ProcessHandleSummary, PromptMode, ProviderToolCallReplay,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        VisibleCapabilityRequest,
     },
 };
 
@@ -700,6 +701,60 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
             "compaction_failed",
             "checkpoint_written",
         ]
+    );
+}
+
+#[tokio::test]
+async fn compaction_failure_cancellation_skips_explanation_and_returns_cancelled() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_result(Err(LoopCompactionError::SecurityRejected {
+            safe_summary: LoopSafeSummary::new("injection detected").unwrap(),
+        }))
+        .cancel_after_compaction_failure();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 100,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    match step {
+        PromptStep::Exit(LoopExit::Cancelled(cancelled)) => {
+            assert_eq!(
+                cancelled.reason_kind,
+                LoopCancelledReasonKind::HostCancellation
+            );
+        }
+        PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
+        PromptStep::Prepared(_)
+        | PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::SkipModel(_, _) => panic!("unexpected prompt step"),
+    }
+    assert_eq!(
+        host.prompt_requests().len(),
+        1,
+        "compaction cancellation should not request a failure explanation prompt"
     );
 }
 
@@ -2285,6 +2340,42 @@ async fn capability_abort_finalizes_explanation_and_failed_exit_refs_partial_fir
 }
 
 #[tokio::test]
+async fn failure_explanation_prompt_is_inline_only_and_context_free() {
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Reply {
+                text: "The run stopped after a capability failure.".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::failed("permanent")]]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = DriverMockHost::builder().script(script).build();
+    let executor = CanonicalAgentLoopExecutor;
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.assistant_refs.push(message_ref("msg:partial-work"));
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Failed(_)));
+    let requests = host.prompt_requests();
+    assert_eq!(requests.len(), 2);
+    let explanation = &requests[1];
+    assert_eq!(explanation.mode, PromptMode::TextOnly);
+    assert_eq!(explanation.max_messages, Some(0));
+    assert!(explanation.context_cursor.is_none());
+    assert!(explanation.surface_version.is_none());
+    assert!(explanation.capability_view.is_none());
+    assert!(explanation.checkpoint_state_ref.is_none());
+    assert_eq!(explanation.inline_messages.len(), 2);
+}
+
+#[tokio::test]
 async fn explanation_model_error_degrades_to_original_failed_exit() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
@@ -2396,6 +2487,42 @@ async fn cancellation_before_explanation_skips_explanation_model_call() {
     assert!(matches!(exit, LoopExit::Cancelled(_)));
     assert_eq!(host.model_call_count(), 1);
     assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test]
+async fn exit_stage_aborted_cancellation_skips_explanation_and_returns_cancelled() {
+    let host = MockHost::new(vec![reply_response()]);
+    host.request_cancellation(LoopCancelReasonKind::UserRequested);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::Aborted(LoopFailureKind::InvalidModelOutput),
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    match exit {
+        LoopExit::Cancelled(cancelled) => {
+            assert_eq!(
+                cancelled.reason_kind,
+                LoopCancelledReasonKind::HostCancellation
+            );
+        }
+        other => panic!("expected cancelled exit, got {other:?}"),
+    }
+    assert!(host.prompt_requests().is_empty());
+    assert!(host.model_requests().is_empty());
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
 }
 
 #[tokio::test]

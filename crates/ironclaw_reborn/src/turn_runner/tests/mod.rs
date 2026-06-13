@@ -173,6 +173,7 @@ struct MockTransitionPort {
     runner_failure_requests: Mutex<Vec<RecordRunnerFailureRequest>>,
     relinquish_result: Mutex<Result<TurnRunState, TurnError>>,
     relinquish_requests: Mutex<Vec<RelinquishRunRequest>>,
+    latest_resumable_checkpoint_result: Mutex<Result<Option<TurnCheckpointId>, TurnError>>,
 }
 
 impl MockTransitionPort {
@@ -195,6 +196,7 @@ impl MockTransitionPort {
             runner_failure_requests: Mutex::new(Vec::new()),
             relinquish_result: Mutex::new(Ok(test_run_state(test_scope(), TurnStatus::Queued))),
             relinquish_requests: Mutex::new(Vec::new()),
+            latest_resumable_checkpoint_result: Mutex::new(Ok(None)),
         }
     }
 
@@ -205,6 +207,17 @@ impl MockTransitionPort {
 
     fn with_heartbeat_result(self, result: Result<EventCursor, TurnError>) -> Self {
         *self.heartbeat_result.lock().expect("lock") = result;
+        self
+    }
+
+    fn with_latest_resumable_checkpoint(
+        self,
+        result: Result<Option<TurnCheckpointId>, TurnError>,
+    ) -> Self {
+        *self
+            .latest_resumable_checkpoint_result
+            .lock()
+            .expect("lock") = result;
         self
     }
 
@@ -265,6 +278,18 @@ impl TurnRunTransitionPort for MockTransitionPort {
             .push(TransitionCall::RecoverExpiredLeases);
         self.recover_requests.lock().expect("lock").push(request);
         self.recover_result.lock().expect("lock").clone()
+    }
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        _scope: &TurnScope,
+        _turn_id: TurnId,
+        _run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        self.latest_resumable_checkpoint_result
+            .lock()
+            .expect("lock")
+            .clone()
     }
 
     async fn record_model_route_snapshot(
@@ -1259,7 +1284,11 @@ async fn worker_maps_driver_unavailable_to_retryable_host_stage_failure() {
     let checkpoint_id = TurnCheckpointId::new();
     let mut claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
     claimed.state.checkpoint_id = Some(checkpoint_id);
-    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+    let port = Arc::new(
+        MockTransitionPort::new()
+            .with_claim_result(Ok(Some(claimed)))
+            .with_latest_resumable_checkpoint(Ok(Some(checkpoint_id))),
+    );
 
     let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
     let worker = TurnRunnerWorker::new(
@@ -1290,9 +1319,50 @@ async fn worker_maps_driver_unavailable_to_retryable_host_stage_failure() {
     assert_eq!(
         first_applied_failed_outcome(&port),
         (
-            "host_stage_unavailable:model".to_string(),
+            "host_stage_unavailable_model".to_string(),
             Some(checkpoint_id)
         )
+    );
+}
+
+#[tokio::test]
+async fn worker_does_not_mark_driver_unavailable_retryable_without_confirmed_checkpoint() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::failing(
+        desc.clone(),
+        AgentLoopDriverError::Unavailable {
+            reason: "Model: unavailable".to_string(),
+        },
+    ));
+    let registry = Arc::new(setup_registry(driver));
+    let mut claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    claimed.state.checkpoint_id = Some(TurnCheckpointId::new());
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(50),
+            scope_filter: None,
+        },
+        port.clone(),
+        make_applier(port.clone()),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+    );
+
+    assert!(
+        worker
+            .try_claim_and_run(&CancellationToken::new())
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(
+        first_applied_failed_outcome(&port),
+        ("host_stage_unavailable_model".to_string(), None)
     );
 }
 
@@ -1309,7 +1379,11 @@ async fn worker_threads_driver_failed_reason_kind_into_retryable_failure_summary
     let checkpoint_id = TurnCheckpointId::new();
     let mut claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
     claimed.state.checkpoint_id = Some(checkpoint_id);
-    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+    let port = Arc::new(
+        MockTransitionPort::new()
+            .with_claim_result(Ok(Some(claimed)))
+            .with_latest_resumable_checkpoint(Ok(Some(checkpoint_id))),
+    );
 
     let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
     let worker = TurnRunnerWorker::new(

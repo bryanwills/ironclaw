@@ -715,7 +715,7 @@ impl TurnRunnerWorker {
             .await
         {
             Ok(Some(checkpoint_id)) => Some(checkpoint_id),
-            Ok(None) => claimed.state.checkpoint_id,
+            Ok(None) => None,
             Err(error) => {
                 warn!(
                     runner_id = ?claimed.runner_id,
@@ -723,7 +723,7 @@ impl TurnRunnerWorker {
                     error = %error,
                     "failed to query latest resumable checkpoint for driver failure"
                 );
-                claimed.state.checkpoint_id
+                None
             }
         }
     }

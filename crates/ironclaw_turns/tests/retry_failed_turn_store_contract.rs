@@ -16,7 +16,7 @@ use ironclaw_turns::{
     TurnScope, TurnStateStore, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, FailRunRequest,
-        TurnRunTransitionPort, TurnRunnerOutcome,
+        RecoverExpiredLeasesRequest, TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -565,6 +565,80 @@ where
     );
 }
 
+async fn assert_lease_recovery_preserves_retryability<S>(store: &S, thread: &str)
+where
+    S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
+{
+    let retryable_thread = format!("{thread}-lease-retryable");
+    let claimed = submit_and_claim(
+        store,
+        &retryable_thread,
+        &format!("idem-{retryable_thread}"),
+    )
+    .await;
+    let checkpoint = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::BeforeModel).await;
+    let recovered = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + chrono::Duration::seconds(120),
+            scope_filter: Some(scope(&retryable_thread)),
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 1);
+    assert_eq!(recovered.recovered[0].status, TurnStatus::Failed);
+    assert_eq!(
+        recovered.recovered[0].checkpoint_id,
+        Some(checkpoint.checkpoint_id),
+        "lease-expired failure must preserve the latest resumable checkpoint"
+    );
+    let response = store
+        .retry_turn(retry_request(
+            &retryable_thread,
+            claimed.state.run_id,
+            &format!("idem-{retryable_thread}-retry"),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(response.run_id, claimed.state.run_id);
+    assert_eq!(response.status, TurnStatus::Queued);
+
+    let nonretryable_thread = format!("{thread}-lease-final");
+    let claimed = submit_and_claim(
+        store,
+        &nonretryable_thread,
+        &format!("idem-{nonretryable_thread}"),
+    )
+    .await;
+    put_loop_checkpoint(store, &claimed, LoopCheckpointKind::Final).await;
+    let recovered = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + chrono::Duration::seconds(120),
+            scope_filter: Some(scope(&nonretryable_thread)),
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 1);
+    assert_eq!(recovered.recovered[0].status, TurnStatus::Failed);
+    assert_eq!(
+        recovered.recovered[0].checkpoint_id, None,
+        "lease-expired failure with only a final checkpoint must not advertise retryability"
+    );
+    let error = store
+        .retry_turn(retry_request(
+            &nonretryable_thread,
+            claimed.state.run_id,
+            &format!("idem-{nonretryable_thread}-retry"),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        TurnError::RunNotRetryable {
+            run_id: claimed.state.run_id
+        }
+    );
+}
+
 #[tokio::test]
 async fn inmemory_external_fail_preserves_retryability() {
     let store = InMemoryTurnStateStore::default();
@@ -576,4 +650,17 @@ async fn filesystem_external_fail_preserves_retryability() {
     let backend = Arc::new(engine_filesystem());
     let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
     assert_external_fail_preserves_retryability(&store, "filesystem").await;
+}
+
+#[tokio::test]
+async fn inmemory_lease_recovery_preserves_retryability() {
+    let store = InMemoryTurnStateStore::default();
+    assert_lease_recovery_preserves_retryability(&store, "memory").await;
+}
+
+#[tokio::test]
+async fn filesystem_lease_recovery_preserves_retryability() {
+    let backend = Arc::new(engine_filesystem());
+    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    assert_lease_recovery_preserves_retryability(&store, "filesystem").await;
 }
