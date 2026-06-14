@@ -46,6 +46,7 @@ async fn cancel_after_capability_batch_is_consumed_once() {
             capability_id: capability_id("demo.echo"),
             input_ref: CapabilityInputRef::new("input:one-shot").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         }],
         stop_on_first_suspension: false,
     };
