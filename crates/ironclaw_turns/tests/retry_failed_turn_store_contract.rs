@@ -337,6 +337,46 @@ async fn assert_failed_transition_uses_latest_resumable_checkpoint<S>(
     assert_eq!(retry.status, TurnStatus::Queued);
 }
 
+/// Regression: an explicit `resume_checkpoint_id` handed to the failed
+/// transition must still be a same-run resumable (`BeforeModel`/`BeforeBlock`)
+/// checkpoint. A non-resumable (`Final`) id must be filtered out, falling back
+/// to the host-derived latest resumable checkpoint. Otherwise the failed run
+/// would advertise retryability that `retry_turn` then refuses, stranding the
+/// UI on a retry button that always fails.
+async fn assert_explicit_nonresumable_resume_checkpoint_is_not_retryable<S>(
+    store: &S,
+    thread: &str,
+    submit_idem: &str,
+    retry_idem: &str,
+) where
+    S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
+{
+    let claimed = submit_and_claim(store, thread, submit_idem).await;
+    // Only a non-resumable Final checkpoint exists for this run.
+    let final_checkpoint = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::Final).await;
+
+    // The runner hands back the Final checkpoint as the resume id. It must be
+    // filtered out rather than blindly trusted; with no resumable checkpoint to
+    // fall back to, the failed run is not retryable.
+    let failed = fail_claimed_run(store, &claimed, Some(final_checkpoint.checkpoint_id)).await;
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert_eq!(
+        failed.checkpoint_id, None,
+        "an explicit non-resumable resume checkpoint must not advertise retryability"
+    );
+
+    let error = store
+        .retry_turn(retry_request(thread, claimed.state.run_id, retry_idem))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        TurnError::RunNotRetryable {
+            run_id: claimed.state.run_id
+        }
+    );
+}
+
 async fn assert_retry_rejections_and_idempotency<S>(store: &S, prefix: &str)
 where
     S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
@@ -694,6 +734,32 @@ async fn filesystem_failed_transition_uses_latest_resumable_checkpoint() {
         "thread-filesystem-failed-transition-checkpoint",
         "idem-filesystem-failed-transition-checkpoint-submit",
         "idem-filesystem-failed-transition-checkpoint",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn inmemory_explicit_nonresumable_resume_checkpoint_is_not_retryable() {
+    let store = InMemoryTurnStateStore::default();
+    assert_explicit_nonresumable_resume_checkpoint_is_not_retryable(
+        &store,
+        "thread-memory-explicit-nonresumable",
+        "idem-memory-explicit-nonresumable-submit",
+        "idem-memory-explicit-nonresumable-retry",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn filesystem_explicit_nonresumable_resume_checkpoint_is_not_retryable() {
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
+    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    assert_explicit_nonresumable_resume_checkpoint_is_not_retryable(
+        &store,
+        "thread-filesystem-explicit-nonresumable",
+        "idem-filesystem-explicit-nonresumable-submit",
+        "idem-filesystem-explicit-nonresumable-retry",
     )
     .await;
 }

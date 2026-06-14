@@ -8185,14 +8185,14 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
 /// both that decode→land ran and that the returned refs reach the transcript.
 #[derive(Default)]
 struct RecordingLander {
-    landed: Mutex<Vec<(String, Vec<InboundAttachment>)>>,
+    landed: Mutex<Vec<(ThreadScope, String, Vec<InboundAttachment>)>>,
 }
 
 #[async_trait]
 impl InboundAttachmentLander for RecordingLander {
     async fn land(
         &self,
-        _thread_scope: &ThreadScope,
+        thread_scope: &ThreadScope,
         message_id: &str,
         attachments: Vec<InboundAttachment>,
     ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
@@ -8212,10 +8212,11 @@ impl InboundAttachmentLander for RecordingLander {
                 extracted_text: None,
             })
             .collect();
-        self.landed
-            .lock()
-            .expect("lander mutex")
-            .push((message_id.to_string(), attachments));
+        self.landed.lock().expect("lander mutex").push((
+            thread_scope.clone(),
+            message_id.to_string(),
+            attachments,
+        ));
         Ok(refs)
     }
 }
@@ -8250,14 +8251,16 @@ async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
         .await
         .expect("submit succeeds");
 
-    // The lander was invoked with the decoded attachment bytes + metadata.
+    // The lander was invoked with the caller-derived thread scope plus the
+    // decoded attachment bytes + metadata.
     {
         let landed = lander.landed.lock().expect("lander mutex");
         assert_eq!(landed.len(), 1);
-        assert_eq!(landed[0].1.len(), 1);
-        assert_eq!(landed[0].1[0].mime_type, "application/pdf");
-        assert_eq!(landed[0].1[0].filename.as_deref(), Some("report.pdf"));
-        assert_eq!(landed[0].1[0].bytes, b"%PDF-1.7 body");
+        assert_eq!(landed[0].0, thread_scope_for(&caller()));
+        assert_eq!(landed[0].2.len(), 1);
+        assert_eq!(landed[0].2[0].mime_type, "application/pdf");
+        assert_eq!(landed[0].2[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(landed[0].2[0].bytes, b"%PDF-1.7 body");
     }
 
     // The returned refs are persisted on the accepted user message.

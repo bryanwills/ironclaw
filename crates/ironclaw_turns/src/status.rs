@@ -201,7 +201,18 @@ impl<'de> Deserialize<'de> for SanitizedFailure {
         }
 
         let wire = WireFailure::deserialize(deserializer)?;
-        Self::new(wire.category).map_err(serde::de::Error::custom)
+        // Backward compatibility: historical rows used colon-delimited
+        // categories (e.g. `host_stage_unavailable:model`) before the charset
+        // was tightened to reject `:`. Normalize legacy separators on the read
+        // path so loading a persisted snapshot never fails — a borked
+        // deserialize here would defeat the whole no-borking-failures goal. The
+        // write path (`SanitizedFailure::new`) stays strict and rejects `:`.
+        let normalized = if wire.category.contains(':') {
+            wire.category.replace(':', "_")
+        } else {
+            wire.category
+        };
+        Self::new(normalized).map_err(serde::de::Error::custom)
     }
 }
 
@@ -459,5 +470,16 @@ mod tests {
                 "category {invalid:?} with a colon must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn sanitized_failure_deserialize_normalizes_legacy_colon_categories() {
+        // Historical persisted rows used colon-delimited categories. The strict
+        // write path rejects them, but loading a snapshot must not fail — the
+        // read path normalizes `:` to `_` so old data stays loadable.
+        let failure: SanitizedFailure =
+            serde_json::from_str(r#"{"category":"host_stage_unavailable:model"}"#)
+                .expect("legacy colon category must deserialize");
+        assert_eq!(failure.category(), "host_stage_unavailable_model");
     }
 }

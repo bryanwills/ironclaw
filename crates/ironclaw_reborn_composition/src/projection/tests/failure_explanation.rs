@@ -330,6 +330,20 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
         ),
     ];
 
+    // Parity guard: the hardcoded table above must stay exhaustive against the
+    // agent-loop source that mints these safe-summary categories. Without this,
+    // a newly added category would silently fall through to
+    // GENERIC_FAILURE_SUMMARY and this test would still pass.
+    let source_values = agent_loop_safe_summary_category_values_from_source();
+    let expected_values = expected
+        .iter()
+        .map(|(category, _)| *category)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        source_values, expected_values,
+        "agent-loop gained or lost a safe-summary category; update the expected table and its user-facing summary"
+    );
+
     for (category, expected_summary) in expected {
         let summary = crate::failure_summary::reborn_failure_summary_for_category(Some(category));
         assert_eq!(summary, expected_summary, "category {category}");
@@ -952,4 +966,59 @@ fn quoted_value(line: &'static str) -> Option<&'static str> {
     let start = line.find('"')? + 1;
     let end = line[start..].find('"')? + start;
     Some(&line[start..end])
+}
+
+/// Collects the safe-summary category strings the agent loop mints, scanning the
+/// three category-producing functions in the agent-loop source. Mirrors the
+/// source-parity approach used for the Tier-2 and `LoopFailureKind` tables.
+fn agent_loop_safe_summary_category_values_from_source() -> std::collections::BTreeSet<&'static str>
+{
+    const MAPPING: &str = include_str!("../../../../ironclaw_agent_loop/src/executor/mapping.rs");
+    const PROMPT: &str = include_str!("../../../../ironclaw_agent_loop/src/executor/prompt.rs");
+    let mut values = std::collections::BTreeSet::new();
+    values.extend(fn_match_arm_string_values(
+        MAPPING,
+        "capability_error_failure_category",
+    ));
+    values.extend(fn_match_arm_string_values(
+        MAPPING,
+        "model_error_failure_category",
+    ));
+    values.extend(fn_match_arm_string_values(
+        PROMPT,
+        "compaction_failure_category",
+    ));
+    values
+}
+
+/// Returns the quoted values of `Variant => "..."` match arms inside the named
+/// free function, stopping at the next function definition.
+fn fn_match_arm_string_values(
+    source: &'static str,
+    fn_marker: &str,
+) -> std::collections::BTreeSet<&'static str> {
+    let mut values = std::collections::BTreeSet::new();
+    let mut in_fn = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let is_fn_header = trimmed.starts_with("fn ")
+            || trimmed.starts_with("pub fn ")
+            || trimmed.starts_with("pub(super) fn ")
+            || trimmed.starts_with("pub(crate) fn ");
+        if !in_fn {
+            if is_fn_header && trimmed.contains(fn_marker) {
+                in_fn = true;
+            }
+            continue;
+        }
+        if is_fn_header {
+            break;
+        }
+        if trimmed.contains("=> \"")
+            && let Some(value) = quoted_value(line)
+        {
+            values.insert(value);
+        }
+    }
+    values
 }

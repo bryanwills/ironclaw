@@ -781,7 +781,12 @@ impl CapabilityStage {
             capability_batch,
         )
         .await?;
-        state.recent_failure_kinds.push(LoopFailureKind::DriverBug);
+        // Route through the single failure-explanation chokepoint so the
+        // recent-failure-kind record and (when the kind is explainable) the
+        // explanation message ref are produced consistently with the other
+        // failed-exit sites instead of being pushed inline here.
+        let explanation_message_ref =
+            attach_failure_explanation(ctx, &mut state, LoopFailureKind::DriverBug).await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -793,7 +798,7 @@ impl CapabilityStage {
             FailedExitDetails {
                 diagnostic_ref: summary.diagnostic_ref.clone(),
                 safe_summary: Some(capability_error_failure_category(summary.class)?),
-                explanation_message_ref: None,
+                explanation_message_ref,
             },
         )?))
     }

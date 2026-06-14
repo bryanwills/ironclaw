@@ -116,6 +116,25 @@ fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidenc
         );
     }
 
+    // `failure_resume_checkpoint_id` is host-verified state: it is
+    // `skip_serializing` on the policy and absent from the deserializable wire
+    // subset (which uses `deny_unknown_fields`). A wire payload that tries to
+    // mint a resume checkpoint must be rejected, not silently accepted.
+    let forged_resume_checkpoint = json!({
+        "require_final_checkpoint": false,
+        "allow_no_reply_completion": false,
+        "final_checkpoint_verified": false,
+        "host_cancellation_observed": false,
+        "completion_refs_verified": false,
+        "blocked_evidence_verified": false,
+        "failure_evidence_verified": false,
+        "failure_resume_checkpoint_id": "00000000-0000-0000-0000-000000000001"
+    });
+    assert!(
+        serde_json::from_value::<LoopExitValidationPolicy>(forged_resume_checkpoint).is_err(),
+        "failure_resume_checkpoint_id should not be wire-mintable"
+    );
+
     let strict_fail_closed = json!({
         "require_final_checkpoint": true,
         "allow_no_reply_completion": false,
@@ -590,6 +609,9 @@ fn unverified_failed_exit_drops_explanation_refs_and_keeps_existing_violation_be
 #[test]
 fn strict_final_checkpoint_policy_admits_failed_resume_checkpoint_only_after_verification() {
     let checkpoint_id = TurnCheckpointId::new();
+    // Distinct from the final checkpoint: this is the last resumable checkpoint
+    // the host would retry from.
+    let resume_checkpoint_id = TurnCheckpointId::new();
     let exit = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::IterationLimit,
         checkpoint_id: Some(checkpoint_id),
@@ -600,22 +622,38 @@ fn strict_final_checkpoint_policy_admits_failed_resume_checkpoint_only_after_ver
         safe_summary: None,
     });
 
+    // Before the final checkpoint is host-verified the failed exit is a
+    // protocol violation, and the resume checkpoint is withheld even though the
+    // policy carries one — an unverified terminal state must not surface a
+    // retryable checkpoint.
     let rejected = exit.clone().validate(LoopExitValidationPolicy {
         require_final_checkpoint: true,
         failure_evidence_verified: true,
-        failure_resume_checkpoint_id: None,
+        failure_resume_checkpoint_id: Some(resume_checkpoint_id),
         ..LoopExitValidationPolicy::default()
     });
     assert_eq!(
         rejected.violation.as_ref().map(LoopExitViolation::kind),
         Some(LoopExitViolationKind::MissingFinalCheckpoint)
     );
+    assert_eq!(
+        rejected.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
+        }
+        .into(),
+        "resume checkpoint must be withheld until the final checkpoint is verified"
+    );
 
+    // After verification, the trusted failed outcome surfaces the host-verified
+    // resume checkpoint so the run can be retried from it.
     let accepted = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: true,
         final_checkpoint_verified: true,
         failure_evidence_verified: true,
-        failure_resume_checkpoint_id: None,
+        failure_resume_checkpoint_id: Some(resume_checkpoint_id),
         ..LoopExitValidationPolicy::default()
     });
     assert_eq!(accepted.violation, None);
@@ -624,7 +662,7 @@ fn strict_final_checkpoint_policy_admits_failed_resume_checkpoint_only_after_ver
         TurnRunnerOutcome::Failed {
             failure: SanitizedFailure::new("iteration_limit").unwrap(),
             explanation_message_refs: Vec::new(),
-            resume_checkpoint_id: None,
+            resume_checkpoint_id: Some(resume_checkpoint_id),
         }
         .into()
     );

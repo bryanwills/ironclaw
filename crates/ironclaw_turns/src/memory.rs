@@ -2499,9 +2499,21 @@ impl Inner {
                 },
             };
         }
-        let retry_checkpoint_id = resume_checkpoint_id.or_else(|| {
-            self.latest_resumable_loop_checkpoint(&record.scope, record.turn_id, record.run_id)
-        });
+        // An explicit resume checkpoint must still be a same-run, resumable
+        // (BeforeModel/BeforeBlock) checkpoint. A final or foreign-run id would
+        // otherwise mark the failed run retryable here while retry_turn later
+        // rejects it (retryable_loop_checkpoint only accepts same-run resumable
+        // checkpoints), leaving the UI advertising a retry that always fails.
+        // Filter the explicit id through the same gate, then fall back to the
+        // host-derived latest resumable checkpoint.
+        let retry_checkpoint_id = resume_checkpoint_id
+            .filter(|checkpoint_id| {
+                self.retryable_loop_checkpoint(&record, *checkpoint_id)
+                    .is_some()
+            })
+            .or_else(|| {
+                self.latest_resumable_loop_checkpoint(&record.scope, record.turn_id, record.run_id)
+            });
         record.status = TurnStatus::Failed;
         record.checkpoint_id = retry_checkpoint_id;
         record.failure = Some(failure.clone());

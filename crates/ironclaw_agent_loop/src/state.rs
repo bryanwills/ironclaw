@@ -230,10 +230,20 @@ impl LoopExecutionState {
     /// carrying them into the retry would make the retry's terminal exit claim
     /// foreign-run evidence. Reset these run-owned fields and let the retry host
     /// produce its own refs.
+    ///
+    /// Gate-bound resume state (`last_gate`, `pending_approval_resume`,
+    /// `pending_auth_resume`) is also cleared: a retry can resume from a
+    /// `BeforeBlock` checkpoint, and a stale gate ref / approval-resume token /
+    /// auth-resume record from the source run would otherwise leak across the
+    /// run boundary and be replayed as if it were fresh gate evidence. Fail
+    /// closed — the retry host must re-establish any gate it actually needs.
     pub fn rebase_for_run(mut self, context: &LoopRunContext) -> Self {
         self.input_cursor = LoopInputCursor::origin_for_run(context);
         self.assistant_refs.clear();
         self.result_refs.clear();
+        self.last_gate = None;
+        self.pending_approval_resume = None;
+        self.pending_auth_resume = None;
         self
     }
 }
@@ -629,6 +639,19 @@ mod tests {
             .result_refs
             .push(ironclaw_turns::LoopResultRef::new("result:source-run").unwrap());
         state.iteration = 4;
+        // Seed gate-bound resume state from the source run; a retry can resume
+        // from a BeforeBlock checkpoint, so these must not leak into the retry.
+        state.last_gate = Some(LoopGateRef::new("gate:source-run").unwrap());
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:source-auth").unwrap(),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").unwrap(),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+            input_ref: CapabilityInputRef::new("input:source").unwrap(),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            resume_token: None,
+            prior_approval: None,
+        });
 
         let rebased = state.clone().rebase_for_run(&target_context);
 
@@ -640,6 +663,11 @@ mod tests {
         );
         assert!(rebased.assistant_refs.is_empty());
         assert!(rebased.result_refs.is_empty());
+        // Gate-bound resume state from the source run must be cleared so it is
+        // never replayed as fresh gate evidence in the retry run.
+        assert!(rebased.last_gate.is_none());
+        assert!(rebased.pending_approval_resume.is_none());
+        assert!(rebased.pending_auth_resume.is_none());
     }
 
     #[test]

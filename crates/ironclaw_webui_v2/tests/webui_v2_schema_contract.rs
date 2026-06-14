@@ -283,8 +283,18 @@ fn webchat_v2_event_schema_has_stable_wire_names() {
 fn projection_state_schema_serializes_run_retryability() {
     let json = serde_json::to_value(projection_state()).expect("serialize projection state");
     let items = json["items"].as_array().expect("projection items array");
-    let running_status = &items[1]["run_status"];
-    let failed_status = &items[2]["run_status"];
+    // Select run_status entries by their `status` field rather than fixture
+    // position, so reordering unrelated projection items does not break this
+    // wire-schema assertion.
+    let find_run_status = |status: &str| {
+        items
+            .iter()
+            .filter_map(|item| item.get("run_status"))
+            .find(|run_status| run_status.get("status").and_then(|s| s.as_str()) == Some(status))
+            .unwrap_or_else(|| panic!("expected a {status} run_status item"))
+    };
+    let running_status = find_run_status("running");
+    let failed_status = find_run_status("failed");
 
     assert!(
         running_status.get("retryable").is_none(),
