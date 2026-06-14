@@ -24,10 +24,69 @@ if [ "${partition_index_int}" -ge "${partition_count_int}" ]; then
   exit 2
 fi
 
+enabled_features=()
+read -r -a feature_args <<< "${feature_flags}"
+for index in "${!feature_args[@]}"; do
+  arg="${feature_args[$index]}"
+  case "${arg}" in
+    --features)
+      next_index=$((index + 1))
+      if [ "${next_index}" -lt "${#feature_args[@]}" ]; then
+        IFS=',' read -r -a parsed_features <<< "${feature_args[$next_index]}"
+        enabled_features+=("${parsed_features[@]}")
+      fi
+      ;;
+    --features=*)
+      IFS=',' read -r -a parsed_features <<< "${arg#--features=}"
+      enabled_features+=("${parsed_features[@]}")
+      ;;
+  esac
+done
+
+if [[ " ${feature_flags} " != *" --no-default-features "* ]]; then
+  enabled_features+=(default)
+fi
+
+enabled_feature_csv="$(IFS=,; echo "${enabled_features[*]}")"
+
 mapfile -t integration_tests < <(
-  find tests -maxdepth 1 -type f -name '*.rs' -print \
-    | sed -E 's#^tests/##; s#\.rs$##' \
-    | LC_ALL=C sort
+  ENABLED_FEATURES="${enabled_feature_csv}" cargo metadata --no-deps --format-version=1 \
+    | python3 -c '
+import json
+import os
+import sys
+from pathlib import Path
+
+metadata = json.load(sys.stdin)
+root = Path(metadata["workspace_root"]).resolve()
+tests_dir = root / "tests"
+enabled = {feature for feature in os.environ.get("ENABLED_FEATURES", "").split(",") if feature}
+
+names = []
+for package in metadata["packages"]:
+    if package["name"] != "ironclaw":
+        continue
+    for target in package["targets"]:
+        if "test" not in target.get("kind", []):
+            continue
+        src_path = Path(target["src_path"]).resolve()
+        try:
+            src_path.relative_to(tests_dir)
+        except ValueError:
+            continue
+        required = set(target.get("required_features") or [])
+        if required.issubset(enabled):
+            names.append(target["name"])
+        else:
+            missing = ",".join(sorted(required - enabled))
+            print(
+                f"Skipping {target['name']} because required features are not enabled: {missing}",
+                file=sys.stderr,
+            )
+
+for name in sorted(names):
+    print(name)
+'
 )
 
 ran_any=false
