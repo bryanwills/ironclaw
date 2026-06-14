@@ -86,6 +86,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
+    if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
+        api = api.with_inbound_attachments(Arc::new(
+            crate::attachment_landing::ProjectScopedAttachmentLander::new(workspace_filesystem),
+        ));
+    }
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
         let activation_clearer = skill_activation_source;
@@ -126,6 +131,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
+        }
+        if let Some(product_auth) = &services.product_auth {
+            lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
+                product_auth.runtime_credential_account_selection_service(),
+            );
         }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
@@ -179,6 +189,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
         services.readiness.clone(),
     )));
+    api = api.with_operator_logs_service(crate::operator_log_buffer());
 
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this
