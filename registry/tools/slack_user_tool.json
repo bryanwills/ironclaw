@@ -1,0 +1,33 @@
+{
+  "name": "slack_user_tool",
+  "display_name": "Slack (personal)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Act as you in Slack via a personal user token: search all your messages, read your DMs and channel history, and post as you",
+  "keywords": [
+    "messaging",
+    "chat",
+    "workspace",
+    "search",
+    "history",
+    "dms"
+  ],
+  "source": {
+    "dir": "tools-src/slack_user",
+    "capabilities": "slack_user-tool.capabilities.json",
+    "crate_name": "slack-user-tool"
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Slack",
+    "secrets": [
+      "slack_user_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://api.slack.com/apps"
+  },
+  "tags": [
+    "messaging"
+  ]
+}
