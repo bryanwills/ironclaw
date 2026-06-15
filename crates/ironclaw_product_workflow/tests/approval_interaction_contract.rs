@@ -520,6 +520,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
+            product_context: None,
         })
     }
 }

@@ -1411,6 +1411,7 @@ fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest
         parent_run_id: None,
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
+        product_context: None,
     }
 }
 

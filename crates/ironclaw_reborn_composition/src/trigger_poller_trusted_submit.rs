@@ -374,7 +374,8 @@ fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError 
                 | TurnError::InvalidRequest { .. }
                 | TurnError::RunNotRetryable { .. }
                 | TurnError::InvalidTransition { .. }
-                | TurnError::LeaseMismatch,
+                | TurnError::LeaseMismatch
+                | TurnError::InvalidRunOriginAdapter,
         } => rejected_trigger_materialization("trusted trigger submit rejected"),
         InboundTurnError::InvalidExternalRef { .. }
         | InboundTurnError::BindingRequired { .. }

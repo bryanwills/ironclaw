@@ -1827,6 +1827,7 @@ mod tests {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
+            product_context: None,
         }
     }
 
@@ -1853,6 +1854,7 @@ mod tests {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
+            product_context: None,
         }
     }
 
@@ -1892,6 +1894,7 @@ mod tests {
             parent_run_id,
             subagent_depth,
             spawn_tree_root_run_id,
+            product_context: None,
         }
     }
 
@@ -1930,6 +1933,7 @@ mod tests {
             parent_run_id: None,
             subagent_depth: 1,
             spawn_tree_root_run_id: None,
+            product_context: None,
         }
     }
 
@@ -2412,6 +2416,7 @@ mod tests {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
+            product_context: None,
         };
         let observer = SubagentCompletionObserver::new(
             Arc::new(BoundedSubagentGateResolutionStore::new()),
