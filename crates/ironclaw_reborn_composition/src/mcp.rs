@@ -24,13 +24,11 @@ pub(crate) fn hosted_http_mcp_runtime(
 ) -> McpRuntime<
     McpHostHttpClient<McpRuntimeHttpAdapter<Arc<dyn RuntimeHttpEgress>>, RegistryMcpEgressPlanner>,
 > {
-    let mut client = McpHostHttpClient::new(
+    let client = McpHostHttpClient::new(
         McpRuntimeHttpAdapter::new(runtime_http_egress),
         RegistryMcpEgressPlanner::new(registry),
-    );
-    if let Some(sink) = security_audit_sink {
-        client = client.with_security_audit_sink(sink);
-    }
+    )
+    .with_security_audit_sink(security_audit_sink);
     McpRuntime::new(McpRuntimeConfig::default(), client)
 }
 

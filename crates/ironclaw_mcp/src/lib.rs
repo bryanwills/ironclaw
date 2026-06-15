@@ -476,9 +476,15 @@ where
     }
 
     /// Attach a payload-free security audit sink for MCP boundary decisions.
+    ///
+    /// Accepts an `Option` so callers can pass an optional sink directly without
+    /// guarding the call behind an `if let Some(..)` branch. Passing `None` is a
+    /// no-op that leaves any previously configured sink untouched.
     #[must_use]
-    pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
-        self.security_audit_sink = Some(sink);
+    pub fn with_security_audit_sink(mut self, sink: Option<Arc<dyn SecurityAuditSink>>) -> Self {
+        if let Some(sink) = sink {
+            self.security_audit_sink = Some(sink);
+        }
         self
     }
 

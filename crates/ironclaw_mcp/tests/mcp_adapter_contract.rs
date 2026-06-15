@@ -444,7 +444,7 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
         McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
         planner.clone(),
     )
-    .with_security_audit_sink(security_sink_dyn);
+    .with_security_audit_sink(Some(security_sink_dyn));
 
     let error = client
         .call_tool(McpClientRequest {
