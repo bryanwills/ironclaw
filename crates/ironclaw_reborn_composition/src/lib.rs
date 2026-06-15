@@ -94,6 +94,7 @@ mod provider_admin_product_command;
 #[cfg(feature = "root-llm-provider")]
 mod provider_repo;
 mod readiness;
+mod reflection;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;

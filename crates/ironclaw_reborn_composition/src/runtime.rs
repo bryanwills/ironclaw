@@ -33,7 +33,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -86,15 +85,16 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
-    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
-    run_profile::{LoopHostMilestoneSink, LoopRunContext},
+    TurnEventProjectionSource, TurnEventSink, TurnId, TurnPersistenceSnapshot, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
+    run_profile::{LoopHostMilestoneSink, LoopRunContext, ModelProfileId},
 };
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
+use crate::reflection::{LearningReflectionEventSink, LearningReflectionService};
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
     TriggerPollerSettings,
@@ -2153,6 +2153,32 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    let turn_event_sink = if learning_enabled {
+        match local_runtime {
+            Some(local_runtime) => {
+                let reflection_model_profile_id = ModelProfileId::new("interactive_model")
+                    .map_err(|reason| RebornRuntimeError::InvalidArgument {
+                        reason: format!("invalid learning reflection model profile id: {reason}"),
+                    })?;
+                let reflection_service = Arc::new(LearningReflectionService::new(
+                    Arc::clone(&thread_service),
+                    Arc::clone(&turn_state_store) as Arc<dyn ironclaw_turns::TurnStateStore>,
+                    thread_scope.clone(),
+                    Arc::clone(&model_gateway),
+                    reflection_model_profile_id,
+                    Arc::clone(&local_runtime.extension_filesystem) as Arc<dyn RootFilesystem>,
+                ));
+                Some(
+                    Arc::new(LearningReflectionEventSink::new(reflection_service))
+                        as Arc<dyn TurnEventSink>,
+                )
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -2205,7 +2231,7 @@ pub async fn build_reborn_runtime(
         model_budget_accountant,
         safety_context: None,
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
-        turn_event_sink: None,
+        turn_event_sink,
         hook_dispatcher_builder_factory,
     };
     let composition = match planned_runtime_wake_channel {
