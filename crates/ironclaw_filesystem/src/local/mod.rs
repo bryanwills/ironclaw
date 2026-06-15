@@ -746,20 +746,23 @@ fn io_error(
     operation: FilesystemOperation,
     error: std::io::Error,
 ) -> FilesystemError {
+    // A missing path is an expected condition, not a backend error — return it
+    // without emitting a "backend error" debug line, so probing for absent
+    // files does not flood the logs. Only genuine backend failures are logged.
+    // (Ported from main's local.rs improvement during the openat2 refactor merge.)
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return FilesystemError::NotFound { path, operation };
+    }
     tracing::debug!(
         virtual_path = path.as_str(),
         %operation,
         error = %error,
         "local filesystem backend error"
     );
-    if error.kind() == std::io::ErrorKind::NotFound {
-        FilesystemError::NotFound { path, operation }
-    } else {
-        FilesystemError::Backend {
-            path,
-            operation,
-            reason: error.kind().to_string(),
-        }
+    FilesystemError::Backend {
+        path,
+        operation,
+        reason: error.kind().to_string(),
     }
 }
 
@@ -769,4 +772,56 @@ fn io_reason(error: std::io::Error) -> String {
 
 fn errno_reason(errno: rustix::io::Errno) -> String {
     std::io::Error::from(errno).kind().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RootFilesystem;
+    use ironclaw_host_api::HostPath;
+    use tempfile::tempdir;
+
+    // Ported from the pre-refactor `local.rs` during the openat2 merge: a
+    // missing path must surface `NotFound` WITHOUT emitting a "local
+    // filesystem backend error" debug line (probing absent files is expected,
+    // not a backend failure).
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn missing_local_paths_do_not_log_backend_error() {
+        let storage = tempdir().unwrap();
+        let mut root = LocalFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let read_error = root
+            .read_file(&VirtualPath::new("/projects/missing.txt").unwrap())
+            .await
+            .unwrap_err();
+        let stat_error = root
+            .stat(&VirtualPath::new("/projects/also-missing.txt").unwrap())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(read_error, FilesystemError::NotFound { .. }));
+        assert!(matches!(stat_error, FilesystemError::NotFound { .. }));
+        assert!(!logs_contain("local filesystem backend error"));
+    }
+
+    // A genuine (non-NotFound) backend error must still be classified as
+    // `Backend` AND logged.
+    #[test]
+    #[tracing_test::traced_test]
+    fn non_not_found_io_error_logs_backend_error() {
+        let error = io_error(
+            VirtualPath::new("/projects/secret.txt").unwrap(),
+            FilesystemOperation::ReadFile,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+
+        assert!(matches!(error, FilesystemError::Backend { .. }));
+        assert!(logs_contain("local filesystem backend error"));
+    }
 }
