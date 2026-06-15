@@ -847,6 +847,73 @@ async fn delete_leaf_symlink_removes_link_not_target() {
     );
 }
 
+// Regression for codex finding (P2): recursive delete converted child entry
+// names via `to_string_lossy()` before `unlinkat`. On Unix directory entries
+// are arbitrary bytes, so a non-UTF8 name became a lossy U+FFFD substitution and
+// `unlinkat` targeted a different (non-existent) name, leaving the real entry —
+// and thus the parent directory — undeletable (`rmdir` fails on a non-empty
+// dir). Carrying the raw `OsStr`/bytes end to end fixes it. We drive the public
+// `delete` API on the *parent* directory so the recursion through the non-UTF8
+// child is exercised.
+#[cfg(unix)]
+#[tokio::test]
+async fn recursive_delete_removes_non_utf8_child_entries() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let storage = tempdir().unwrap();
+    let victim = storage.path().join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+
+    // A child filename that is NOT valid UTF-8 (0xFF is never a valid UTF-8
+    // byte). `to_string_lossy` would map it to U+FFFD and mis-target unlinkat.
+    let raw_name = std::ffi::OsStr::from_bytes(b"bad\xffname");
+    let bad_child = victim.join(raw_name);
+    // Some filesystems (e.g. APFS on macOS) reject non-UTF8 names with EILSEQ.
+    // The regression only reproduces where the kernel actually stores such a
+    // name (Linux tmpfs/ext4 in CI), so skip cleanly when creation is rejected.
+    match std::fs::write(&bad_child, b"data") {
+        Ok(()) => {}
+        // EILSEQ (raw 84 on Linux, 92 on macOS/BSD) or a generic InvalidInput:
+        // the filesystem refuses to store a non-UTF8 name, so the regression
+        // can't be reproduced here. It is exercised on Linux CI tmpfs/ext4.
+        Err(error)
+            if matches!(error.raw_os_error(), Some(84) | Some(92))
+                || error.kind() == std::io::ErrorKind::InvalidInput =>
+        {
+            eprintln!(
+                "skipping: filesystem rejects non-UTF8 names ({error}); \
+                 non-UTF8 delete is covered on Linux CI"
+            );
+            return;
+        }
+        Err(error) => panic!("unexpected error creating non-UTF8 child: {error}"),
+    }
+    assert!(bad_child.exists(), "non-UTF8 child should exist pre-delete");
+
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let root: Arc<dyn RootFilesystem> = Arc::new(root);
+
+    // Delete the parent directory; recursion must unlink the non-UTF8 child by
+    // its true bytes, then rmdir the now-empty directory.
+    root.delete(&VirtualPath::new("/projects/victim").unwrap())
+        .await
+        .unwrap();
+
+    assert!(
+        !bad_child.exists(),
+        "non-UTF8 child must be removed by its true name"
+    );
+    assert!(
+        !victim.exists(),
+        "parent directory must be removed once its non-UTF8 child is gone"
+    );
+}
+
 // ─── TOCTOU-hardening: concurrent ancestor-swap race loop ───────────────────
 //
 // A background task swaps an ancestor symlink between an in-root target and an
@@ -927,15 +994,19 @@ async fn concurrent_ancestor_swap_never_escapes_root() {
     );
 }
 
-// ─── Critical 1: stat() sensitive classification is virtual-path-only ───────
+// ─── Critical 1: stat() sensitive classification keys on the host path ──────
 //
-// `stat` must classify the advisory `sensitive` flag from the *virtual* path
-// string alone, performing ZERO host-path filesystem resolution. The old code
-// reconstructed a host path and called the canonicalizing `is_sensitive_path`,
-// which re-resolved attacker-influenced input after the fd-safe `fstat` — a
-// residual TOCTOU/classification oracle. These tests pin the new behavior.
+// `stat` classifies the advisory `sensitive` flag from the *host* path — the
+// canonical mount root (captured once at trusted mount time) joined with the
+// already-validated tail — using the pure string matcher `is_sensitive_path_str`.
+// It performs ZERO host-path filesystem resolution: the canonicalizing
+// `is_sensitive_path` is never called, so no attacker-influenced input is
+// re-resolved after the fd-safe `fstat`. Classifying on the host path (not the
+// virtual path) is required so a mount whose virtual root differs from its host
+// root cannot hide a sensitive host location — see
+// `stat_sensitivity_uses_host_path_on_non_root_virtual_mount`.
 #[tokio::test]
-async fn stat_classifies_sensitive_flag_from_virtual_path_only() {
+async fn stat_classifies_sensitive_flag_from_host_path() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();
     // A file whose *virtual* name looks sensitive (.env), but is just a plain
@@ -973,19 +1044,18 @@ async fn stat_classifies_sensitive_flag_from_virtual_path_only() {
 
 #[tokio::test]
 async fn stat_does_not_touch_host_fs_for_classification() {
-    // Prove that classification keys on the virtual path, NOT a reconstructed
-    // host path: mount the storage dir at a virtual root whose *string* differs
-    // from the host directory layout. If `stat` still canonicalized a host path
-    // its sensitivity verdict could differ from the virtual-path verdict; here
-    // the virtual path is what must drive the result.
+    // Prove classification is pure string matching, NOT an on-disk
+    // canonicalization: mount a benign host file and confirm its `.pem`
+    // extension is flagged without any symlink/canonicalize step. The classifier
+    // joins the trusted canonical mount root with the validated tail and matches
+    // patterns on the resulting string — no `is_sensitive_path` syscall.
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("sub")).unwrap();
-    // Host file named benignly...
+    // Host file with a sensitive extension.
     std::fs::write(storage.path().join("sub/key.pem"), b"x").unwrap();
 
     let mut root = LocalFilesystem::new();
     root.mount_local(
-        // Virtual root deliberately unrelated to the host tempdir path.
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
     )
@@ -997,9 +1067,61 @@ async fn stat_does_not_touch_host_fs_for_classification() {
         .await
         .unwrap();
     assert_eq!(stat.file_type, FileType::File);
-    // `.pem` is a sensitive extension; classification is driven by the virtual
-    // path string regardless of where the host tempdir actually lives.
-    assert!(stat.sensitive, "virtual path with .pem must be sensitive");
+    // `.pem` is a sensitive extension; the host path tail carries it through.
+    assert!(stat.sensitive, "host path with .pem must be sensitive");
+}
+
+// Regression for codex finding (P1): `stat` previously classified `sensitive`
+// from the full virtual path. For a mount whose virtual root is NOT `/`, the
+// virtual path inserts extra leading segments and drops the host-root segments,
+// so a host directory matching a sensitive *directory* pattern (`/.ssh/`,
+// `/.aws/`, …) under a non-sensitive virtual root was wrongly reported benign —
+// weakening sensitive-file protection. Classification now keys on the host path
+// (canonical mount root + validated tail), restoring correct verdicts.
+#[tokio::test]
+async fn stat_sensitivity_uses_host_path_on_non_root_virtual_mount() {
+    let storage = tempdir().unwrap();
+    // Host layout places the file under a `.ssh` directory — a sensitive host
+    // location by directory pattern.
+    std::fs::create_dir_all(storage.path().join(".ssh")).unwrap();
+    std::fs::write(storage.path().join(".ssh/config"), b"Host *\n").unwrap();
+    // A control file directly under the host root, NOT in a sensitive location.
+    std::fs::write(storage.path().join("readme.txt"), b"hi").unwrap();
+
+    let mut root = LocalFilesystem::new();
+    // Mount the `.ssh` host directory under a benign-looking virtual root. The
+    // virtual path `/memory/config` contains no sensitive segment; only the host
+    // path `<storage>/.ssh/config` does.
+    root.mount_local(
+        VirtualPath::new("/memory").unwrap(),
+        HostPath::from_path_buf(storage.path().join(".ssh")),
+    )
+    .unwrap();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let root: Arc<dyn RootFilesystem> = Arc::new(root);
+
+    let sensitive = root
+        .stat(&VirtualPath::new("/memory/config").unwrap())
+        .await
+        .unwrap();
+    assert!(
+        sensitive.sensitive,
+        "host path under a .ssh mount root must be flagged sensitive even when \
+         the virtual root (/memory) carries no sensitive segment"
+    );
+
+    let benign = root
+        .stat(&VirtualPath::new("/projects/readme.txt").unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !benign.sensitive,
+        "a benign host path must not be flagged sensitive"
+    );
 }
 
 // ─── Critical 2: ENOTDIR (regular-file ancestor) is NOT a symlink escape ────

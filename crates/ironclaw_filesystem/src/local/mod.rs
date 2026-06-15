@@ -52,6 +52,15 @@ struct LocalMount {
     /// Owned fd onto the mount root directory, opened once at mount time.
     /// Every operation resolves fd-relative to this handle.
     root_dir: Arc<OwnedFd>,
+    /// Canonicalized host path of the mount root, captured once during trusted
+    /// `mount_local` setup. Used **only** for string-based sensitivity
+    /// classification of the host path (never re-opened, never used for a
+    /// runtime path resolution — opens always go through `root_dir`). Storing
+    /// the canonical root lets `stat` classify the *host* path rather than the
+    /// virtual path, so a mount whose virtual root differs from its host root
+    /// can't hide a sensitive host location (e.g. host `…/.ssh` mounted at
+    /// virtual `/memory`).
+    host_root: Arc<std::path::PathBuf>,
 }
 
 impl LocalFilesystem {
@@ -110,6 +119,7 @@ impl LocalFilesystem {
         self.mounts.push(LocalMount {
             virtual_root,
             root_dir: Arc::new(root_dir),
+            host_root: Arc::new(canonical_root),
         });
         Ok(())
     }
@@ -356,6 +366,16 @@ impl RootFilesystem for LocalFilesystem {
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let (mount, tail) = self.resolve_mount_tail(path, FilesystemOperation::Stat)?;
         let root = Arc::clone(&mount.root_dir);
+        // Classify sensitivity on the *host* path (canonical mount root + the
+        // already-validated tail), not the virtual path. For a mount whose
+        // virtual root differs from its host root, the virtual path can omit or
+        // add path segments that change classification — e.g. host `…/.ssh`
+        // mounted at virtual `/memory` would otherwise be reported non-sensitive.
+        // This is pure string assembly from a root captured once during trusted
+        // mount setup plus the validated tail components: NO filesystem
+        // resolution happens here, so the fd-safe TOCTOU invariant is preserved
+        // (we never canonicalize attacker-influenced input after the fstat).
+        let sensitive = is_sensitive_host_path(&mount.host_root, &tail);
         let vpath = path.clone();
         run_blocking(path.clone(), FilesystemOperation::Stat, move || {
             // Open the resolved entry race-free, then fstat the fd. Files open
@@ -382,21 +402,20 @@ impl RootFilesystem for LocalFilesystem {
                 .map_err(|e| errno_to_filesystem(e, vpath.clone(), FilesystemOperation::Stat))?;
             let file_type = file_type_from_raw_mode(stat.st_mode);
             let modified = system_time_from_stat(stat.st_mtime as i64, stat.st_mtime_nsec as i64);
-            // The `sensitive` flag is advisory metadata, not an access gate, so
-            // we classify on the *virtual* path string. Crucially this performs
-            // ZERO host-path filesystem resolution: using the canonicalizing
-            // `is_sensitive_path` here would reintroduce a path-based lookup on
-            // attacker-influenced input *after* the fd-safe `fstat`, recreating
-            // exactly the TOCTOU window this backend eliminates everywhere else
-            // (the reconstructed host path could resolve to a different object
-            // than the fd we just stat'd). `is_sensitive_path_str` is pure string
-            // matching against the same sensitive-path patterns.
+            // `sensitive` is advisory metadata, not an access gate. It is
+            // classified above on the host path (computed string-only from the
+            // trusted canonical mount root + validated tail) rather than the
+            // virtual path: see the `is_sensitive_host_path` call in `stat`.
+            // Crucially this performs ZERO host-path filesystem resolution —
+            // using the canonicalizing `is_sensitive_path` would reintroduce a
+            // path lookup on attacker-influenced input *after* the fd-safe
+            // `fstat`, recreating the TOCTOU window this backend eliminates.
             Ok(FileStat {
                 path: vpath.clone(),
                 file_type,
                 len: stat.st_size as u64,
                 modified,
-                sensitive: is_sensitive_path_str(vpath.as_str()),
+                sensitive,
             })
         })
         .await
@@ -409,7 +428,7 @@ impl RootFilesystem for LocalFilesystem {
         run_blocking(path.clone(), FilesystemOperation::Delete, move || {
             let (parent_fd, leaf) = open_parent_dir(&root, &tail)
                 .map_err(|e| map_resolve_error(e, vpath.clone(), FilesystemOperation::Delete))?;
-            delete_at(&parent_fd, &leaf, &vpath)
+            delete_at(&parent_fd, std::ffi::OsStr::new(&leaf), &vpath)
         })
         .await
     }
@@ -563,44 +582,81 @@ fn mkdir_all(
 /// Remove `name` within the directory referenced by `parent_fd`, race-free.
 /// Uses `fstatat(AT_SYMLINK_NOFOLLOW)` to classify the entry without following a
 /// symlink, then `unlinkat` (recursing fd-relative for directories).
-fn delete_at(parent_fd: &OwnedFd, name: &str, path: &VirtualPath) -> Result<(), FilesystemError> {
-    let stat = rustix::fs::statat(parent_fd, as_os_str(name), AtFlags::SYMLINK_NOFOLLOW)
+///
+/// `name` is an [`OsStr`] (raw bytes), not a `str`: on Unix directory entries
+/// are arbitrary byte sequences that need not be valid UTF-8. Lossy conversion
+/// (e.g. `to_string_lossy`) would substitute U+FFFD for invalid bytes and make
+/// the `statat`/`unlinkat` target a *different*, non-existent name — silently
+/// failing to remove the real entry. Carrying the raw `OsStr` end to end keeps
+/// recursive delete byte-exact, matching the prior `remove_dir_all` behavior.
+fn delete_at(
+    parent_fd: &OwnedFd,
+    name: &std::ffi::OsStr,
+    path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    let stat = rustix::fs::statat(parent_fd, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|e| errno_to_filesystem(e, path.clone(), FilesystemOperation::Delete))?;
     if file_type_from_raw_mode(stat.st_mode) == FileType::Directory {
         // Open the child dir fd-relative (O_NOFOLLOW), recurse, then rmdir it.
         let child = rustix::fs::openat(
             parent_fd,
-            as_os_str(name),
+            name,
             OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::RDONLY,
             Mode::empty(),
         )
         .map_err(|e| errno_to_filesystem(e, path.clone(), FilesystemOperation::Delete))?;
         let mut dir = RustixDir::read_from(&child)
             .map_err(|e| errno_to_filesystem(e, path.clone(), FilesystemOperation::Delete))?;
-        let mut children: Vec<String> = Vec::new();
+        // Collect raw entry names as `OsString` (preserving non-UTF8 bytes) so
+        // the recursive unlink targets the true on-disk name.
+        let mut children: Vec<std::ffi::OsString> = Vec::new();
         for entry in dir.by_ref() {
             let entry = entry
                 .map_err(|e| errno_to_filesystem(e, path.clone(), FilesystemOperation::Delete))?;
-            let child_name = entry.file_name().to_string_lossy().to_string();
-            if child_name == "." || child_name == ".." {
+            let child_name = entry.file_name();
+            if child_name == c"." || child_name == c".." {
                 continue;
             }
-            children.push(child_name);
+            children.push(os_string_from_cstr(child_name));
         }
         drop(dir);
-        for child_name in children {
-            delete_at(&child, &child_name, path)?;
+        for child_name in &children {
+            delete_at(&child, child_name, path)?;
         }
-        rustix::fs::unlinkat(parent_fd, as_os_str(name), AtFlags::REMOVEDIR)
+        rustix::fs::unlinkat(parent_fd, name, AtFlags::REMOVEDIR)
             .map_err(|e| errno_to_filesystem(e, path.clone(), FilesystemOperation::Delete))?;
     } else {
-        rustix::fs::unlinkat(parent_fd, as_os_str(name), AtFlags::empty())
+        rustix::fs::unlinkat(parent_fd, name, AtFlags::empty())
             .map_err(|e| errno_to_filesystem(e, path.clone(), FilesystemOperation::Delete))?;
     }
     Ok(())
 }
 
+/// Convert a rustix dirent name (`&CStr`, raw bytes) into an `OsString` without
+/// lossy UTF-8 substitution, preserving non-UTF8 byte sequences exactly.
+fn os_string_from_cstr(name: &std::ffi::CStr) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::OsStr::from_bytes(name.to_bytes()).to_os_string()
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
+/// Classify the *host* path of a resolved entry as sensitive, string-only.
+///
+/// Joins the canonical mount root (captured once at trusted `mount_local` time)
+/// with the already-validated tail components and runs the pure pattern matcher
+/// [`is_sensitive_path_str`]. This deliberately does **not** call
+/// [`ironclaw_safety::sensitive_paths::is_sensitive_path`], which canonicalizes
+/// on disk — doing so would reopen the TOCTOU window the fd-relative backend
+/// closes. Because the tail components are already escape-validated (no `..`,
+/// no absolute, no `.`), the join cannot climb above the mount root.
+fn is_sensitive_host_path(host_root: &std::path::Path, tail: &ResolvedTail) -> bool {
+    let mut host_path = host_root.to_path_buf();
+    for component in components(tail) {
+        host_path.push(component);
+    }
+    is_sensitive_path_str(&host_path.to_string_lossy())
+}
 
 fn file_type_from_rustix(ft: RustixFileType) -> FileType {
     if ft == RustixFileType::RegularFile {
