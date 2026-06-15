@@ -538,6 +538,7 @@ mod tests {
             tool_result_provider_call: None,
             content: Some(content.to_string()),
             redaction_ref: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -669,6 +670,7 @@ mod tests {
             tool_result_provider_call: Some(provider_call_reference(tool_name)),
             content: Some(result.to_string()),
             redaction_ref: None,
+            attachments: Vec::new(),
         }
     }
 
