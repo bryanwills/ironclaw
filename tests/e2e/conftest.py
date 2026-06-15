@@ -360,15 +360,14 @@ def ironclaw_reborn_binary():
     return str(binary)
 
 
-@pytest.fixture(scope="module")
-async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
-    """Start `ironclaw-reborn serve` with the v2 surface against the mock LLM.
+async def _boot_reborn_v2_serve(
+    ironclaw_reborn_binary, reborn_home, home_dir, *, extra_env=None
+):
+    """Boot `ironclaw-reborn serve` with a free port + readiness retry loop.
 
-    Module-scoped so every test in a v2 scenario file shares one server (startup
-    is expensive) while still isolating thread/config mutations from other files.
-    The `local-dev` boot profile wires the local-dev capability policy, so
-    builtin capabilities (`builtin.echo`, `builtin.shell`, ...) are model-visible
-    and tool turns actually dispatch instead of stalling.
+    `extra_env(port)` returns per-attempt env overrides that depend on the bound
+    port (the SSO base URL must match the listener). Returns `(proc, base_url)`;
+    the caller owns shutdown. Fails the test after 3 attempts.
     """
     from helpers import REBORN_V2_AUTH_TOKEN
     from reborn_v2_support import (
@@ -377,23 +376,15 @@ async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_fac
         forward_coverage_env,
         read_log,
         stop_process,
-        write_config_toml,
     )
 
-    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-home")
-    reborn_home = home_dir / "reborn-home"
-    reborn_home.mkdir(parents=True, exist_ok=True)
-    write_config_toml(reborn_home / "config.toml", mock_llm_server)
-
-    proc = None
-    base_url = None
     last_stderr = ""
     last_port = None
 
     for attempt in range(1, 4):
         port = find_free_port()
         last_port = port
-        stdout_path = home_dir / f"reborn-v2-attempt-{attempt}.stdout.log"
+        base_url = f"http://127.0.0.1:{port}"
         stderr_path = home_dir / f"reborn-v2-attempt-{attempt}.stderr.log"
 
         env = {
@@ -411,43 +402,107 @@ async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_fac
             "RUST_LOG": "ironclaw=warn,ironclaw_reborn=warn",
             "RUST_BACKTRACE": "1",
         }
+        if extra_env is not None:
+            env.update(extra_env(port))
         forward_coverage_env(env)
 
-        with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+        with stderr_path.open("wb") as err:
             proc = await asyncio.create_subprocess_exec(
                 ironclaw_reborn_binary,
                 "serve",
                 "--host", "127.0.0.1",
                 "--port", str(port),
                 stdin=asyncio.subprocess.DEVNULL,
-                stdout=out,
+                stdout=asyncio.subprocess.DEVNULL,
                 stderr=err,
                 env=env,
             )
-        base_url = f"http://127.0.0.1:{port}"
 
         try:
             await wait_for_ready(f"{base_url}/api/health", timeout=60)
-            break
+            return proc, base_url
         except TimeoutError:
             if proc.returncode is None:
                 await stop_process(proc, timeout=2)
             last_stderr = read_log(stderr_path)
-            proc = None
-    else:
-        pytest.fail(
-            "Reborn WebUI v2 server failed to start after 3 attempts.\n"
-            f"Last attempted port: {last_port}\n"
-            f"stderr:\n{last_stderr}"
-        )
 
+    pytest.fail(
+        "Reborn WebUI v2 server failed to start after 3 attempts.\n"
+        f"Last attempted port: {last_port}\n"
+        f"stderr:\n{last_stderr}"
+    )
+
+
+async def _shutdown_reborn_v2_serve(proc):
+    from reborn_v2_support import stop_process
+
+    if proc is not None and proc.returncode is None:
+        await stop_process(proc, sig=signal.SIGINT, timeout=10)
+        if proc.returncode is None:
+            await stop_process(proc, sig=signal.SIGTERM, timeout=5)
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
+    """Start `ironclaw-reborn serve` with the v2 surface against the mock LLM.
+
+    Module-scoped so every test in a v2 scenario file shares one server (startup
+    is expensive) while still isolating thread/config mutations from other files.
+    The `local-dev` boot profile wires the local-dev capability policy, so
+    builtin capabilities (`builtin.echo`, `builtin.shell`, ...) are model-visible
+    and tool turns actually dispatch instead of stalling.
+    """
+    from reborn_v2_support import write_config_toml
+
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-home")
+    reborn_home = home_dir / "reborn-home"
+    reborn_home.mkdir(parents=True, exist_ok=True)
+    write_config_toml(reborn_home / "config.toml", mock_llm_server)
+
+    proc, base_url = await _boot_reborn_v2_serve(
+        ironclaw_reborn_binary, reborn_home, home_dir
+    )
     try:
         yield base_url
     finally:
-        if proc is not None and proc.returncode is None:
-            await stop_process(proc, sig=signal.SIGINT, timeout=10)
-            if proc.returncode is None:
-                await stop_process(proc, sig=signal.SIGTERM, timeout=5)
+        await _shutdown_reborn_v2_serve(proc)
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_sso_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
+    """Start `ironclaw-reborn serve` with the WebChat v2 SSO login surface mounted.
+
+    Configures a Google OAuth provider (dummy client id/secret) plus the
+    required verified-email-domain allowlist, so `/auth/*` is mounted alongside
+    the env-bearer operator auth. The base URL is pinned to the bound loopback
+    listener (cleartext http:// is allowed on loopback). The real Google token
+    endpoint is hardcoded in the provider, so the full callback->token->session
+    exchange is exercised in-process by
+    `crates/ironclaw_reborn_webui_ingress/tests/signed_session_multi_user.rs`;
+    this fixture covers the login surface reachable over the live binary.
+    """
+    from reborn_v2_support import write_config_toml
+
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-sso-home")
+    reborn_home = home_dir / "reborn-home"
+    reborn_home.mkdir(parents=True, exist_ok=True)
+    write_config_toml(reborn_home / "config.toml", mock_llm_server)
+
+    def sso_env(port):
+        return {
+            "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID": "e2e-google-client-id",
+            "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET": "e2e-google-client-secret",
+            "IRONCLAW_REBORN_WEBUI_BASE_URL": f"http://127.0.0.1:{port}",
+            "IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS": "example.com",
+        }
+
+    proc, base_url = await _boot_reborn_v2_serve(
+        ironclaw_reborn_binary, reborn_home, home_dir, extra_env=sso_env
+    )
+    try:
+        yield base_url
+    finally:
+        await _shutdown_reborn_v2_serve(proc)
 
 
 @pytest.fixture(scope="module")
