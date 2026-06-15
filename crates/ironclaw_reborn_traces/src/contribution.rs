@@ -5507,7 +5507,20 @@ fn community_profile_url_from_policy(
     let mut url =
         reqwest::Url::parse(ingest_url).context("invalid Trace Commons ingest endpoint")?;
     validate_trace_commons_ingest_url(&url)?;
-    url.set_path(COMMUNITY_PROFILE_PATH);
+    // Preserve any mount prefix on the ingest path (e.g. `/api/v1/traces`),
+    // mirroring `trace_submission_status_endpoint`, instead of clobbering the
+    // whole path — otherwise a prefixed deployment 404s on profile PUT/DELETE.
+    let path = url.path().trim_end_matches('/');
+    let new_path = if let Some(prefix) = path.strip_suffix("/v1/traces") {
+        format!("{}/v1/community/profile", prefix.trim_end_matches('/'))
+    } else if let Some(prefix) = path.strip_suffix("/traces") {
+        format!("{}/community/profile", prefix.trim_end_matches('/'))
+    } else {
+        COMMUNITY_PROFILE_PATH.to_string()
+    };
+    url.set_path(&new_path);
+    url.set_query(None);
+    url.set_fragment(None);
     Ok(url)
 }
 
@@ -6738,6 +6751,19 @@ pub fn trace_autonomous_eligibility(
     envelope: &TraceContributionEnvelope,
     policy: &StandingTraceContributionPolicy,
 ) -> TraceQueueEligibility {
+    // Fail closed before any submit path: an envelope with no trace-content
+    // allowed-uses (e.g. a `public_attribution`-only consent scope, which
+    // grants `allowed_uses = []`) is not submittable — there is no use the
+    // remote side would accept it for. Reject it here rather than relying on
+    // the remote to bounce it, even ahead of the manual-review bypass (an
+    // authorized hold with no allowed-uses still has nothing to submit).
+    if envelope.trace_card.allowed_uses.is_empty() {
+        return TraceQueueEligibility::Hold {
+            kind: TraceQueueHoldKind::PolicyGate,
+            reason: "trace grants no allowed-uses and is not submittable".to_string(),
+        };
+    }
+
     // An explicitly user-authorized held trace submits as-is, bypassing every
     // gate (PII manual-review, score, tool-allowlist). The user reviewed the
     // already-redacted trace and accepted its residual risk.
@@ -9264,6 +9290,50 @@ mod tests {
                 TraceQueueEligibility::Hold { .. }
             ),
             "high-risk trace must remain held"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_allowed_uses_envelope_fails_closed_not_submitted() {
+        // A public_attribution-only consent scope grants no trace-content
+        // allowed-uses; such an envelope must never be submitted, even with an
+        // otherwise-permissive auto-submit policy or an explicit manual-review
+        // authorization (there is nothing to submit it for).
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        envelope.trace_card.allowed_uses = Vec::new();
+
+        let permissive = StandingTraceContributionPolicy {
+            enabled: true,
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            ..StandingTraceContributionPolicy::default()
+        };
+        assert!(
+            matches!(
+                trace_autonomous_eligibility(&envelope, &permissive),
+                TraceQueueEligibility::Hold {
+                    kind: TraceQueueHoldKind::PolicyGate,
+                    ..
+                }
+            ),
+            "empty allowed-uses must fail closed under a permissive auto-submit policy"
+        );
+
+        // Even an explicit manual-review authorization cannot submit it.
+        envelope.manual_review_authorized = true;
+        assert!(
+            matches!(
+                trace_autonomous_eligibility(&envelope, &permissive),
+                TraceQueueEligibility::Hold { .. }
+            ),
+            "empty allowed-uses must fail closed even when manual_review_authorized"
         );
     }
 
@@ -13623,6 +13693,19 @@ mod tests {
         assert_eq!(
             loopback_url.as_str(),
             "http://127.0.0.1:3917/v1/community/profile"
+        );
+
+        // A mounted prefix on the ingest path must be preserved (mirrors
+        // trace_submission_status_endpoint), not clobbered to the bare path.
+        let prefixed = StandingTraceContributionPolicy {
+            ingestion_endpoint: Some("https://ingest.example.com/api/v1/traces".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            community_profile_url_from_policy(&prefixed)
+                .expect("prefixed ingest derives")
+                .as_str(),
+            "https://ingest.example.com/api/v1/community/profile"
         );
     }
 

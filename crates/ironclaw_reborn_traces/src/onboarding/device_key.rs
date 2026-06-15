@@ -75,12 +75,30 @@ fn tenant_path(base: &Path, tenant_id: &str) -> std::path::PathBuf {
 fn ensure_private_dir(dir: &Path) -> Result<(), DeviceKeyError> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
         builder.create(dir).map_err(|e| DeviceKeyError::Io {
             reason: format!("create_dir_all {}: {e}", dir.display()),
-        })
+        })?;
+        // `DirBuilder::mode` only applies to directories THIS call creates; a
+        // pre-existing `device_keys/` or `pending/` could carry broader perms
+        // that leave invite/tenant hashes enumerable to other local users.
+        // Re-assert 0700 on the leaf and its immediate parent so onboarding
+        // hardens any directory it touches, not just freshly-created ones.
+        for target in [dir, dir.parent().unwrap_or(dir)] {
+            if let Ok(meta) = std::fs::metadata(target)
+                && meta.is_dir()
+                && meta.permissions().mode() & 0o077 != 0
+            {
+                std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |e| DeviceKeyError::Io {
+                        reason: format!("harden perms {}: {e}", target.display()),
+                    },
+                )?;
+            }
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
@@ -110,6 +128,32 @@ fn load_from_path(path: &Path) -> Result<DeviceKeypair, DeviceKeyError> {
         })?;
 
     let signing_key = SigningKey::from_bytes(&secret_arr);
+
+    // Fail closed on an internally inconsistent identity: derive the public key
+    // and device-key id from the loaded private key and require the on-disk
+    // `public_key` / `device_key_id` to match. A tampered or partially-written
+    // file otherwise loads a mismatched identity that only surfaces later as an
+    // opaque remote auth rejection.
+    let derived_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let derived_public_key_b64 = base64::engine::general_purpose::STANDARD.encode(derived_pubkey);
+    if kf.public_key != derived_public_key_b64 {
+        return Err(DeviceKeyError::Malformed {
+            reason: format!(
+                "public_key in {} does not match private_key",
+                path.display()
+            ),
+        });
+    }
+    let derived_device_key_id = device_key_id_from_pubkey(&derived_pubkey);
+    if kf.device_key_id != derived_device_key_id {
+        return Err(DeviceKeyError::Malformed {
+            reason: format!(
+                "device_key_id in {} does not match private_key",
+                path.display()
+            ),
+        });
+    }
+
     Ok(DeviceKeypair {
         signing_key,
         device_key_id: kf.device_key_id,

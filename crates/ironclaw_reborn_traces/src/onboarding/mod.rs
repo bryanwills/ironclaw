@@ -410,6 +410,15 @@ fn ensure_https_or_loopback_url(url: &str) -> Result<(), OnboardError> {
     let parsed = reqwest::Url::parse(url).map_err(|_| OnboardError::InsecureIngestUrl {
         url: url.to_string(),
     })?;
+    // Reject embedded userinfo (`https://user:pass@host/...`) before persisting:
+    // a server-controlled onboarding response could otherwise smuggle raw
+    // credentials into policy.json and every later contribution/profile request
+    // built from this endpoint.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(OnboardError::InsecureIngestUrl {
+            url: url.to_string(),
+        });
+    }
     // `host_str()` keeps IPv6 brackets; `invite::host_only` strips them (one
     // source of truth for bracket handling, shared with invite parsing).
     let bare = invite::host_only(parsed.host_str().unwrap_or("")).to_ascii_lowercase();
@@ -554,6 +563,76 @@ mod tests {
             .route("/v1/onboard", post(handler))
             .with_state(state);
 
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        MockIssuer { addr, received }
+    }
+
+    /// Stateful mock issuer on a SINGLE origin: the first `fail_first` requests
+    /// return HTTP 500, every request after that returns `make_response(addr)`
+    /// with 200. Used by retry tests so a retry hits the SAME origin (and thus
+    /// the same origin-scoped pending-key file) instead of a second mock on a
+    /// different port — which would (correctly) stage a fresh key under the
+    /// per-issuer pending-key scoping.
+    async fn spawn_flaky_mock_issuer<F>(fail_first: usize, make_response: F) -> MockIssuer
+    where
+        F: Fn(SocketAddr) -> serde_json::Value + Send + Sync + 'static,
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock issuer binds");
+        let addr = listener.local_addr().expect("mock issuer local addr");
+        let response_body = make_response(addr);
+
+        type FlakyState = Arc<(
+            serde_json::Value,
+            usize,
+            AtomicUsize,
+            Arc<Mutex<Vec<serde_json::Value>>>,
+        )>;
+        let state: FlakyState = Arc::new((
+            response_body,
+            fail_first,
+            AtomicUsize::new(0),
+            Arc::clone(&received),
+        ));
+
+        async fn handler(
+            State(state): State<FlakyState>,
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::response::Response {
+            let n = state.2.fetch_add(1, Ordering::SeqCst);
+            if n < state.1 {
+                return axum::response::Response::builder()
+                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("\"error\""))
+                    .unwrap();
+            }
+            let mut response = state.0.clone();
+            if response.get("device_key_id").and_then(|v| v.as_str()) == Some(ECHO_DEVICE_KEY_ID)
+                && let Some(pubkey_b64) = body.get("device_public_key").and_then(|v| v.as_str())
+                && let Some(derived) = derive_device_key_id(pubkey_b64)
+            {
+                response["device_key_id"] = serde_json::Value::String(derived);
+            }
+            state.3.lock().unwrap().push(body);
+            let json_bytes = serde_json::to_vec(&response).unwrap();
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(json_bytes))
+                .unwrap()
+        }
+
+        let app = Router::new()
+            .route("/v1/onboard", post(handler))
+            .with_state(state);
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
@@ -780,6 +859,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ingest_url_with_embedded_credentials_is_rejected() {
+        // A server-controlled onboarding response must not be able to smuggle
+        // raw credentials into policy.json via the ingest_url userinfo.
+        for url in [
+            "https://user:pass@ingest.example.com/v1/traces",
+            "https://user@ingest.example.com/v1/traces",
+        ] {
+            assert!(
+                matches!(
+                    ensure_https_or_loopback_url(url),
+                    Err(OnboardError::InsecureIngestUrl { .. })
+                ),
+                "{url} (embedded credentials) must be rejected"
+            );
+        }
+        // The same host without userinfo is still accepted.
+        assert!(ensure_https_or_loopback_url("https://ingest.example.com/v1/traces").is_ok());
+    }
+
     /// Loopback http ingest_url is allowed (same rule as invite parsing).
     #[tokio::test]
     async fn loopback_ingest_url_is_allowed() {
@@ -852,16 +951,15 @@ mod tests {
     async fn retry_after_transient_failure_reuses_same_keypair() {
         let dir = tempfile::tempdir().unwrap();
 
-        // First call: 500 → Network error.
-        let mock_fail = spawn_mock_issuer(
-            |_addr| serde_json::json!("error"),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )
-        .await;
-        let invite_url = format!(
-            "http://127.0.0.1:{}/onboard#INVTEST07",
-            mock_fail.addr.port()
-        );
+        // One issuer origin that fails the first request (500 → Network error)
+        // then succeeds. The retry MUST hit the same origin so it reuses the
+        // origin-scoped staged key; a second mock on a different port would
+        // correctly stage a fresh key under per-issuer pending-key scoping.
+        let mock =
+            spawn_flaky_mock_issuer(1, |addr| ok_response(addr, "https://ingest.example.com"))
+                .await;
+        let invite_url = format!("http://127.0.0.1:{}/onboard#INVTEST07", mock.addr.port());
+
         let _ = onboard_at_dir(dir.path(), &invite_url, OnboardConsents::default())
             .await
             .expect_err("first call must fail");
@@ -880,31 +978,16 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&pending_path).unwrap()).unwrap();
         let first_pubkey = pending_json["public_key"].as_str().unwrap().to_owned();
 
-        // Second call with a working mock that echoes the correct origin.
-        // We must use a new mock with the SAME invite URL prefix but a different host,
-        // or use the same invite_url but parse invite code and re-use a new mock.
-        // Since the invite code is bound to the mock origin, we need the second mock to
-        // have the same origin that the invite URL points to. We can't reuse the same
-        // addr since tokio drops the listener. Instead, we construct a new invite URL
-        // pointing at a fresh mock that echoes its own addr.
-        let mock_ok = spawn_mock_issuer(
-            |addr| ok_response(addr, "https://ingest.example.com"),
-            axum::http::StatusCode::OK,
-        )
-        .await;
-        let invite_url2 = format!("http://127.0.0.1:{}/onboard#INVTEST07", mock_ok.addr.port());
-
-        let outcome = onboard_at_dir(dir.path(), &invite_url2, OnboardConsents::default())
+        // Retry against the SAME origin → second request succeeds and reuses
+        // the staged keypair.
+        let outcome = onboard_at_dir(dir.path(), &invite_url, OnboardConsents::default())
             .await
             .expect("second call succeeds");
 
-        // The second call's request device_public_key is the NEW pending key
-        // (different invite hash due to different port/origin, but same code INVTEST07).
-        // Actually with the same code but different origin the invite_hash is the same
-        // (hash is of code only). So the same pending file is reused.
-        let second_received = mock_ok.received.lock().unwrap();
-        assert_eq!(second_received.len(), 1);
-        let second_pubkey = second_received[0]["device_public_key"].as_str().unwrap();
+        let received = mock.received.lock().unwrap();
+        // Only the successful (second) request is recorded by the flaky mock.
+        assert_eq!(received.len(), 1);
+        let second_pubkey = received[0]["device_public_key"].as_str().unwrap();
         assert_eq!(
             first_pubkey, second_pubkey,
             "retry must reuse the staged keypair (same public key)"
@@ -955,15 +1038,11 @@ mod tests {
         // Clear the blocker so the retry's policy write can succeed.
         std::fs::remove_dir_all(dir.path().join("policy.json")).unwrap();
 
-        // Retry against an OK mock (same dir, same invite code) → success with
-        // the SAME device_key_id (server idempotency + reused pending key).
-        let mock_ok = spawn_mock_issuer(
-            |addr| ok_response(addr, "https://ingest.example.com"),
-            axum::http::StatusCode::OK,
-        )
-        .await;
-        let invite_url2 = format!("http://127.0.0.1:{}/onboard#INVTEST08", mock_ok.addr.port());
-        let outcome = onboard_at_dir(dir.path(), &invite_url2, OnboardConsents::default())
+        // Retry against the SAME origin (the original mock still serves OK) so
+        // the origin-scoped staged key is reused → success with the SAME
+        // device_key_id (server idempotency + reused pending key). A second mock
+        // on a different port would correctly stage a fresh per-issuer key.
+        let outcome = onboard_at_dir(dir.path(), &invite_url, OnboardConsents::default())
             .await
             .expect("retry succeeds after the blocker is cleared");
 

@@ -102,8 +102,21 @@ impl ParsedInvite {
     }
 
     /// Filename-safe stable id for local pending key material.
+    ///
+    /// Scoped by invite **origin** as well as code: `invite_hash()` hashes only
+    /// the code (it is the canonical server allowlist subject and must match the
+    /// server scheme), but the local pending-key filename must not collide
+    /// across issuers — two different issuers reusing the same invite code would
+    /// otherwise share one staged device key, letting a transient failure on
+    /// issuer A make issuer B reuse A's auth key and linking tenants through a
+    /// single device identity.
     pub fn pending_key_hash(&self) -> String {
-        self.invite_hash().replace(':', "_")
+        let mut hasher = Sha256::new();
+        hasher.update(b"pending-key:");
+        hasher.update(self.origin.as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.code.as_bytes());
+        format!("sha256_{}", hex::encode(hasher.finalize()))
     }
 }
 
@@ -306,10 +319,28 @@ mod tests {
     #[test]
     fn pending_key_hash_is_filename_safe() {
         let p = ParsedInvite::parse("https://h.example/onboard#INVAAAA").unwrap();
-        assert_eq!(
-            p.pending_key_hash(),
-            "sha256_06f41d1d6db426b1a7da035727af91450134b3711b4903e5c701bb912ec5737a"
+        let hash = p.pending_key_hash();
+        // Filename-safe: `sha256_` + 64 lowercase hex, no path/colon characters.
+        assert!(hash.starts_with("sha256_"));
+        let hex = hash.strip_prefix("sha256_").unwrap();
+        assert_eq!(hex.len(), 64);
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         );
+    }
+
+    #[test]
+    fn pending_key_hash_is_origin_scoped() {
+        // Same invite code, different issuers must NOT share a staged key file,
+        // or a transient failure on one issuer lets another reuse its device key
+        // (regression for cross-tenant device-identity linking).
+        let a = ParsedInvite::parse("https://issuer-a.example/onboard#SAMECODE").unwrap();
+        let b = ParsedInvite::parse("https://issuer-b.example/onboard#SAMECODE").unwrap();
+        assert_eq!(a.code, b.code);
+        assert_ne!(a.pending_key_hash(), b.pending_key_hash());
+        // The canonical server allowlist subject stays code-only (unchanged).
+        assert_eq!(a.invite_hash(), b.invite_hash());
     }
 
     #[test]
