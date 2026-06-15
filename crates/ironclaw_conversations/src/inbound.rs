@@ -1489,6 +1489,13 @@ mod tests {
             unimplemented!("not used by submit-key rotation tests")
         }
 
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            unimplemented!("not used by submit-key rotation tests")
+        }
+
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,

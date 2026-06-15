@@ -2057,6 +2057,7 @@ impl Inner {
             parent_run_id,
             subagent_depth,
             spawn_tree_root_run_id,
+            product_context,
         ) = {
             let Some(failed) = self.records.get(&request.run_id) else {
                 return Err(TurnError::ScopeNotFound);
@@ -2095,6 +2096,7 @@ impl Inner {
                 failed.parent_run_id,
                 failed.subagent_depth,
                 failed.spawn_tree_root_run_id,
+                failed.product_context.clone(),
             )
         };
         if let Some(response) = self.thread_busy(&lock_key) {
@@ -2144,6 +2146,7 @@ impl Inner {
             parent_run_id,
             subagent_depth,
             spawn_tree_root_run_id,
+            product_context,
         };
         self.active_locks.insert(
             lock_key.clone(),
