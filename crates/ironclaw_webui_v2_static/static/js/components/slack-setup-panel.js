@@ -24,30 +24,21 @@ export function SlackAdminManagedSection({ action }) {
 export function SlackSetupPanel({ action, setupQuery }) {
   const queryClient = useQueryClient();
   const [form, setForm] = React.useState(emptyForm());
+  const initializedRef = React.useRef(false);
   const status = setupQuery.data;
   const copy = slackSetupCopy(action);
 
   React.useEffect(() => {
-    if (!status) return;
-    setForm({
-      installation_id: status.installation_id || "",
-      team_id: status.team_id || "",
-      api_app_id: status.api_app_id || "",
-      user_id: status.user_id || "",
-      shared_subject_user_id: status.shared_subject_user_id || "",
-      bot_token: "",
-      signing_secret: "",
-    });
+    if (!status || initializedRef.current) return;
+    setForm(formFromStatus(status));
+    initializedRef.current = true;
   }, [status]);
 
   const saveMutation = useMutation({
     mutationFn: saveSlackSetup,
     onSuccess: (data) => {
-      setForm((current) => ({
-        ...current,
-        bot_token: "",
-        signing_secret: "",
-      }));
+      setForm(formFromStatus(data));
+      initializedRef.current = true;
       queryClient.setQueryData(QUERY_KEY, data);
       queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       queryClient.invalidateQueries({ queryKey: ["slack-allowed-channels"] });
@@ -137,6 +128,18 @@ export function SlackSetupPanel({ action, setupQuery }) {
       </div>
     </div>
   `;
+}
+
+function formFromStatus(status) {
+  return {
+    installation_id: status.installation_id || "",
+    team_id: status.team_id || "",
+    api_app_id: status.api_app_id || "",
+    user_id: status.user_id || "",
+    shared_subject_user_id: status.shared_subject_user_id || "",
+    bot_token: "",
+    signing_secret: "",
+  };
 }
 
 function emptyForm() {
