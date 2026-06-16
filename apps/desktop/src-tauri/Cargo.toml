@@ -1,0 +1,60 @@
+[package]
+name = "ironclaw-desktop"
+version = "0.4.158"
+description = "IronClaw Desktop Client"
+authors = ["OpenClaw"]
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+name = "ironclaw_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2.2"
+tauri-plugin-updater = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+# HTTP plugin — frontend uses `@tauri-apps/plugin-http`'s `fetch` to route
+# IronClaw gateway calls through the Rust process. This bypasses the
+# WKWebView's CORS layer (the gateway's CORS allowlist doesn't include
+# `tauri://localhost`, so production builds were stuck on "Disconnected"
+# while dev mode worked from http://localhost:1420). Required for the
+# bundled .app to talk to any gateway.
+tauri-plugin-http = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+keyring = { version = "3", features = ["apple-native"] }
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "process", "signal"] }
+log = "0.4"
+env_logger = "0.11"
+# reqwest is already transitive via tauri-plugin-http (0.12). We pin to the
+# same major so cargo dedupes to a single copy in the dependency graph —
+# no extra binary weight, just exposes the type on our direct deps path
+# so `ironhub.rs` can issue GETs to the GitHub contents API + raw blobs.
+# Features kept minimal: default + json (we serde the catalog responses).
+# `rustls-tls` matches what tauri-plugin-http already pulls in; we follow
+# the default-features so the TLS backend stays in sync with the rest of
+# the tree.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Tauri treats builds without `custom-protocol` as dev builds and points the
+# webview at `build.devUrl` instead of embedding/serving `frontendDist`.
+# Keep it enabled by default so plain `cargo build --release` produces a
+# usable bundled app; `tauri dev` disables this feature for the Vite dev server.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+# Devtools (right-click → Inspect Element) for support builds. Enabled
+# during the R35/R37 debugging spree; default OFF for the public release.
+# To opt in for a local debug bundle:
+#   cargo build --release --features dev-devtools \
+#     --manifest-path src-tauri/Cargo.toml
+dev-devtools = ["tauri/devtools"]

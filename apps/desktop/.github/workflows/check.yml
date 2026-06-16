@@ -1,0 +1,71 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  frontend:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run verify:static-frontend
+      - run: npm run check:static-bundle
+      - run: npm run lint:static-tokens
+      - run: npm run lint:static-copy
+      - run: npm run test:design-static
+      - name: Install Chromium for static rendered tests
+        run: npx playwright install --with-deps chromium
+      - run: npm run smoke:webui-static
+      - run: npm run smoke:gate-enforcement
+      - run: npm run test:a11y-static
+      - run: npm run test
+      # The static product UI (crates/.../static/js) ships ~28 node:test suites
+      # that vitest does not pick up; run them so a regression there fails CI.
+      - run: npm run test:static
+      - run: npm run test:scripts
+      - run: npm run build
+
+  rust:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      # Sidecar binaries are gitignored — fetch before cargo check so tauri-build
+      # can resolve the bundle.externalBin paths.
+      - name: Download sidecar binaries
+        run: bash src-tauri/binaries/download.sh
+      # The Rust PR gate only needs Tauri's externalBin path to exist while
+      # compiling/checking this crate. Release CI still builds and bundles the
+      # real Reborn sidecar from nearai/ironclaw.
+      - name: Stage Reborn sidecar placeholder for compile checks
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | awk '/host:/ { print $2 }')"
+          path="src-tauri/binaries/ironclaw-reborn-${target}"
+          cat > "${path}" <<'EOF'
+          #!/usr/bin/env sh
+          echo "ironclaw-reborn placeholder for CI compile checks only" >&2
+          exit 64
+          EOF
+          chmod +x "${path}"
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib --release --locked
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked -- -D warnings
+        continue-on-error: true # warn-don't-block until clippy is clean

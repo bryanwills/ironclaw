@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  App Transport Security exception for local-network HTTP gateways.
+
+	  The IronClaw desktop client connects to the IronClaw gateway over plain
+	  HTTP at one of:
+	    - http://127.0.0.1:3100              (bundled sidecar)
+	    - http://127.0.0.1:18789             (SSH tunnel to remote baremetal)
+	    - http://localhost:<port>            (manual local dev)
+
+	  Remote production gateways exposed over HTTPS do NOT require an ATS
+	  exception, so we use the NARROWEST allowed scope: NSAllowsLocalNetworking
+	  permits unsecured loads to 127.0.0.1, localhost, and *.local only.
+
+	  Without this entry, WKWebView in release builds silently fails every
+	  fetch() to the gateway and the app shows "Disconnected" forever. Dev
+	  mode (`npm run tauri dev`) uses a different WKWebView path that
+	  bypasses ATS, which is why this bug only manifests in production.
+
+	  Tauri v2 merges this file into the generated Info.plist at bundle
+	  time when present alongside tauri.conf.json. See:
+	    https://schema.tauri.app/config/2 (bundle.macOS.infoPlist description)
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

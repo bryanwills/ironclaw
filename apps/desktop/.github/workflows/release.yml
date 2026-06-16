@@ -1,0 +1,173 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    env:
+      IRONCLAW_REBORN_REF: reborn-integration
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout IronClaw Reborn source
+        uses: actions/checkout@v4
+        with:
+          repository: nearai/ironclaw
+          ref: ${{ env.IRONCLAW_REBORN_REF }}
+          path: .deps/ironclaw
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            .deps/ironclaw
+
+      - name: Download sidecar binaries
+        run: bash src-tauri/binaries/download.sh
+
+      - name: Build Reborn sidecar binaries
+        run: bash scripts/build-reborn-sidecars.sh --repo .deps/ironclaw
+
+      - name: Prepare universal sidecar binaries
+        run: bash scripts/prepare-universal-sidecars.sh
+
+      - run: npm ci
+
+      - name: Resolve package version
+        id: package-version
+        run: echo "version=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_OUTPUT"
+
+      - name: Release readiness preflight
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: bash scripts/check-release-readiness.sh --require-apple-signing
+
+      - name: Prepare Apple notarization API key
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          key_dir="${RUNNER_TEMP}/appstoreconnect"
+          mkdir -p "${key_dir}"
+          key_path="${key_dir}/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "${APPLE_API_KEY_P8}" > "${key_path}"
+          chmod 600 "${key_path}"
+          echo "APPLE_API_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
+
+      - name: Build Tauri bundle (universal)
+        run: npm run tauri build -- --target universal-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          bundle_root="src-tauri/target/universal-apple-darwin/release/bundle"
+          cp "${bundle_root}/dmg/"*.dmg release-artifacts/
+
+          # Updater artifacts (signed when keys are configured)
+          cp "${bundle_root}/macos/IronClaw.app.tar.gz" \
+            "release-artifacts/IronClaw_${{ steps.package-version.outputs.version }}_universal.app.tar.gz"
+          cp "${bundle_root}/macos/IronClaw.app.tar.gz.sig" \
+            "release-artifacts/IronClaw_${{ steps.package-version.outputs.version }}_universal.app.tar.gz.sig"
+
+          ls -la release-artifacts/
+
+      - name: Generate updater manifest
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+          else
+            release_tag="v${{ steps.package-version.outputs.version }}"
+          fi
+          node scripts/build-updater-manifest.mjs \
+            --artifacts release-artifacts \
+            --repo "${GITHUB_REPOSITORY}" \
+            --tag "${release_tag}" \
+            --version "${{ steps.package-version.outputs.version }}"
+          cat release-artifacts/latest.json
+          node -e '
+            const fs = require("node:fs");
+            const manifest = JSON.parse(fs.readFileSync("release-artifacts/latest.json", "utf8"));
+            const expected = ["darwin-aarch64", "darwin-x86_64"];
+            const keys = Object.keys(manifest.platforms || {}).sort();
+            if (JSON.stringify(keys) !== JSON.stringify(expected)) {
+              throw new Error(`latest.json platforms were ${keys.join(", ") || "<none>"}; expected ${expected.join(", ")}`);
+            }
+            for (const key of expected) {
+              const platform = manifest.platforms[key];
+              if (!platform.url || !platform.signature) {
+                throw new Error(`latest.json ${key} entry must include url and signature`);
+              }
+            }
+            console.log(`latest.json platforms: ${keys.join(", ")}`);
+          '
+
+      - name: Verify Developer ID notarization
+        run: |
+          set -euo pipefail
+          for app in src-tauri/target/*/release/bundle/macos/IronClaw.app; do
+            codesign --verify --deep --strict --verbose=2 "${app}"
+            spctl -a -vvv --type exec "${app}"
+            xcrun stapler validate "${app}"
+            for bin in ironclaw-desktop ironclaw ironclaw-reborn sandbox_daemon; do
+              binary="${app}/Contents/MacOS/${bin}"
+              archs="$(lipo -archs "${binary}")"
+              if [[ "${archs}" != *"x86_64"* || "${archs}" != *"arm64"* ]]; then
+                echo "${binary} is not universal arm64+x86_64; lipo reports: ${archs}" >&2
+                exit 1
+              fi
+              echo "${binary}: ${archs}"
+            done
+          done
+          for dmg in release-artifacts/*.dmg; do
+            xcrun stapler validate "${dmg}"
+          done
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+      - name: Upload workflow artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironclaw-desktop-${{ github.sha }}
+          path: release-artifacts/
+          retention-days: 14

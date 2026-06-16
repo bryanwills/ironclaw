@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>IronClaw</title>
+    <link
+      rel="icon"
+      type="image/png"
+      href="assets/favicon-96x96.png"
+      sizes="96x96"
+    />
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+    <link rel="shortcut icon" href="assets/favicon.ico" />
+    <link
+      rel="apple-touch-icon"
+      sizes="180x180"
+      href="assets/apple-touch-icon.png"
+    />
+    <meta name="apple-mobile-web-app-title" content="IronClaw" />
+    <link rel="manifest" href="assets/site.webmanifest" />
+    <script nonce="__IRONCLAW_CSP_NONCE__">
+      (() => {
+        try {
+          const stored = localStorage.getItem("ironclaw:v2-theme");
+          const theme = stored === "light" || stored === "dark" ? stored : "dark";
+          document.documentElement.dataset.theme = theme;
+          window.__IRONCLAW_INITIAL_THEME__ = theme;
+        } catch (_) {
+          document.documentElement.dataset.theme = "dark";
+          window.__IRONCLAW_INITIAL_THEME__ = "dark";
+        }
+      })();
+    </script>
+  </head>
+  <body class="min-h-[100dvh] antialiased">
+    <div id="v2-root"></div>
+    <script nonce="__IRONCLAW_CSP_NONCE__">
+      (() => {
+        const packagedProtocol =
+          location.protocol !== "http:" && location.protocol !== "https:";
+        const diag = (message) => {
+          if (!packagedProtocol) return;
+          const invoke =
+            window.__TAURI_INTERNALS__?.invoke || window.__TAURI__?.core?.invoke;
+          if (typeof invoke !== "function") return;
+          invoke("diag_log", { msg: `[asset-loader] ${message}` }).catch(() => {});
+        };
+        const hostedV2 =
+          location.pathname === "/v2" || location.pathname.startsWith("/v2/");
+        // Root-absolute, always: this document is served for EVERY app route
+        // (deep links like /settings/inference included), so relative asset
+        // URLs would resolve against the route path and 404 — a blank window
+        // on any reload that isn't at "/".
+        const asset = (path) => (hostedV2 ? `/v2/${path}` : `/${path}`);
+        const loadStyle = (href) => {
+          const link = document.createElement("link");
+          link.rel = "stylesheet";
+          link.href = asset(href);
+          link.onload = () => diag(`loaded style ${link.href}`);
+          link.onerror = () => diag(`failed style ${link.href}`);
+          document.head.appendChild(link);
+        };
+        const scriptLoads = new Map();
+        const loadScript = (src, type) => {
+          const key = `${type || "classic"}:${src}`;
+          const existing = scriptLoads.get(key);
+          if (existing) return existing;
+          const promise = new Promise((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = asset(src);
+            if (type) script.type = type;
+            script.onload = () => {
+              diag(`loaded script ${script.src}`);
+              resolve();
+            };
+            script.onerror = () => {
+              diag(`failed script ${script.src}`);
+              scriptLoads.delete(key);
+              reject(new Error(`Failed to load ${src}`));
+            };
+            document.body.appendChild(script);
+          });
+          scriptLoads.set(key, promise);
+          return promise;
+        };
+        window.__IRONCLAW_STATIC_ASSET__ = asset;
+        window.__IRONCLAW_LOAD_SCRIPT__ = loadScript;
+
+        diag(`start protocol=${location.protocol} pathname=${location.pathname}`);
+        loadStyle("styles/tailwind.generated.css");
+        loadStyle("styles/app.css");
+        loadScript("vendor/purify.min.js")
+          .then(() => loadScript("vendor/marked.umd.js"))
+          .then(() => loadScript("js/main.bundle.js", "module"))
+          .catch((err) => console.error("[ironclaw] static asset bootstrap failed", err));
+      })();
+    </script>
+  </body>
+</html>

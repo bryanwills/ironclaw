@@ -1,0 +1,301 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Self-hosted Inter Variable (latin) — premium desktop type, no network
+   dependency at runtime. Served from static/fonts/ at /fonts/. */
+@font-face {
+  font-family: 'Inter Variable';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-variable.woff2') format('woff2');
+}
+
+/* ────────────────────────────────────────────────────────────────────
+   v2 design tokens (dark-only).
+   Mirrors the IronClaw web UI v2 palette (reborn-integration) so the
+   desktop client and the in-browser IronClaw UI share an accent system.
+   Light-mode tokens intentionally omitted — this app is dark-only.
+   Consumers may use Tailwind aliases (e.g. `text-signal`) OR these raw
+   `--v2-*` vars directly via `style=""` / arbitrary values.
+   ──────────────────────────────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+
+  /* Canvas / surfaces (our canvas stays navy; v2 canvas reserved for
+     future migration). */
+  --v2-canvas: #111114;
+  --v2-canvas-strong: #0d0d10;
+  --v2-surface: #1b1b1f;
+  --v2-surface-soft: rgba(255, 255, 255, 0.03);
+  --v2-surface-muted: rgba(255, 255, 255, 0.07);
+  --v2-surface-hover: #1a2233;
+  --v2-card-bg: #121826;
+  --v2-panel-border: rgba(255, 255, 255, 0.1);
+  --v2-border-hover: #2a3548;
+  --v2-rail: #151519;
+  --v2-input-bg: #151519;
+  --v2-shell: #0d121f;
+  --v2-app-bg: #0a0f1e;
+  --v2-app-shell-translucent: rgba(11, 16, 30, 0.55);
+
+  /* Typography */
+  --v2-text: rgba(255, 255, 255, 0.82);
+  --v2-text-strong: #ffffff;
+  --v2-text-muted: rgba(255, 255, 255, 0.6);
+  --v2-text-faint: rgba(255, 255, 255, 0.45);
+  --v2-inverse: #111111;
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter Variable', 'Helvetica Neue', Arial,
+    sans-serif;
+  --font-display:
+    'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Inter Variable', 'Helvetica Neue', Arial,
+    sans-serif;
+
+  /* Accent — NEAR Blue (PMS 2925C, NEAR AI Brand Guidelines v01).
+     --v2-accent-text is NEAR Sky (PMS 2905C), the lighter on-dark tint. */
+  --v2-accent: #0091fd;
+  --v2-accent-strong: #0077e0;
+  --v2-accent-soft: rgba(0, 145, 253, 0.14);
+  --v2-accent-text: #83dcff;
+  /* NEAR brand gradient — Blue → Sky, reserved for emphasis. */
+  --v2-gradient-brand: linear-gradient(110deg, #0091fd 0%, #83dcff 100%);
+
+  /* Semantic */
+  --v2-positive-soft: rgba(32, 210, 154, 0.13);
+  --v2-positive-text: #20d29a;
+  --v2-warning-soft: rgba(245, 193, 91, 0.14);
+  --v2-warning-text: #f5c15b;
+  --v2-danger-soft: rgba(255, 100, 128, 0.13);
+  --v2-danger-text: #ff6480;
+  --v2-info-soft: rgba(76, 167, 230, 0.14);
+  --v2-info-text: #8fc8f2;
+
+  /* ── Reconciled aliases ──────────────────────────────────────────
+     The Reborn v2 surfaces (RebornChatPanel / RebornDeskPanel) author
+     against these short names. Before they were defined here every
+     `var(--v2-surface-2 …)` / `var(--v2-border …)` etc. silently fell
+     through to its hardcoded fallback, defeating the token system and
+     leaving those surfaces un-themeable. They now resolve to canonical
+     values; a guard test (tests/design-tokens.test.ts) keeps every
+     referenced --v2-* token defined here.
+     ──────────────────────────────────────────────────────────────── */
+  /* Raised fill — one elevation step above --v2-surface. A translucent
+     white overlay (not a solid hex) so it composites consistently over
+     the rail, surface, and gate cards alike (elevation-by-luminance). */
+  --v2-surface-2: rgba(255, 255, 255, 0.06);
+  /* Canonical hairline (matches --v2-panel-border weight). */
+  --v2-border: rgba(255, 255, 255, 0.1);
+  /* Solid warning hue for borders/accents (the -text/-soft pair is for
+     fills + label text; this is the saturated stroke). */
+  --v2-warning: #e6b04c;
+  /* Solid danger hue — saturated stroke companion to --v2-danger-soft/-text. */
+  --v2-danger: var(--v2-danger-text);
+  /* The Desk "Handled" surface authors against --v2-success*; resolve to the
+     canonical positive (green) palette so we don't fork a second green. */
+  --v2-success: var(--v2-positive-text);
+  --v2-success-soft: var(--v2-positive-soft);
+  --v2-success-text: var(--v2-positive-text);
+  /* Monospace stack for streaming tool args / code affordances. */
+  --v2-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+
+  /* Shared surface geometry/elevation for scoped app shells. */
+  --v2-radius-card: 0.75rem;
+  --v2-radius-shell: 1rem;
+  --v2-radius-control: 0.375rem;
+  --v2-shadow-elevated: 0 24px 48px rgba(0, 0, 0, 0.58);
+  --v2-shadow-drawer: -12px 0 32px rgba(0, 0, 0, 0.5);
+  --v2-focus-shadow: 0 0 0 2px rgba(76, 167, 230, 0.32);
+
+  /* ── Motion scale ────────────────────────────────────────────────
+     A small, shared set of easings + durations so every surface
+     animates with one voice (the UX-overhaul foundation). Motion stays
+     restrained and under the 150ms interaction cap. */
+  --v2-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --v2-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --v2-ease-spring: var(--v2-ease-out);
+  --v2-dur-fast: 120ms;
+  --v2-dur: 150ms;
+  --v2-dur-slow: 150ms;
+}
+
+@keyframes v2-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  /* Window-level NSVisualEffectMaterial::Sidebar (applied at Rust setup
+     in src-tauri/src/lib.rs, R63) bleeds through wherever the DOM
+     leaves no opaque surface. A solid navy canvas preserves the
+     dark-only product baseline; on macOS the chrome semi-transparency
+     in `.app-shell` below lets the native material show through.
+
+     The tinted token always paints first
+     (vibrancy + zero CSS = a pure-white blur which fights the dark
+     palette). The translucent panels later in the stack let it bleed. */
+  background: var(--v2-app-bg);
+  background-attachment: fixed;
+  font-family: var(--font-ui);
+  font-kerning: normal;
+  font-optical-sizing: auto;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  font-variant-numeric: tabular-nums;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* R63 (lane B6): give the chrome a subtle translucency so the native
+   sidebar vibrancy shows through. The sidebar + top-rail areas use
+   `bg-bg-deep/80` etc. already; this just guarantees the canvas isn't
+   100% opaque under them. Non-macOS targets see no difference because
+   the window itself is opaque. */
+.app-shell-translucent {
+  background: var(--v2-app-shell-translucent);
+}
+
+/* macOS title-bar clearance. With `titleBarStyle: Overlay +
+   hiddenTitle`, the traffic lights sit over the top-left of the
+   webview. Without padding, sidebar content collides with them. The
+   sidebar's top section opts in via the `.macos-titlebar-clearance`
+   class; the layout adds a `data-tauri-drag-region` div over the
+   same strip so the user can drag the window from the empty top
+   without losing the buttons underneath. 28px matches the macOS
+   traffic-light height. */
+.macos-titlebar-clearance {
+  padding-top: 28px;
+}
+.macos-titlebar-drag-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  z-index: 30;
+  pointer-events: none;
+}
+.macos-titlebar-drag-strip[data-tauri-drag-region] {
+  pointer-events: auto;
+}
+
+/* `macos-only` lets us put a node in the DOM that's only visible /
+   interactive on macOS. Other platforms collapse it to display:none.
+   We probe via the `navigator.platform` startsWith Mac in a sibling
+   script — done at layout mount; this rule is the matching style.
+   Defaults to displayed to avoid a FOUC; the script toggles
+   `data-platform` on <html> for non-mac so the rule below kicks in.
+   */
+html[data-platform='non-mac'] .macos-only {
+  display: none !important;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--v2-border);
+  border-radius: 5px;
+  transition: background var(--v2-dur-fast) var(--v2-ease-out);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--v2-border-hover);
+}
+
+@layer components {
+  .surface {
+    @apply bg-bg-surface border border-border-subtle rounded-lg;
+  }
+
+  .v2-interactive-card {
+    border: 1px solid var(--v2-border);
+    border-radius: var(--v2-radius-card);
+    background: var(--v2-card-bg);
+    transition:
+      background-color var(--v2-dur-fast) var(--v2-ease-out),
+      border-color var(--v2-dur-fast) var(--v2-ease-out);
+  }
+
+  .v2-interactive-card:hover {
+    background: var(--v2-surface-hover);
+    border-color: var(--v2-border-hover);
+  }
+
+  .v2-interactive-card:focus-visible {
+    outline: 2px solid var(--v2-accent);
+    outline-offset: 2px;
+    border-color: var(--v2-accent);
+    box-shadow: var(--v2-focus-shadow);
+  }
+
+  .v2-modal-shell {
+    border: 1px solid var(--v2-border);
+    border-radius: var(--v2-radius-shell);
+    background: var(--v2-shell);
+    box-shadow: var(--v2-shadow-elevated);
+  }
+
+  .v2-drawer-shell {
+    background: var(--v2-shell);
+    box-shadow: var(--v2-shadow-drawer);
+  }
+
+  .v2-modal-shell :is(button, [role='button'], input, textarea, select):focus-visible,
+  .v2-drawer-shell :is(button, [role='button'], input, textarea, select):focus-visible {
+    outline: 2px solid var(--v2-accent);
+    outline-offset: 2px;
+    border-color: var(--v2-accent);
+    box-shadow: var(--v2-focus-shadow);
+  }
+}
+
+/* Keyboard-only focus ring for interactive controls.
+   Most buttons in the app currently rely on the browser's default
+   focus outline; this normalizes to a visible cyan ring for keyboard
+   users (focus-visible) without affecting mouse-click focus.
+   Inputs/selects/textareas opt out (they already render a
+   `focus:border-accent-cyan` border). Components that set their own
+   `focus-visible:` styles still take precedence via specificity. */
+button:focus-visible,
+a:focus-visible,
+[role='button']:focus-visible,
+[role='tab']:focus-visible,
+[role='menuitem']:focus-visible,
+[role='switch']:focus-visible,
+[role='radio']:focus-visible {
+  outline: 2px solid var(--v2-accent);
+  outline-offset: 2px;
+  border-radius: var(--v2-radius-control);
+}
+
+/* Respect the OS "reduce motion" setting. Elite apps don't strip
+   feedback entirely — they collapse durations so state still changes
+   instantly without travel/parallax. We near-zero all animation +
+   transition + scroll-behavior so nothing moves for users who opted
+   out, while keeping the end state intact. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

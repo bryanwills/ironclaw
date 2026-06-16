@@ -1,0 +1,49 @@
+node_modules
+/build
+/.svelte-kit
+/.vite
+/package
+.env
+.env.*
+!.env.example
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Local-only secrets
+.env.local
+*.pem
+
+# Tauri updater signing key
+*.tauri.key
+.gstack/
+
+# Playwright E2E
+playwright-report/
+test-results/
+tests/e2e/.cache/
+.playwright-cli/
+output/
+
+# Codex parallel-dispatch worktrees (see scripts/codex-dispatch.sh)
+.codex-worktrees/
+.claude-worktrees/
+
+# Release CI mirrors the upstream IronClaw checkout here for Reborn sidecar builds.
+.deps/
+
+.review/
+docs/design/imported-system/

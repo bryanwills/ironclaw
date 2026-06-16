@@ -1,0 +1,10 @@
+name: style-guard
+on: pull_request
+
+jobs:
+  hardcoded-colors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for hardcoded accent colors
+        run: bash scripts/style-guard.sh

@@ -1,0 +1,13 @@
+node_modules/
+build/
+.svelte-kit/
+src-tauri/target/
+src-tauri/binaries/
+playwright-report/
+test-results/
+__snapshots__/
+package-lock.json
+crates/ironclaw_webui_v2_static/static/js/main.bundle.js
+crates/ironclaw_webui_v2_static/static/vendor/
+crates/ironclaw_webui_v2_static/static/ocr/
+crates/ironclaw_webui_v2_static/static/styles/tailwind.generated.css

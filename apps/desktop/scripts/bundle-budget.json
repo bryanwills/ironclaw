@@ -1,0 +1,8 @@
+{
+  "_comment": "Gzipped size budget for SvelteKit eager route JS. Assets (CSS/fonts/images) excluded. See README 'Bundle analysis' for how to bump intentionally.",
+  "_largest_chunk_note": "R53 introduced Plotly + Mermaid + KaTeX as lazy chunks. Plotly's `plotly.js-dist-min` ships a ~1.4 MB gzip blob no matter how we split it; it loads only when an assistant turn includes a `plotly` fenced block (rare). The 1600 KB cap accommodates that worst-case lazy chunk without tripping the warning exit code. The route cap is 310 KB because the app shell baseline is now ~200 KB and /chat is the product's densest route; Markdown rendering and work-product export helpers are lazy-loaded so /chat stays below the stricter 320 KB total eager cap.",
+  "total_gzip_kb": 320,
+  "entry_gzip_kb": 200,
+  "largest_chunk_gzip_kb": 1600,
+  "route_gzip_kb": 310
+}

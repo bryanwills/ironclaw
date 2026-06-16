@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%sveltekit.assets%/favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IronClaw</title>
+    <script>
+      // DEV-ONLY: Tauri IPC shim for browser preview / headless dogfood runs.
+      // Activated by sessionStorage key __ICDEV_SHIM__ (set by /__shim.html).
+      //
+      // R45 codex P0 hardening: refuses to install when the page is
+      // served from `tauri://localhost` (the production webview origin).
+      // Without this guard, an XSS payload inside the production webview
+      // could `sessionStorage.setItem('__ICDEV_SHIM__', ...)` and replace
+      // the real Tauri IPC bridge with a fake that returns
+      // attacker-controlled settings + token. The protocol check is a
+      // simple build-free way to keep the convenience for headless dev
+      // while making the production attack surface zero.
+      (function () {
+        try {
+          if (window.location.protocol === 'tauri:' || window.location.protocol === 'tauri-localhost:') return;
+          var raw = sessionStorage.getItem('__ICDEV_SHIM__');
+          if (!raw) return;
+          var cfg = JSON.parse(raw);
+          var settings = cfg.settings;
+          var token = cfg.token;
+          var shim = {
+            invoke: function (cmd, args) {
+              try { console.log('[shim]', cmd); } catch (e) {}
+              if (cmd === 'get_settings') return Promise.resolve(settings);
+              if (cmd === 'save_settings') {
+                if (args && args.settings) Object.assign(settings, args.settings);
+                try { sessionStorage.setItem('__ICDEV_SHIM__', JSON.stringify({ settings: settings, token: token })); } catch (e) {}
+                return Promise.resolve(null);
+              }
+              if (cmd === 'get_token') return Promise.resolve(token);
+              if (cmd === 'set_token' || cmd === 'delete_token') return Promise.resolve(null);
+              if (cmd === 'get_openrouter_key' || cmd === 'get_llm_provider_credential') return Promise.resolve(null);
+              if (cmd === 'set_openrouter_key' || cmd === 'delete_openrouter_key') return Promise.resolve(null);
+              if (cmd === 'set_llm_provider_credential' || cmd === 'delete_llm_provider_credential') return Promise.resolve(null);
+              if (cmd === 'get_or_create_local_token') return Promise.resolve('local-fake-token');
+              if (cmd === 'local_data_dir') return Promise.resolve('/tmp/ironclaw-fake');
+              if (cmd === 'sidecar_status') return Promise.resolve({ running: false, port: null });
+              if (cmd === 'start_sidecar') return Promise.resolve(3100);
+              if (cmd === 'stop_sidecar') return Promise.resolve(null);
+              if (cmd === 'set_tray_visible' || cmd === 'update_tray_status' || cmd === 'update_tray_badge' || cmd === 'update_tray_recent') return Promise.resolve(null);
+              if (cmd === 'open_profile_window' || cmd === 'open_text_dialog' || cmd === 'save_text_dialog' || cmd === 'export_settings_dialog' || cmd === 'reveal_in_finder') return Promise.resolve(null);
+              try { console.warn('[shim] unknown cmd', cmd); } catch (e) {}
+              return Promise.resolve(null);
+            }
+          };
+          window.__TAURI_INTERNALS__ = shim;
+          window.__TAURI__ = shim;
+          window.__SHIM_INSTALLED__ = true;
+          try { console.log('[shim] installed'); } catch (e) {}
+        } catch (e) {
+          try { console.warn('[shim] install failed', e); } catch (_) {}
+        }
+      })();
+    </script>
+    %sveltekit.head%
+  </head>
+  <body data-sveltekit-preload-data="hover" class="bg-bg-deep text-text-primary font-sans antialiased">
+    <div style="display: contents">%sveltekit.body%</div>
+  </body>
+</html>

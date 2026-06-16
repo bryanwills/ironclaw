@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ironclaw-desktop",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 1420
+    },
+    {
+      "name": "ironclaw-static-ui",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/serve-webui-static.mjs"],
+      "port": 1420
+    }
+  ]
+}
