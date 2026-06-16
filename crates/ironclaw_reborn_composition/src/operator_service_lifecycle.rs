@@ -70,13 +70,13 @@ impl ServiceCommandRunner for SystemCommandRunner {
 }
 
 fn write_service_file(path: &Path, contents: &str) -> std::io::Result<()> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "local service unit path is a symlink",
-            ));
-        }
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "local service unit path is a symlink",
+        ));
     }
 
     #[cfg(unix)]
