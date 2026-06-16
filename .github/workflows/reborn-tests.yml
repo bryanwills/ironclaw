@@ -165,13 +165,18 @@ jobs:
                         { "name": .name, "kind": "test" }
                       end
                   ]
-                  | unique_by(.name)
-                  | sort_by(.name)
+                  | unique_by([.kind, .name])
+                  | sort_by([.kind, .name])
                 '
           )"
 
           if [ -z "${targets}" ] || [ "${targets}" = "[]" ]; then
             echo "No ironclaw_webui_v2 lib/test targets discovered" >&2
+            exit 1
+          fi
+          target_count="$(printf '%s\n' "${targets}" | jq 'length')"
+          if [ "${target_count}" -gt 32 ]; then
+            echo "Too many ironclaw_webui_v2 test targets: ${target_count}" >&2
             exit 1
           fi
 

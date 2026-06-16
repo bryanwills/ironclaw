@@ -26,6 +26,7 @@ EXPECTED_REBORN_PACKAGES = {
     "ironclaw_wasm_product_adapters",
     "ironclaw_webui_v2_static",
 }
+MAX_WEBUI_TARGETS = 32
 
 
 def cargo_metadata() -> dict:
@@ -74,6 +75,9 @@ def main() -> None:
     assert '(.name != "ironclaw_webui_v2")' in workflow
     assert '"kind": "lib"' in workflow
     assert '"kind": "test"' in workflow
+    assert "unique_by([.kind, .name])" in workflow
+    assert "sort_by([.kind, .name])" in workflow
+    assert f'-gt {MAX_WEBUI_TARGETS}' in workflow
     assert '--test "$TARGET_NAME"' in workflow
 
     metadata = cargo_metadata()
@@ -87,6 +91,9 @@ def main() -> None:
     targets = webui_target_matrix(metadata)
     target_names = {name for name, _kind in targets}
     assert ("lib", "lib") in targets
+    assert len(targets) <= MAX_WEBUI_TARGETS, (
+        f"too many ironclaw_webui_v2 targets: {len(targets)}"
+    )
     assert EXPECTED_WEBUI_TESTS <= target_names, (
         "missing expected ironclaw_webui_v2 test targets: "
         f"{sorted(EXPECTED_WEBUI_TESTS - target_names)}"
