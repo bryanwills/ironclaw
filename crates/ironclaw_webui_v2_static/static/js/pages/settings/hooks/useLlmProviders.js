@@ -79,7 +79,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
     ? providersQuery.data || fallbackSnapshot
     : { providers: [], active: null };
   // If the providers query failed (e.g. 404 when the route is gated under
-  // multi-user / SSO auth, or a transient 5xx / offline), we can't conclude
+  // multi-user / SSO auth, or a transient 5xx / offline), we cannot conclude
   // "no LLM configured" — the provider may be set operator-side at boot — so
   // callers must not treat the failure as a reason to onboard.
   const isError = enabled && providersQuery.isError;

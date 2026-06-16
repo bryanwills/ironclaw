@@ -180,7 +180,7 @@ export function SettingsToolbar({
             role="status"
             className=${[
               "mt-1 text-xs",
-              message.tone === "error" ? "text-red-200" : "text-mint",
+              message.tone === "error" ? "text-[var(--v2-danger-text)]" : "text-mint",
             ].join(" ")}
           >
             ${message.text}

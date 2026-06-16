@@ -138,7 +138,7 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
           className=${[
             "mb-4 rounded-md border px-3 py-2 text-sm",
             actions.message.tone === "error"
-              ? "border-red-400/30 bg-red-500/10 text-red-200"
+              ? "border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]"
               : "border-mint/30 bg-mint/10 text-mint",
           ].join(" ")}
           role="status"
@@ -152,7 +152,7 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
       ${state.isLoading
         ? html`<div className="text-sm text-[var(--v2-text-muted)]">${t("common.loading")}</div>`
         : state.error
-        ? html`<div className="text-sm text-red-200">${t("error.loadFailed", { what: t("llm.providers"), message: state.error.message })}</div>`
+        ? html`<div className="text-sm text-[var(--v2-danger-text)]">${t("error.loadFailed", { what: t("llm.providers"), message: state.error.message })}</div>`
         : html`
             <div className="space-y-1">
               ${GROUP_ORDER.flatMap((group) => {

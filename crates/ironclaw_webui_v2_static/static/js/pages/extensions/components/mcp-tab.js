@@ -50,7 +50,7 @@ export function McpTab({
             size="sm"
             className="mt-4 min-h-[44px] px-3.5"
           >
-            ${t("ext.registry.availableTitle")}
+            ${t("extensions.browseKnowledgeApps")}
           <//>
           ${loadError &&
           html`

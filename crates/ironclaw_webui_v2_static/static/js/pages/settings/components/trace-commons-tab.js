@@ -70,7 +70,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
   } else if (query.isError) {
     body = html`
       <div
-        className="mt-4 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+        className="mt-4 rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
       >
         ${t("traceCommons.loadFailed")}
       </div>

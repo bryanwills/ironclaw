@@ -64,7 +64,7 @@ export function JobFilesTab({
         </div>
 
         <div className="mt-3 max-h-[60vh] overflow-y-auto">
-          ${treeError && html`<div className="mx-2 mb-3 rounded-md border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">${treeError}</div>`}
+          ${treeError && html`<div className="mx-2 mb-3 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-sm text-[var(--v2-danger-text)]">${treeError}</div>`}
           ${isLoadingTree
             ? html`<div className="space-y-2 px-2">${[1, 2, 3, 4].map((i) => html`<div key=${i} className="v2-skeleton h-8 rounded-md" />`)}</div>`
             : tree.length
@@ -88,7 +88,7 @@ export function JobFilesTab({
         </div>
 
         ${fileError && !isLoadingFile
-          ? html`<div className="mt-5 rounded-md border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">${fileError}</div>`
+          ? html`<div className="mt-5 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]">${fileError}</div>`
           : isLoadingFile
           ? html`<div className="mt-5 space-y-3">${[1, 2, 3, 4, 5].map((i) => html`<div key=${i} className="v2-skeleton h-4 rounded" />`)}</div>`
           : selectedFile

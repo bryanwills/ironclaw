@@ -206,11 +206,11 @@ export function SlackChannelPicker({ action }) {
           ${saveMutation.isPending ? copy.savingLabel : copy.submitLabel}
         <//>
         ${saveMutation.isSuccess &&
-        html`<p className="text-xs text-emerald-300">
+        html`<p className="text-xs text-[var(--v2-positive-text)]">
           ${copy.successMessage}
         </p>`}
         ${(channelsQuery.isError || subjectsQuery.isError || saveMutation.isError) &&
-        html`<p className="text-xs text-red-300">
+        html`<p className="text-xs text-[var(--v2-danger-text)]">
           ${slackChannelPickerError(
             saveMutation.error || channelsQuery.error || subjectsQuery.error,
             copy.errorMessage,

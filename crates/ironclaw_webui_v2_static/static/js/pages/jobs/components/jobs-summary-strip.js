@@ -7,7 +7,7 @@ const SUMMARY_CARDS = [
   { key: "in_progress", label: "In progress", tone: "signal", detail: "Actively running jobs and live bridges." },
   { key: "completed", label: "Completed", tone: "success", detail: "Finished without intervention." },
   { key: "failed", label: "Failed", tone: "danger", detail: "Runs that terminated with an error or interruption." },
-  { key: "stuck", label: "Stuck", tone: "danger", detail: "Agent work needing recovery or operator attention." },
+  { key: "stuck", label: "Stuck", tone: "danger", detail: "Agent work needing recovery or intervention." },
 ];
 
 export function JobsSummaryStrip({ summary }) {

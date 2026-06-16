@@ -194,7 +194,7 @@ export function Chat({
         ${historyLoadError &&
         html`
           <div
-            className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
+            className="mx-4 mt-3 rounded-lg border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
             role="alert"
           >
             ${historyLoadError}

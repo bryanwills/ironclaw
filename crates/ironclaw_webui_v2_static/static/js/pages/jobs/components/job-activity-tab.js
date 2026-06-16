@@ -91,7 +91,7 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
         <div>
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Event stream</div>
           <h3 className="mt-2 text-xl font-semibold text-white">Job activity</h3>
-          <p className="mt-2 text-sm leading-6 text-iron-300">Persisted events are refreshed automatically so operators can follow tool calls, prompts, and worker output.</p>
+          <p className="mt-2 text-sm leading-6 text-iron-300">Persisted events are refreshed automatically so you can follow tool calls, prompts, and worker output.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <select

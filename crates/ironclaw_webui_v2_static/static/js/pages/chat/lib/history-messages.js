@@ -127,7 +127,7 @@ function pendingMessageForRender(pending) {
 // Return the pending messages that the timeline has NOT yet confirmed, so a
 // caller (useHistory) can keep only the still-unconfirmed optimistic rows
 // after a timeline refresh instead of blanket-clearing them. A blanket wipe
-// would durably drop a second in-flight turn whose record hasn't projected
+// would durably drop a second in-flight turn whose record has not projected
 // yet; keeping unconfirmed rows preserves them until the timeline carries them.
 //
 // Mirrors the id-based dedup in `messagesFromTimeline`: a pending row is

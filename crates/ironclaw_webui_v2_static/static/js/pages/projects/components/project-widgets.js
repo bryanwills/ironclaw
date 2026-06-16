@@ -41,7 +41,7 @@ function ProjectWidgetMount({ widget, projectId }) {
         <div className="mt-1 text-lg font-semibold tracking-tight text-white">${widget.manifest?.name || widget.manifest?.id}</div>
       </div>
       ${error
-        ? html`<p className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">${error}</p>`
+        ? html`<p className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-sm text-[var(--v2-danger-text)]">${error}</p>`
         : html`<div ref=${containerRef} />`}
     </div>
   `;

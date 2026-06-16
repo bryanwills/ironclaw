@@ -137,7 +137,7 @@ export function useHistory(threadId, options = {}) {
         }
 
         setState((prev) => {
-          // Stale resolve for a thread that's no longer active: leave the
+          // Stale resolve for a thread that is no longer active: leave the
           // live view alone (the cache above already captured the result).
           if (threadIdRef.current !== threadId) return prev;
           let merged;

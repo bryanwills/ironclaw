@@ -96,7 +96,7 @@ export function ProjectInspectorRail({
       ${isLoading
         ? html`<div className="space-y-4">${[1, 2].map((index) => html`<div key=${index} className="v2-skeleton h-48 rounded-[20px]" />`)}</div>`
         : error
-          ? html`<div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">${error.message}</div>`
+          ? html`<div className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]">${error.message}</div>`
           : inspector?.type === "mission"
             ? html`
                 <${ProjectMissionInspector}

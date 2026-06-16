@@ -13,11 +13,11 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
   if (!items?.length) return null;
 
   return html`
-    <${Panel} className="overflow-hidden border-amber-300/10 p-0">
-      <div className="border-b border-amber-300/10 px-5 py-4 sm:px-6">
+    <${Panel} className="overflow-hidden border-[color-mix(in_srgb,var(--v2-warning-text)_20%,var(--v2-panel-border))] p-0">
+      <div className="border-b border-[color-mix(in_srgb,var(--v2-warning-text)_20%,var(--v2-panel-border))] px-5 py-4 sm:px-6">
         <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-copper">Needs attention</div>
         <p className="mt-2 max-w-[70ch] text-sm leading-6 text-iron-200">
-          Operator-visible gates and recent failures across your project workspace.
+          Pending decisions and recent failures across your project workspace.
         </p>
       </div>
       <div className="grid gap-3 p-4 sm:p-5 xl:grid-cols-2">
