@@ -161,13 +161,22 @@ export function ProjectsPage() {
             ${headerActions}
           </div>
           ${overviewState.error && html`
-            <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            <div className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]">
               ${overviewState.error.message}
             </div>
           `}
           <${FeedbackBanner} result=${chatFlowError} onDismiss=${() => setChatFlowError(null)} />
           <${FeedbackBanner} result=${inspectorState.actionResult} onDismiss=${inspectorState.clearActionResult} />
-          <${ProjectsSummaryStrip} overview=${overviewState.overview} />
+          ${
+            // No v2 projects endpoint exists yet (useProjectsOverview
+            // status:'todo'). The summary strip renders a four-tile live metrics
+            // ledger including a "Spend today" tile; showing hardcoded zeros as a
+            // polling dashboard implies tracking the gateway cannot prove. Gate it
+            // on a real backend — the projects grid still renders below with its
+            // honest empty state ("No fake readiness").
+            overviewState.status !== 'todo' &&
+            html`<${ProjectsSummaryStrip} overview=${overviewState.overview} />`
+          }
           <${ProjectsAttentionStrip} items=${overviewState.overview.attention} onOpenItem=${handleOpenAttention} />
           ${content}
         </div>

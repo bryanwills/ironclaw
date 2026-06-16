@@ -113,7 +113,12 @@ async fn setup_extension_response(
 fn setup_action(request: &WebUiSetupExtensionRequest) -> Result<SetupAction, RebornServicesError> {
     match request.action.as_deref() {
         None => Ok(SetupAction::View),
-        Some("submit") => Ok(SetupAction::Submit),
+        // `submit` is the legacy v2 web client verb; `configure` is the shared
+        // desktop/web client verb for the same credential-submission action.
+        // Both map to `Submit` so existing clients keep working and the
+        // converged frontend's `configure` body is honored without a separate
+        // code path.
+        Some("submit") | Some("configure") => Ok(SetupAction::Submit),
         Some(_) => Err(validation_error(
             "action",
             WebUiInboundValidationCode::InvalidValue,

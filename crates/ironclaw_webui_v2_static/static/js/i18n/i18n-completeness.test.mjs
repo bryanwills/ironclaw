@@ -47,11 +47,15 @@ const BASELINE_MISSING_KEYS = Object.freeze([
   'chat.briefSafetyTitle',
   'chat.briefWorkspaceDesc',
   'chat.briefWorkspaceTitle',
+  'chat.deleteThreadConfirm',
   'chat.dropToAttach',
   'chat.find.earlier',
   'chat.find.next',
   'chat.find.placeholder',
   'chat.find.previous',
+  'chat.loadFailed',
+  'chat.loadOlder',
+  'chat.loadingConversations',
   'chat.modelPopoverActive',
   'chat.modelPopoverAvailable',
   'chat.modelPopoverEmpty',
@@ -78,10 +82,15 @@ const BASELINE_MISSING_KEYS = Object.freeze([
   'chat.resumeHeading',
   'chat.resumeHours',
   'chat.resumeMinutes',
+  'chat.searchingOlder',
   'chat.suggestion1Prompt',
   'chat.suggestion2Prompt',
   'chat.suggestion3Prompt',
   'chat.suggestionUse',
+  'command.noMatches',
+  'command.noMatchesHint',
+  'common.retry',
+  'extensions.gatewayUnavailable',
   'googleOauth.applied',
   'googleOauth.apply',
   'googleOauth.desc',
@@ -91,6 +100,7 @@ const BASELINE_MISSING_KEYS = Object.freeze([
   'googleOauth.restarting',
   'googleOauth.saving',
   'googleOauth.title',
+  'job.filterEventsLabel',
   'llm.applyModel',
   'llm.applying',
   'llm.deleteConfirm',
@@ -105,6 +115,18 @@ const BASELINE_MISSING_KEYS = Object.freeze([
   'onboarding.continueGoogle',
   'onboarding.continueWallet',
   'onboarding.firstRun',
+  'onboarding.gatewayCheckingDesktop',
+  'onboarding.gatewayCheckingWeb',
+  'onboarding.gatewayFollowupCopyDesktop',
+  'onboarding.gatewayFollowupCopyWeb',
+  'onboarding.gatewayPendingCopyDesktop',
+  'onboarding.gatewayPendingCopyWeb',
+  'onboarding.gatewayReady',
+  'onboarding.gatewayUnavailableCopyDesktop',
+  'onboarding.gatewayUnavailableCopyWeb',
+  'onboarding.gatewayUnavailableDesktop',
+  'onboarding.gatewayUnavailableWeb',
+  'onboarding.nativeBadge',
   'onboarding.promiseApprovalsBody',
   'onboarding.promiseApprovalsTitle',
   'onboarding.promiseFilesBody',
@@ -120,7 +142,7 @@ const BASELINE_MISSING_KEYS = Object.freeze([
   'tool.riskExport',
   'tool.riskPublish',
   'tool.riskSend',
-  'tool.riskTrade'
+  'tool.riskTrade',
 ]);
 
 function sortedUnique(values) {
@@ -137,7 +159,7 @@ test('every advertised language has a registered pack', () => {
 
 test('i18n baseline is sorted, unique, and references real English keys', () => {
   const englishKeys = Object.keys(packs.en || {}).sort();
-  assert.equal(englishKeys.length, 1054);
+  assert.equal(englishKeys.length, 1076);
   assert.deepEqual(BASELINE_MISSING_KEYS, sortedUnique(BASELINE_MISSING_KEYS));
 
   const unknownBaselineKeys = BASELINE_MISSING_KEYS.filter((key) => !packs.en?.[key]);

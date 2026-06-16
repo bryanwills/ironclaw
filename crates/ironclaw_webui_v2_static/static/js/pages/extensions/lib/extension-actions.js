@@ -51,3 +51,47 @@ export function setupReadyForActivation({ extension, secrets = [], fields = [] }
   }
   return secrets.every((secret) => secret.provided);
 }
+
+// Connector-family classification. Used by the one-click connect flow
+// (useConnectExtension) to route Google connectors to the desktop client-id
+// setup path instead of a hosted OAuth start the gateway cannot serve.
+const GOOGLE_CONNECTORS = new Set([
+  "google",
+  "gmail",
+  "google-calendar",
+  "google-drive",
+  "google-sheets",
+  "google-docs",
+  "google-slides",
+]);
+
+export function connectorKey(source) {
+  const ref = source?.package_ref || source?.packageRef || source;
+  const raw =
+    (typeof ref === "string" ? ref : ref?.id) ||
+    source?.id ||
+    source?.display_name ||
+    source?.name ||
+    "";
+  const catalogName = String(raw).includes("/")
+    ? String(raw).split("/").filter(Boolean).pop()
+    : String(raw);
+  const normalized = catalogName.trim().toLowerCase().replaceAll("_", "-");
+  if (normalized === "slack-tool") return "slack";
+  return normalized;
+}
+
+export function connectorFamily(source) {
+  const key = connectorKey(source);
+  if (GOOGLE_CONNECTORS.has(key)) return "google";
+  if (key.includes("notion")) return "notion";
+  if (key.includes("slack")) return "slack";
+  if (key.includes("workspace") || key.includes("filesystem") || key.includes("file-system")) {
+    return "workspace";
+  }
+  return key;
+}
+
+export function isGoogleConnector(source) {
+  return connectorFamily(source) === "google";
+}

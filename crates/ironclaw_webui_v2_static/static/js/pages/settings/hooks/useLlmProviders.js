@@ -196,8 +196,14 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
 //     status (`llm_backend`) so an operator-configured model is not masked at
 //     first run; desktop trusts only the persisted snapshot's `active`, hiding
 //     stale/non-NEAR active snapshots until an advanced-provider mode exists.
+//
+// `desktop` defaults to the gated (NEAR-only) path: the in-app web call site
+// always passes `{ gatewayStatus, desktop: false }` explicitly (see
+// `useLlmProviders`), so the default only governs bare `deriveProviderSnapshot`
+// callers, which must get the conservative behavior that never invents an
+// active provider from gateway diagnostics or surfaces non-NEAR providers.
 export function deriveProviderSnapshot(snapshot = {}, options = {}) {
-  const { gatewayStatus, desktop = false } = options;
+  const { gatewayStatus, desktop = true } = options;
   const builtinOverrides = {};
   const rawProviders = (Array.isArray(snapshot.providers) ? snapshot.providers : []).map(
     (provider) => ({

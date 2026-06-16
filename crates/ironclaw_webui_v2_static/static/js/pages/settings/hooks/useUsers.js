@@ -12,6 +12,10 @@ export function useUsers() {
   });
 
   const users = query.data?.users || [];
+  // The v2 users endpoint is a stub (`fetchUsers` → { todo: true }, writes →
+  // { success: false }). Surface that as a status so the tab shows the honest
+  // not-writable state instead of an add-user form that silently no-ops.
+  const status = query.data?.todo ? 'todo' : 'ready';
   const isForbidden = query.error?.message?.includes("403") || query.error?.message?.includes("Forbidden");
 
   const createMutation = useMutation({
@@ -27,6 +31,7 @@ export function useUsers() {
   return {
     users,
     query,
+    status,
     isForbidden,
     createUser: createMutation.mutate,
     updateUser: (id, payload) => updateMutation.mutate({ id, payload }),

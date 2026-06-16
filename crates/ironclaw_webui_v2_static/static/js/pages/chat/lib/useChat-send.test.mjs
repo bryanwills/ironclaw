@@ -629,6 +629,8 @@ test("useChat.send: rejected_busy appends system notice, marks optimistic failed
     Math,
     React: createReactStub({ setCalls: stateUpdates }),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async () => {},
     clearTimeout,
     createThreadRequest: async () => {
@@ -707,6 +709,8 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
     Math,
     React: createReactStub({ setCalls: stateUpdates }),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async () => {},
     clearTimeout,
     createThreadRequest: async () => {

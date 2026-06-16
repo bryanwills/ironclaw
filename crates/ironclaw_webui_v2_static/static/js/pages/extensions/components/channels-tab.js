@@ -80,9 +80,9 @@ export function ChannelsTab({
 
   return html`
     <div className="space-y-5">
-      <div className="v2-panel rounded-[18px] p-5 sm:p-6">
+      <div className="rounded-[18px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-5 shadow-[var(--v2-shadow-sm)] sm:p-6">
         <h3
-          className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+          className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
         >
           ${t("channels.builtIn")}
         </h3>
@@ -132,9 +132,9 @@ export function ChannelsTab({
 
       ${installedChannels.length > 0 &&
       html`
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
+        <div className="rounded-[18px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-5 shadow-[var(--v2-shadow-sm)] sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
           >
             ${t("channels.messaging")}
           </h3>
@@ -164,9 +164,9 @@ export function ChannelsTab({
       `}
       ${channelRegistry.length > 0 &&
       html`
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
+        <div className="rounded-[18px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-5 shadow-[var(--v2-shadow-sm)] sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
           >
             ${t("channels.availableChannels")}
           </h3>
@@ -199,20 +199,20 @@ function BuiltinRow({
 }) {
   return html`
     <div
-      className="border-t border-white/[0.06] py-4 first:border-0 first:pt-0"
+      className="border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0"
     >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-iron-200">${name}</span>
+            <span className="text-sm font-medium text-[var(--v2-text-strong)]">${name}</span>
             <${StatusPill}
               tone=${statusTone}
               label=${statusLabel}
             />
           </div>
-          <div className="mt-1 text-xs text-iron-300">${description}</div>
+          <div className="mt-1 text-xs text-[var(--v2-text-muted)]">${description}</div>
           ${detail &&
-          html`<div className="mt-1 font-mono text-[11px] text-iron-700">
+          html`<div className="mt-1 font-mono text-[11px] text-[var(--v2-text-faint)]">
             ${detail}
           </div>`}
         </div>

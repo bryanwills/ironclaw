@@ -44,11 +44,11 @@ export function RegistryTab({
 
   if (catalogEntries.length === 0) {
     return html`
-      <div className="v2-panel rounded-[18px] p-6 sm:p-8">
-        <h3 className="text-lg font-semibold text-white">
+      <div className="rounded-[18px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-6 shadow-[var(--v2-shadow-sm)] sm:p-8">
+        <h3 className="text-lg font-semibold text-[var(--v2-text-strong)]">
           ${t("ext.registry.emptyTitle")}
         </h3>
-        <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
+        <p className="mt-2 max-w-md text-sm leading-6 text-[var(--v2-text-muted)]">
           ${t("ext.registry.emptyDesc")}
         </p>
       </div>
@@ -63,23 +63,23 @@ export function RegistryTab({
           value=${filter}
           onChange=${(e) => setFilter(e.target.value)}
           placeholder=${t("ext.registry.searchPlaceholder")}
-          className="h-9 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          className="h-9 flex-1 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 text-sm text-[var(--v2-text)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
         />
-        <span className="font-mono text-[11px] text-iron-700">
+        <span className="font-mono text-[11px] text-[var(--v2-text-faint)]">
           ${filtered.length} / ${catalogEntries.length}
         </span>
       </div>
 
-      <div className="v2-panel rounded-[18px] p-5 sm:p-6">
+      <div className="rounded-[18px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-5 shadow-[var(--v2-shadow-sm)] sm:p-6">
         ${filtered.length === 0
-          ? html`<p className="py-4 text-sm text-iron-300">
+          ? html`<p className="py-4 text-sm text-[var(--v2-text-muted)]">
               ${t("ext.registry.noMatch")}
             </p>`
           : html`
               ${installedCount > 0 &&
               html`
                 <h3
-                  className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+                  className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
                 >
                   ${t("extensions.installed")}
                 </h3>
@@ -113,7 +113,7 @@ export function RegistryTab({
               html`
                 <h3
                   className=${[
-                    "mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal",
+                    "mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]",
                     installedCount > 0 ? "mt-6" : "",
                   ].join(" ")}
                 >

@@ -54,11 +54,11 @@ export function SlackPairingSection({ action }) {
       </div>
 
       ${redeemMutation.isSuccess &&
-      html`<p className="text-xs text-emerald-300">
+      html`<p className="text-xs text-[var(--v2-positive-text)]">
         ${redeemMutation.data?.message || copy.successMessage}
       </p>`}
       ${redeemMutation.isError &&
-      html`<p className="text-xs text-red-300">
+      html`<p className="text-xs text-[var(--v2-danger-text)]">
         ${slackPairingError(redeemMutation.error, copy.errorMessage)}
       </p>`}
     </div>

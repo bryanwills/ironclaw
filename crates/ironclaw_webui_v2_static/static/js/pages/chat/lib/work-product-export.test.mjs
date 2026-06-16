@@ -19,7 +19,13 @@ globalThis.window = {
       ].join('');
     }
   },
+  // renderMarkdown installs an afterSanitizeAttributes link-hardening hook on
+  // the shared DOMPurify instance, so the stub must expose addHook (a no-op
+  // here) alongside sanitize or the HTML export builder throws before it can
+  // render. sanitize is identity: these tests assert export structure, not the
+  // sanitizer, and the real DOMPurify already has its own coverage.
   DOMPurify: {
+    addHook: () => {},
     sanitize: (html) => html
   }
 };

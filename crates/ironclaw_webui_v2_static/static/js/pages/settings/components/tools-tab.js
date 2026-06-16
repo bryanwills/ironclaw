@@ -6,7 +6,7 @@ import { useT } from "../../../lib/i18n.js";
 import { useTools } from "../hooks/useTools.js";
 import { matchesSearch } from "../lib/settings-search.js";
 
-function ToolRow({ tool, onPermissionChange, isSaved }) {
+function ToolRow({ tool, onPermissionChange, isSaved, canEdit }) {
   const t = useT();
   const permissionStates = [
     { value: "always_allow", label: t("tools.alwaysAllow"), tone: "positive" },
@@ -14,7 +14,10 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
     { value: "disabled", label: t("tools.disabled"), tone: "danger" },
   ];
 
-  const isLocked = tool.locked;
+  // A locked tool, or any tool when the gateway has no v2 tools-write endpoint
+  // (canEdit:false), shows its permission as a read-only badge. Rendering an
+  // editable select whose change silently fails to persist is fake readiness.
+  const isLocked = tool.locked || !canEdit;
   const current =
     permissionStates.find((p) => p.value === tool.state) || permissionStates[1];
   const isDefault = tool.state === tool.default_state;
@@ -83,20 +86,26 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
 
 export function ToolsTab({ searchQuery = "" }) {
   const t = useT();
-  const { tools, query, setPermission, savedTools } = useTools();
+  const { tools, query, status, setPermission, savedTools } = useTools();
+
+  // No v2 tools-write endpoint exists yet (useTools status:'todo'): permission
+  // changes resolve against a stub that never persists. Gate the editable
+  // controls behind a real backend so the rows present as read-only instead of
+  // implying a capability the gateway cannot prove ("No fake readiness").
+  const canEdit = status !== 'todo';
 
   if (query.isLoading) {
     return html`
       <${Card} padding="md">
-        <div className="mb-4 h-3 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+        <div className="v2-skeleton mb-4 h-3 w-28 rounded" />
         ${[1, 2, 3, 4, 5].map(
           (i) => html`
             <div
               key=${i}
               className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3.5 first:border-0"
             >
-              <div className="h-4 w-36 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-              <div className="h-8 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+              <div className="v2-skeleton h-4 w-36 rounded" />
+              <div className="v2-skeleton h-8 w-28 rounded" />
             </div>
           `
         )}
@@ -151,6 +160,7 @@ export function ToolsTab({ searchQuery = "" }) {
                   <${ToolRow}
                     key=${tool.name}
                     tool=${tool}
+                    canEdit=${canEdit}
                     onPermissionChange=${setPermission}
                     isSaved=${savedTools[tool.name]}
                   />

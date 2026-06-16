@@ -6,6 +6,7 @@ import { Input, FormField, Label } from "../../../design-system/input.js";
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { useUsers } from "../hooks/useUsers.js";
+import { SettingsNotWritable } from './settings-not-writable.js';
 import { matchesSearch } from "../lib/settings-search.js";
 
 function CreateUserForm({ onCreate, isCreating, error }) {
@@ -137,21 +138,21 @@ function UserRow({ user }) {
 
 export function UsersTab({ searchQuery = "" }) {
   const t = useT();
-  const { users, query, isForbidden, createUser, createError, isCreating } =
+  const { users, query, status, isForbidden, createUser, createError, isCreating } =
     useUsers();
 
   if (query.isLoading) {
     return html`
       <${Card} padding="md">
-        <div className="mb-4 h-3 w-24 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+        <div className="v2-skeleton mb-4 h-3 w-24 rounded" />
         ${[1, 2, 3].map(
           (i) => html`
             <div
               key=${i}
               className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3.5 first:border-0"
             >
-              <div className="h-4 w-32 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-              <div className="h-6 w-20 animate-pulse rounded-full bg-[var(--v2-surface-muted)]" />
+              <div className="v2-skeleton h-4 w-32 rounded" />
+              <div className="v2-skeleton h-6 w-20 rounded-full" />
             </div>
           `
         )}
@@ -183,6 +184,15 @@ export function UsersTab({ searchQuery = "" }) {
         </p>
       <//>
     `;
+  }
+
+  // The users backend is a permanent stub: reads return { todo: true } and every
+  // write returns { success: false }. Rendering the add-user form here would be a
+  // dead affordance that silently no-ops. Show the honest not-writable state
+  // instead, mirroring the agent/networking/tools/skills tabs. Design Law:
+  // "No fake readiness."
+  if (status === 'todo') {
+    return html`<${SettingsNotWritable} />`;
   }
 
   const filteredUsers = users.filter((user) =>

@@ -34,7 +34,15 @@ export function useSettings() {
     // "Saved" indicator (and never flips `needsRestart`).
     mutationFn: async ({ key, value }) =>
       throwIfApiFailed(await updateSetting(key, value), "Save failed"),
-    onSuccess: (_data, { key, value }) => {
+    onSuccess: (data, { key, value }) => {
+      // `throwIfApiFailed` already rejects an explicit `{ success: false }`, but a
+      // `{ todo: true }` stub resolves as a non-failure and would otherwise flash a
+      // fake "Saved" / flip `needsRestart`. Bail out before asserting a persisted
+      // change the gateway never actually made ("No fake readiness").
+      if (data?.success === false || data?.todo) {
+        return;
+      }
+
       queryClient.setQueryData(["settings-export"], (old) => {
         if (!old) return old;
         const next = { ...old, settings: { ...old.settings } };
@@ -62,7 +70,12 @@ export function useSettings() {
 
   const importMutation = useMutation({
     mutationFn: importSettingsPayload,
-    onSuccess: (_data, payload) => {
+    onSuccess: (data, payload) => {
+      // Mirror the save gate: a stub import that resolves `{ success: false }` /
+      // `{ todo: true }` must not invalidate or assert a restart it never made.
+      if (data?.success === false || data?.todo) {
+        return;
+      }
       queryClient.invalidateQueries({ queryKey: ["settings-export"] });
       const importedKeys = Object.keys(payload?.settings || {});
       if (importedKeys.some((key) => RESTART_REQUIRED_KEYS.has(key))) {

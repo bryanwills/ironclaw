@@ -130,11 +130,14 @@ function WebLanding({
  * composer rather than firing blind, since two of the three start with
  * attaching a file. This whole path is desktop-only (see EmptyState gate).
  * ------------------------------------------------------------------------- */
-function greetingKey() {
-  const hour = new Date().getHours();
-  if (hour < 12) return "chat.heroMorning";
-  if (hour < 18) return "chat.heroAfternoon";
-  return "chat.heroEvening";
+// Three distinct i18n keys, one per part of day, so the greeting reads as a
+// real time-of-day acknowledgement rather than a single static line. Exported
+// so the hour-branch contract test can pin the morning/afternoon/evening split
+// without rendering the whole front door.
+export function greetingKey(hour = new Date().getHours()) {
+  if (hour < 12) return 'chat.heroMorning';
+  if (hour < 18) return 'chat.heroAfternoon';
+  return 'chat.heroEvening';
 }
 
 function relativeAge(iso, t) {

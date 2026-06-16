@@ -1,3 +1,6 @@
+import { Link } from "react-router";
+import { Button } from "../../design-system/button.js";
+import { EmptyPanel } from "../../design-system/primitives.js";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { useLogs } from "./hooks/useLogs.js";
@@ -9,13 +12,13 @@ const LEVEL_COLORS = {
   trace: "text-[var(--v2-text-muted)]",
   debug: "text-[color-mix(in_srgb,var(--v2-accent)_80%,white)]",
   info: "text-[var(--v2-text-strong)]",
-  warn: "text-yellow-400",
-  error: "text-red-400",
+  warn: "text-[var(--v2-warning-text)]",
+  error: "text-[var(--v2-danger-text)]",
 };
 
 const LEVEL_BG = {
-  warn: "bg-yellow-500/5",
-  error: "bg-red-500/8",
+  warn: "bg-[var(--v2-warning-soft)]",
+  error: "bg-[var(--v2-danger-soft)]",
 };
 
 function LogEntry({ entry }) {
@@ -88,7 +91,7 @@ function ToolbarSelect({ value, onChange, options, labelKey, t }) {
     <select
       value=${value}
       onChange=${(e) => onChange(e.target.value)}
-      className="v2-select h-8 min-w-0 rounded-[8px] px-2.5 py-0 text-xs"
+      className="v2-select h-11 min-w-0 rounded-[8px] px-2.5 py-0 text-xs"
     >
       ${options.map(
         (opt) => html`<option key=${opt} value=${opt}>${t(labelKey(opt))}</option>`
@@ -128,9 +131,17 @@ export function LogsPage() {
     serverLevel,
     changeServerLevel,
     scope,
+    status,
     isLoading,
     error,
   } = useLogs();
+
+  // The stream lifecycle controls (auto-scroll, pause/resume, clear, server
+  // level) act on a live log stream. When no stream is proven (status:'todo'),
+  // rendering them would imply a controllable stream that has no source — fake
+  // readiness. Gate them on a live stream; the named level + target filters stay
+  // so the toolbar keeps its labelled, accessible controls.
+  const liveStream = status !== 'todo';
 
   const outputRef = React.useRef(null);
   const followLatestRef = React.useRef(true);
@@ -169,48 +180,51 @@ export function LogsPage() {
           value=${targetFilter}
           onInput=${(e) => setTargetFilter(e.target.value)}
           placeholder=${t("logs.filterTarget")}
-          className="h-8 min-w-[10rem] flex-1 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-3 text-xs text-[var(--v2-text-base)] placeholder:text-[var(--v2-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--v2-accent)]"
+          className="h-11 min-w-[10rem] flex-1 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-3 text-xs text-[var(--v2-text-base)] placeholder:text-[var(--v2-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--v2-accent)]"
         />
 
-        <div className="flex items-center gap-2 ml-auto">
-          <span className="hidden tabular-nums text-xs text-[var(--v2-text-muted)] sm:inline">
-            ${t("logs.entryCount", { count: totalCount })}
-          </span>
+        ${liveStream &&
+        html`
+          <div className="flex items-center gap-2 ml-auto">
+            <span className="hidden tabular-nums text-xs text-[var(--v2-text-muted)] sm:inline">
+              ${t("logs.entryCount", { count: totalCount })}
+            </span>
 
-          <!-- Auto-scroll toggle -->
-          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-[var(--v2-text-muted)]">
-            <input
-              type="checkbox"
-              checked=${autoScroll}
-              onChange=${(e) => setAutoScroll(e.target.checked)}
-              className="h-3.5 w-3.5 accent-[var(--v2-accent)]"
-            />
-            ${t("logs.autoScroll")}
-          </label>
+            <!-- Auto-scroll toggle -->
+            <label className="flex h-11 cursor-pointer items-center gap-1.5 text-xs text-[var(--v2-text-muted)]">
+              <input
+                type="checkbox"
+                checked=${autoScroll}
+                onChange=${(e) => setAutoScroll(e.target.checked)}
+                className="h-3.5 w-3.5 accent-[var(--v2-accent)]"
+              />
+              ${t('logs.autoScroll')}
+            </label>
 
-          <!-- Pause/Resume -->
-          <button
-            onClick=${togglePause}
-            className=${[
-              "h-8 rounded-[8px] px-3 text-xs font-medium",
-              paused
-                ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]"
-                : "border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-            ].join(" ")}
-          >
-            ${paused ? t("logs.resume") : t("logs.pause")}
-          </button>
+            <!-- Pause/Resume -->
+            <button
+              onClick=${togglePause}
+              className=${[
+                "h-11 rounded-[8px] px-3 text-xs font-medium",
+                paused
+                  ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]"
+                  : "border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+              ].join(" ")}
+            >
+              ${paused ? t('logs.resume') : t('logs.pause')}
+            </button>
 
-          <!-- Clear -->
-          <button
-            onClick=${() => {
-              if (confirm(t("logs.confirmClear"))) clearEntries();
-            }}
-            className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-          >
-            ${t("logs.clear")}
-          </button>
-        </div>
+            <!-- Clear -->
+            <button
+              onClick=${() => {
+                if (confirm(t('logs.confirmClear'))) clearEntries();
+              }}
+              className="h-11 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+            >
+              ${t('logs.clear')}
+            </button>
+          </div>
+        `}
 
         ${activeScope.length > 0 &&
         html`
@@ -232,7 +246,8 @@ export function LogsPage() {
         `}
 
         <!-- Server log level -->
-        ${serverLevel != null &&
+        ${liveStream &&
+        serverLevel != null &&
         html`
           <div className="flex w-full items-center gap-2 border-t border-[var(--v2-panel-border)] pt-2 text-xs text-[var(--v2-text-muted)]">
             <span>${t("logs.serverLevel")}</span>
@@ -245,7 +260,7 @@ export function LogsPage() {
             />
             <span className="ml-auto tabular-nums">
               ${t("logs.entryCount", { count: totalCount })}
-              ${paused ? html`<span className="ml-1 text-yellow-400">${t("logs.pausedBadge")}</span>` : null}
+              ${paused ? html`<span className="ml-1 text-[var(--v2-warning-text)]">${t("logs.pausedBadge")}</span>` : null}
             </span>
           </div>
         `}
@@ -260,7 +275,7 @@ export function LogsPage() {
         ${error && hasEntries
           ? html`
               <div
-                className="sticky top-0 z-10 border-b border-red-500/25 bg-red-950/70 px-4 py-2 text-xs text-red-100 backdrop-blur"
+                className="sticky top-0 z-10 border-b border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-2 text-xs text-[var(--v2-danger-text)] backdrop-blur"
               >
                 ${t("error.loadFailed", {
                   what: t("nav.logs"),
@@ -272,7 +287,7 @@ export function LogsPage() {
         ${error && !hasEntries
           ? html`
               <div
-                className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"
+                className="flex h-full items-center justify-center px-6 text-center text-sm text-[var(--v2-danger-text)]"
               >
                 ${t("error.loadFailed", {
                   what: t("nav.logs"),
@@ -282,18 +297,20 @@ export function LogsPage() {
             `
           : isLoading && !hasEntries
             ? html`
-                <div
-                  className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
-                >
-                  ${t("common.loading")}
+                <div className="flex h-full items-center justify-center p-6">
+                  <div className="w-full max-w-md space-y-2">
+                    ${[1, 2, 3, 4, 5].map(
+                      (i) => html`<div key=${i} className="v2-skeleton h-4 w-full rounded" />`
+                    )}
+                  </div>
                 </div>
               `
             : !hasEntries
           ? html`
-              <div
-                className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
-              >
-                ${t("logs.empty")}
+              <div className="flex h-full items-center justify-center p-6">
+                <${EmptyPanel} title=${t('nav.logs')} description=${t('logs.empty')}>
+                  <${Button} as=${Link} to="/chat" variant="primary">${t('nav.chat')}<//>
+                <//>
               </div>
             `
           : entries.map(

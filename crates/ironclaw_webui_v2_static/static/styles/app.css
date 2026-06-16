@@ -30,7 +30,7 @@
   --v2-text:        #243244;
   --v2-text-strong: #0f1720;
   --v2-text-muted:  #5f7183;
-  --v2-text-faint:  #8a9aab;
+  --v2-text-faint:  #67707c;
   --v2-inverse:     #ffffff;
   --v2-ink:         #0f1720;
 
@@ -41,17 +41,25 @@
   --v2-accent:       #2e9de2;
   --v2-accent-strong:#1678bd;
   --v2-accent-soft:  rgba(76, 167, 230, 0.12);
-  --v2-accent-text:  #146fae;
+  --v2-accent-text:  #0a64ba;
 
   /* Semantic colours */
   --v2-positive-soft: rgba(32, 210, 154, 0.13);
-  --v2-positive-text: #087a5d;
+  --v2-positive-text: #077254;
   --v2-warning-soft:  rgba(245, 193, 91, 0.18);
   --v2-warning-text:  #8b5b00;
   --v2-danger-soft:   rgba(255, 100, 128, 0.12);
   --v2-danger-text:   #b42342;
   --v2-info-soft:     rgba(76, 167, 230, 0.12);
-  --v2-info-text:     #146fae;
+  --v2-info-text:     #136aa6;
+
+  /* Flat signal-blue button fill (no gradient) */
+  --v2-accent-btn: #0077d4;
+
+  /* The agent's hand (DESIGN.md): gold — generated work, proposals */
+  --v2-gold:      #b07a00;
+  --v2-gold-soft: rgba(251, 191, 36, 0.16);
+  --v2-gold-text: #8a6100;
 
   background: var(--v2-canvas);
 }
@@ -79,7 +87,7 @@
   --v2-text:        rgba(255, 255, 255, 0.82);
   --v2-text-strong: var(--text-primary, #ffffff);
   --v2-text-muted:  var(--text-secondary, rgba(255, 255, 255, 0.6));
-  --v2-text-faint:  var(--text-tertiary, rgba(255, 255, 255, 0.45));
+  --v2-text-faint:  var(--text-tertiary, rgba(196, 211, 235, 0.66));
   --v2-inverse:     var(--text-inverse, #111111);
   --v2-ink:         var(--accent-primary, #4ca7e6);
 
@@ -98,6 +106,12 @@
   --v2-danger-text:   var(--text-danger, #ff6480);
   --v2-info-soft:     rgba(76, 167, 230, 0.14);
   --v2-info-text:     var(--accent-primary-soft, #8fc8f2);
+
+  --v2-accent-btn: #0077d4;
+
+  --v2-gold:      #fbbf24;
+  --v2-gold-soft: rgba(251, 191, 36, 0.14);
+  --v2-gold-text: #fbbf24;
 }
 
 :root[data-theme="light"] {
@@ -279,11 +293,6 @@ input:focus, select:focus, textarea:focus {
   border-radius: 6px;
 }
 
-@keyframes v2-skeleton-shimmer {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.55; }
-}
-
 .v2-chat-composer {
   border: 1px solid var(--v2-panel-border);
   background: var(--v2-card-bg);
@@ -452,4 +461,24 @@ input:focus, select:focus, textarea:focus {
 .markdown-body .hljs-meta,
 .markdown-body .hljs-doctag {
   color: var(--v2-danger-text);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Desktop convergence — additive motion (appended).
+   The convergence tokens (--v2-accent-btn, --v2-gold*) live in the primary
+   :root / :root[data-theme="dark"] scopes above so the contrast guard, which
+   parses the first block per theme, resolves them. Consumed by the
+   design-system Button, Badge/StatCard gold tone, and the .v2-breathing-dot
+   live-indicator motion below.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── Breathing-dot motion ────────────────────────────────────────── */
+/* The live-status dot (Badge/StatCard "success"/"positive"/"signal") carries
+   running meaning, so it is the one recurring motion allowed. The class is a
+   no-op above; this override gives it the breathe animation, gated behind
+   prefers-reduced-motion so the opt-out is respected. */
+@media (prefers-reduced-motion: no-preference) {
+  .v2-breathing-dot {
+    animation: v2-breathe 2.4s ease-in-out infinite !important;
+  }
 }

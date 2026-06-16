@@ -277,9 +277,7 @@ function DesktopInferenceTab({
 
 function Skeleton({ className = "" }) {
   return html`
-    <div
-      className=${"rounded animate-pulse bg-[var(--v2-surface-muted)] " + className}
-    />
+    <div className=${"v2-skeleton rounded " + className} />
   `;
 }
 

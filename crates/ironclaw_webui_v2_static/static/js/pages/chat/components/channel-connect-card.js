@@ -2,6 +2,18 @@ import { SlackPairingSection } from '../../../components/slack-pairing-section.j
 import { Icon } from '../../../design-system/icons.js';
 import { html } from '../../../lib/html.js';
 
+// The Slack personal-pairing renderer is the only renderer that drives an
+// inbound proof-code handshake, and only for the Slack channel. Pinned as a
+// named predicate so the gate that mounts SlackPairingSection can't drift to a
+// different channel/strategy combination without the contract test catching it.
+export function isSlackStrategy(connectAction, strategy) {
+  return (
+    connectAction?.channel === 'slack' &&
+    strategy === 'inbound_proof_code' &&
+    connectAction?.strategy === strategy
+  );
+}
+
 export function ChannelConnectCard({ connectAction, onDismiss }) {
   if (!connectAction) return null;
   const channel = connectAction.channel;
@@ -27,7 +39,7 @@ export function ChannelConnectCard({ connectAction, onDismiss }) {
         `}
       </div>
 
-      ${channel === 'slack' && connectAction.strategy === 'inbound_proof_code'
+      ${isSlackStrategy(connectAction, connectAction.strategy)
         ? html`<${SlackPairingSection} action=${connectAction.action} />`
         : connectAction.strategy === 'extension_setup_link'
           ? html`
