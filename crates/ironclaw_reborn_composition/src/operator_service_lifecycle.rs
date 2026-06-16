@@ -5,9 +5,13 @@
 //! fixed `ironclaw-reborn` unit/label and fixed command argv shapes; browser
 //! input can select an action, not a command line.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, UserId};
@@ -62,6 +66,37 @@ impl ServiceCommandRunner for SystemCommandRunner {
             success: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         })
+    }
+}
+
+fn write_service_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "local service unit path is a symlink",
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        file.write_all(contents.as_bytes())?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
     }
 }
 
@@ -245,11 +280,11 @@ impl RebornLocalServiceLifecycle {
         }
         let write = match self.platform {
             ServicePlatform::Linux => match self.systemd_unit(action) {
-                Ok(unit) => std::fs::write(&path, unit),
+                Ok(unit) => write_service_file(&path, &unit),
                 Err(response) => return response,
             },
             ServicePlatform::Macos => match self.launchd_plist(action) {
-                Ok(plist) => std::fs::write(&path, plist),
+                Ok(plist) => write_service_file(&path, &plist),
                 Err(response) => return response,
             },
             ServicePlatform::Unsupported => unreachable!("handled above"),
@@ -659,6 +694,16 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    fn assert_service_file_owner_only(path: &Path) {
+        let mode = std::fs::metadata(path)
+            .expect("service file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
     #[tokio::test]
     async fn linux_install_writes_unit_and_runs_allowlisted_systemctl_commands() {
         let temp = TempDir::new().expect("tempdir");
@@ -677,7 +722,9 @@ mod tests {
 
         assert_eq!(response.state, RebornServiceLifecycleState::Installed);
         let unit_path = temp.path().join(".config/systemd/user").join(SYSTEMD_UNIT);
-        let unit = std::fs::read_to_string(unit_path).expect("unit file");
+        let unit = std::fs::read_to_string(&unit_path).expect("unit file");
+        #[cfg(unix)]
+        assert_service_file_owner_only(&unit_path);
         assert!(unit.contains("ExecStart=\"/usr/local/bin/ironclaw-reborn\" serve"));
         assert_eq!(
             runner.calls(),
@@ -723,6 +770,37 @@ mod tests {
         let unit_path = temp.path().join(".config/systemd/user").join(SYSTEMD_UNIT);
         let unit = std::fs::read_to_string(unit_path).expect("unit file");
         assert!(unit.contains("ExecStart=\"/usr/local/bin/iron%%claw-$$reborn\" serve"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_rejects_symlinked_service_file_path() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new("inactive"));
+        let service = linux_service(&temp, runner.clone());
+        let unit_dir = temp.path().join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).expect("unit dir");
+        let target = temp.path().join("target.service");
+        std::os::unix::fs::symlink(&target, unit_dir.join(SYSTEMD_UNIT)).expect("unit symlink");
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Install,
+                },
+            )
+            .await
+            .expect("install response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Failed);
+        assert!(
+            response
+                .message
+                .contains("local service unit could not be written")
+        );
+        assert!(!target.exists());
+        assert!(runner.calls().is_empty());
     }
 
     #[tokio::test]
@@ -862,6 +940,26 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn macos_stop_failure_returns_failed_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new(""));
+        runner.fail_command("launchctl", &["stop", LAUNCHD_LABEL]);
+        let service = macos_service(&temp, runner);
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Stop,
+                },
+            )
+            .await
+            .expect("stop response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Failed);
     }
 
     #[tokio::test]

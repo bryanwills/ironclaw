@@ -146,6 +146,7 @@ ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 ironclaw_webui_v2_static = { path = "../ironclaw_webui_v2_static", optional = true }
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libc = "0.2"
 # axum + tower middleware stack used by the `webui_serve` module. Each
 # entry is feature-gated so non-beta builds carry no HTTP surface code.
 axum = { version = "0.8", optional = true }
