@@ -27,6 +27,10 @@ const paths = {
       d="M5 17.5v2.7h14v-2.7"
     />`,
 
+  external: html`<path d="M14 4h6v6" /><path d="M20 4 10 14" /><path
+      d="M18 13v5.5H5.5v-12H11"
+    />`,
+
   file: html`<path d="M6.5 3.5h7.2L18 7.8v12.7H6.5v-17Z" /><path
       d="M13.7 3.5V8H18"
     />`,

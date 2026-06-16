@@ -17,6 +17,27 @@ import { Badge } from "./badge.js";
 /** Backwards-compat alias so existing `import { StatusPill }` still works. */
 export { Badge, Badge as StatusPill };
 
+/* ── tone → dot color ──────────────────────────────────────────────── */
+/**
+ * Maps a Badge tone to the semantic v2 text token used for StatCard's quiet
+ * accent dot. Mirrors the `text-*` half of Badge's tone map so the indicator
+ * color stays in step with the rest of the system, while keeping the tone as
+ * STYLING only — the token string is never rendered as copy. Unknown tones fall
+ * back to muted.
+ */
+const STAT_DOT_COLOR = {
+  success:  "bg-[var(--v2-positive-text)]",
+  positive: "bg-[var(--v2-positive-text)]",
+  signal:   "bg-[var(--v2-positive-text)]",
+  warning:  "bg-[var(--v2-warning-text)]",
+  copper:   "bg-[var(--v2-warning-text)]",
+  danger:   "bg-[var(--v2-danger-text)]",
+  info:     "bg-[var(--v2-info-text)]",
+  gold:     "bg-[var(--v2-gold-text)]",
+  accent:   "bg-[var(--v2-accent-text)]",
+  muted:    "bg-[var(--v2-text-muted)]",
+};
+
 /**
  * Panel — thin wrapper over Card so existing `import { Panel }` still works.
  * Usage: <${Panel} className="p-5"> … <//>
@@ -35,12 +56,17 @@ export function cx(...classes) {
 /**
  * A labelled metric card used in summary strips and admin dashboards.
  *
+ * The default indicator is a quiet accent dot (color driven by `tone`). For
+ * backwards-compat, callers that pass `badgeLabel` still get the original
+ * labelled Badge chip instead of the dot.
+ *
  * Props
  *   label      string
  *   value      string | number
- *   tone       Badge tone
- *   badgeLabel string (optional) — Badge text; defaults to the tone keyword.
- *     Pass a translated label so the chip is not an English tone name.
+ *   tone       Badge tone (also drives the quiet dot color)
+ *   badgeLabel string (optional) — when provided, renders the labelled Badge
+ *     chip (the legacy behaviour) instead of the quiet dot. Pass a translated
+ *     label so the chip is not an English tone name.
  *   detail     string (optional sub-text)
  *   showDivider boolean
  *   className  string
@@ -88,7 +114,15 @@ export function StatCard({
             ${detail}
           </div>`}
         </div>
-        <${Badge} tone=${tone} label=${badgeLabel ?? tone} />
+        ${badgeLabel != null
+          ? html`<${Badge} tone=${tone} label=${badgeLabel} />`
+          : html`<span
+              aria-hidden="true"
+              className=${cn(
+                "mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full",
+                STAT_DOT_COLOR[tone] ?? STAT_DOT_COLOR.muted
+              )}
+            />`}
       </div>
     </div>
   `;

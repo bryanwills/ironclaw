@@ -1,11 +1,11 @@
 /**
  * Badge / StatusPill
  *
- * A small labelled chip with a coloured dot.  All styling is via Tailwind
- * arbitrary values — no app.css classes.
+ * A small labelled chip with a coloured dot. Styling is via Tailwind
+ * arbitrary values plus the semantic v2-breathing-dot motion hook.
  *
  * Props
- *   tone     "success" | "warning" | "danger" | "muted" | "signal" | "info"
+ *   tone     "success" | "warning" | "danger" | "muted" | "signal" | "info" | "gold"
  *   label    string
  *   dot      boolean (default true)
  *   size     "sm" (default) | "md"
@@ -31,6 +31,8 @@ const toneClasses = {
     "border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]",
   info:
     "border-[color-mix(in_srgb,var(--v2-info-text)_30%,var(--v2-panel-border))] bg-[var(--v2-info-soft)] text-[var(--v2-info-text)]",
+  gold:
+    "border-[color-mix(in_srgb,var(--v2-gold)_34%,var(--v2-panel-border))] bg-[var(--v2-gold-soft)] text-[var(--v2-gold-text)]",
   accent:
     "border-[color-mix(in_srgb,var(--v2-accent-text)_30%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]",
   muted:
@@ -61,7 +63,7 @@ export function Badge({ tone = "muted", label, dot = true, size = "md", classNam
         html`<span
           className=${cn(
             "h-1.5 w-1.5 shrink-0 rounded-full bg-current",
-            isLive && "animate-[v2-breathe_2s_ease-in-out_infinite]"
+            isLive && "v2-breathing-dot"
           )}
         />`}
       ${label}

@@ -1,4 +1,5 @@
 import { React } from "../lib/html.js";
+import { isDesktopRuntime } from "../lib/api.js";
 
 const THEME_STORAGE_KEY = "ironclaw:v2-theme";
 
@@ -11,6 +12,10 @@ function getInitialTheme() {
     if (current === "light" || current === "dark") return current;
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
     if (stored === "light" || stored === "dark") return stored;
+    // The packaged desktop app defaults to the operator surface (dark) for
+    // stronger visual hierarchy and density. On the web, honor the OS
+    // preference so the hosted UI matches the user's system setting.
+    if (isDesktopRuntime()) return "dark";
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   } catch (_) {
     return "light";

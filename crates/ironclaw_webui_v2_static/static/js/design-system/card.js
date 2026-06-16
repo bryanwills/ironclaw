@@ -25,7 +25,7 @@ import { cn } from "../utils/cn.js";
 /* ─── Variant ─────────────────────────────────────────────────────── */
 // --v2-card-bg     : solid panel surface
 // --v2-card-border : transparent in dark (shadow-only), subtle in light
-// --v2-card-shadow : drop shadow in dark, none in light
+// --v2-card-shadow : generally none; panels lift through borders/surface only
 
 const VARIANTS = {
   default:
@@ -41,9 +41,9 @@ const VARIANTS = {
 /* ─── Radius ──────────────────────────────────────────────────────── */
 
 const RADII = {
-  sm: "rounded-[14px]",
-  md: "rounded-[1.25rem] md:rounded-[1.5rem]",
-  lg: "rounded-[1.5rem]",
+  sm: "rounded-[8px]",
+  md: "rounded-[12px]",
+  lg: "rounded-[16px]",
 };
 
 /* ─── Padding ─────────────────────────────────────────────────────── */
