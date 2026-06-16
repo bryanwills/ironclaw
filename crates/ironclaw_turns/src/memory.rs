@@ -2152,6 +2152,7 @@ impl Inner {
             subagent_depth,
             spawn_tree_root_run_id,
             product_context,
+            auth_resume_disposition: None,
         };
         self.active_locks.insert(
             lock_key.clone(),
