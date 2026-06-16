@@ -279,7 +279,11 @@ function DesktopFrontDoor({
   ];
   const setupBlocked =
     context?.sendBlocked === true || providerSetupRequired || providerSetupFailed;
-  const suggestionsBlocked = Boolean(setupBlocked || disabled);
+  // Suggestions are example prompts the user cannot run until a model is
+  // connected — and while the gateway check is still in flight. Hide them
+  // entirely in those states rather than rendering a dead, clickable-looking
+  // grid (design law: no fake readiness).
+  const suggestionsBlocked = Boolean(setupBlocked || providerSetupChecking || disabled);
   const briefRows = [
     providerSetupChecking
       ? {
@@ -402,22 +406,11 @@ function DesktopFrontDoor({
         </section>
 
         <section className="min-w-0">
-          <${ChatInput}
-            onSend=${onSend}
-            disabled=${disabled}
-            initialText=${draft || initialText}
-            resetKey=${`${resetKey}-${draftKey}`}
-            variant="hero"
-            context=${context}
-            statusText=${statusText}
-            canCancel=${canCancel}
-            onCancel=${onCancel}
-          />
-
           ${setupBlocked &&
           html`
             <div
-              className="mt-3 rounded-[12px] border border-[color-mix(in_srgb,var(--v2-warning-text)_34%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-4 py-3"
+              className="mb-3 rounded-[12px] border border-[color-mix(in_srgb,var(--v2-warning-text)_34%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-4 py-3"
+              data-testid="frontdoor-setup-callout"
             >
               <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
                 Connect NEAR AI Cloud once, then ask naturally.
@@ -434,6 +427,18 @@ function DesktopFrontDoor({
             </div>
           `}
 
+          <${ChatInput}
+            onSend=${onSend}
+            disabled=${disabled}
+            initialText=${draft || initialText}
+            resetKey=${`${resetKey}-${draftKey}`}
+            variant="hero"
+            context=${context}
+            statusText=${statusText}
+            canCancel=${canCancel}
+            onCancel=${onCancel}
+          />
+
           <${FrontDoorPanel}
             sinceAway=${frontDoor.sinceAway}
             sinceAwayTotal=${frontDoor.sinceAwayTotal}
@@ -442,43 +447,40 @@ function DesktopFrontDoor({
             handled=${frontDoor.handled}
           />
 
-          <div className="mt-4 grid gap-2">
-            ${suggestions.map(
-              (item) => html`
-                <button
-                  type="button"
-                  key=${item.title}
-                  disabled=${suggestionsBlocked}
-                  onClick=${() => prefill(item.prompt)}
-                  className=${[
-                    "v2-button group grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-3 text-left",
-                    suggestionsBlocked
-                      ? "cursor-not-allowed opacity-60"
-                      : "hover:border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))]",
-                  ].join(" ")}
-                >
-                  <span
-                    className="grid h-8 w-8 place-items-center rounded-[8px] border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] group-hover:border-[var(--v2-accent)] group-hover:text-[var(--v2-accent-text)]"
+          ${!suggestionsBlocked &&
+          html`
+            <div className="mt-4 grid gap-2" data-testid="frontdoor-suggestions">
+              ${suggestions.map(
+                (item) => html`
+                  <button
+                    type="button"
+                    key=${item.title}
+                    onClick=${() => prefill(item.prompt)}
+                    className="v2-button group grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-3 text-left hover:border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))]"
                   >
-                    <${Icon} name=${item.icon} className="h-4 w-4" />
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block text-sm font-semibold text-[var(--v2-text-strong)]">
-                      ${item.title}
+                    <span
+                      className="grid h-8 w-8 place-items-center rounded-[8px] border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] group-hover:border-[var(--v2-accent)] group-hover:text-[var(--v2-accent-text)]"
+                    >
+                      <${Icon} name=${item.icon} className="h-4 w-4" />
                     </span>
-                    <span className="mt-0.5 block text-sm leading-5 text-[var(--v2-text-muted)]">
-                      ${item.detail}
+                    <span className="min-w-0">
+                      <span className="block text-sm font-semibold text-[var(--v2-text-strong)]">
+                        ${item.title}
+                      </span>
+                      <span className="mt-0.5 block text-sm leading-5 text-[var(--v2-text-muted)]">
+                        ${item.detail}
+                      </span>
                     </span>
-                  </span>
-                  <span
-                    className="self-start whitespace-nowrap text-xs font-medium text-[var(--v2-text-faint)]"
-                  >
-                    ${suggestionsBlocked ? "Setup first" : t("chat.suggestionUse")}
-                  </span>
-                </button>
-              `
-            )}
-          </div>
+                    <span
+                      className="self-start whitespace-nowrap text-xs font-medium text-[var(--v2-text-faint)]"
+                    >
+                      ${t("chat.suggestionUse")}
+                    </span>
+                  </button>
+                `
+              )}
+            </div>
+          `}
         </section>
       </div>
     </div>
@@ -504,18 +506,19 @@ function FrontDoorPanel({ sinceAway = [], sinceAwayTotal = 0, needsYou, needsYou
       <${FrontDoorSection}
         title="Needs you"
         emptyTitle="Nothing waiting on you."
-        emptyDetail="Approvals and auth gates appear here when they are backed by a thread."
+        emptyDetail="Threads waiting on your approval or recovery appear here."
         tone="warning"
         items=${needsYou}
         count=${needsYouTotal}
       />
-      <${FrontDoorSection}
+      ${handled.length > 0 &&
+      html`<${FrontDoorSection}
         title="Handled"
         emptyTitle="No completed receipts yet."
         emptyDetail="Completed actions, automations, and recent work appear here once IronClaw has evidence."
         tone="gold"
         items=${handled}
-      />
+      />`}
     </div>
   `;
 }

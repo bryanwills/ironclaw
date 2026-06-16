@@ -181,3 +181,31 @@ test('a completed automation shown under "since away" is not duplicated under ha
     ['Older digest']
   );
 });
+
+test('buildFrontDoorData on a fully cold desk yields empty needs-you and handled (honest empty front door)', () => {
+  const data = buildFrontDoorData({
+    now,
+    lastSeenAt: null,
+    automations: [],
+    threads: [],
+    threadStates: new Map(),
+  });
+  assert.deepEqual(data.needsYou, []);
+  assert.equal(data.needsYouTotal, 0);
+  assert.deepEqual(data.handled, []);
+  assert.deepEqual(data.sinceAway, []);
+});
+
+test('a thread carrying only an in-thread state that is not NEEDS_ATTENTION/FAILED does not appear in needs-you', () => {
+  const data = buildFrontDoorData({
+    now,
+    threadStates: new Map([['busy-thread', THREAD_STATE.RUNNING]]),
+    threads: [
+      { id: 'busy-thread', title: 'Working thread', updated_at: '2026-06-13T17:50:00.000Z' },
+    ],
+  });
+  assert.equal(
+    data.needsYou.some((row) => row.id === 'busy-thread'),
+    false,
+  );
+});

@@ -308,9 +308,19 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
             (row) => html`
               <div
                 key=${row.label}
+                data-row-tone=${row.emphasis && row.value
+                  ? risk.tone === "danger"
+                    ? "danger"
+                    : "structured"
+                  : "plain"}
                 className=${"grid gap-1" +
                 (row.emphasis && row.value
-                  ? " rounded-[8px] border border-[color-mix(in_srgb,var(--v2-gold)_22%,var(--v2-panel-border))] bg-[var(--v2-canvas-strong)] px-2.5 py-2"
+                  ? risk.tone === "danger"
+                    ? // High-risk gate (send/trade/export/delete/write/publish): the
+                      // destination + outbound-data rows decide whether money moves or
+                      // data leaves. Emphasize them in danger tone, not decorative gold.
+                      " rounded-[8px] border border-[color-mix(in_srgb,var(--v2-danger-text)_28%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-2.5 py-2"
+                    : " rounded-[8px] border border-[color-mix(in_srgb,var(--v2-gold)_22%,var(--v2-panel-border))] bg-[var(--v2-canvas-strong)] px-2.5 py-2"
                   : "")}
               >
                 <dt
@@ -321,7 +331,9 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
                 <dd
                   className=${"text-sm leading-5 " +
                   (row.emphasis && row.value
-                    ? "font-medium text-[var(--v2-text-strong)]"
+                    ? risk.tone === "danger"
+                      ? "font-semibold text-[var(--v2-danger-text)]"
+                      : "font-medium text-[var(--v2-text-strong)]"
                     : "text-[var(--v2-text-muted)]")}
                 >
                   ${row.value || t("approval.notSpecified")}

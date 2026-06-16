@@ -318,9 +318,19 @@ export function useSetupSubmit(packageRef, onSuccess) {
 
   return useMutation({
     mutationFn: ({ secrets, fields }) => submitExtensionSetup(packageRef, secrets, fields),
-    onSuccess: (res) => {
-      queryClient.invalidateQueries({ queryKey: ["extensions"] });
-      queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+    // Await the active refetch BEFORE signaling success: invalidateQueries only
+    // marks queries stale, so closing the modal on the bare mutation result would
+    // dismiss it while the connector list still reads "setup needed" until a
+    // background refetch lands — a fake-readiness flash. Resolving the active
+    // refetch first means the caller acts on gateway-confirmed state.
+    onSuccess: async (res) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["extensions"], refetchType: "active" }),
+        queryClient.invalidateQueries({
+          queryKey: ["extension-setup", packageKey],
+          refetchType: "active",
+        }),
+      ]);
       if (onSuccess) onSuccess(res);
     },
   });

@@ -176,8 +176,12 @@ test('ApprovalCard names literal action fields, unknown outbound data, and short
     'sent-yet boundary uses strong text weight'
   );
   // Emphasis (strong-weight value + bordered cell) is present for the
-  // data-movement fields that actually carry data.
-  assert.match(all, /font-medium text-\[var\(--v2-text-strong\)\]/);
+  // data-movement fields that actually carry data. For a high-risk (danger)
+  // gate — the default fixture is a send_email — those egress fields escalate
+  // to danger tone so destination/outbound read as the safety crux, not the
+  // decorative gold used for benign structured fields.
+  assert.match(all, /font-semibold text-\[var\(--v2-danger-text\)\]/);
+  assert.match(all, /bg-\[var\(--v2-danger-soft\)\]/);
   // The outbound disclosures are anchored under the "What leaves the machine"
   // label, not stranded elsewhere on the card — the gate's data-egress claim
   // must be the thing that actually enumerates what egresses.
@@ -186,6 +190,19 @@ test('ApprovalCard names literal action fields, unknown outbound data, and short
     /What leaves the machine[^]*?subject: Draft services agreement[^]*?bcc: records@example\.com/,
     'outbound fields render under the outbound label'
   );
+  cleanups.forEach((cleanup) => cleanup());
+});
+
+test('ApprovalCard keeps benign (non-danger) egress fields on structured gold, not danger tone', () => {
+  const { tree, cleanups } = renderApprovalCard({
+    risk: { tone: 'muted', key: 'tool.riskRead', allowAlways: true },
+  });
+  const all = markup(tree);
+  // A low-risk gate's emphasized data-movement fields stay on the structured
+  // strong/gold treatment — danger tone is reserved for high-risk egress.
+  assert.match(all, /font-medium text-\[var\(--v2-text-strong\)\]/);
+  assert.doesNotMatch(all, /bg-\[var\(--v2-danger-soft\)\]/);
+  assert.doesNotMatch(all, /font-semibold text-\[var\(--v2-danger-text\)\]/);
   cleanups.forEach((cleanup) => cleanup());
 });
 

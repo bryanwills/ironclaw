@@ -11,7 +11,7 @@ export function SuggestionChips({ suggestions, onSelect }) {
             <button
               key=${text}
               onClick=${() => onSelect(text)}
-              className="v2-button rounded-full border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs text-iron-100 hover:border-signal/40 hover:text-signal"
+              className="v2-button rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-1.5 text-xs text-[var(--v2-text-muted)] hover:border-[var(--v2-accent)] hover:text-[var(--v2-accent-text)]"
             >
               ${text}
             </button>
