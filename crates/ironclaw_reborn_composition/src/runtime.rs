@@ -238,6 +238,9 @@ mod default_system_prompt_tests;
 #[cfg(all(test, feature = "root-llm-provider"))]
 #[path = "runtime/tests/learning_persona.rs"]
 mod learning_persona_tests;
+#[cfg(all(test, feature = "root-llm-provider"))]
+#[path = "runtime/tests/learning_reflection_e2e.rs"]
+mod learning_reflection_e2e_tests;
 mod local_dev;
 mod production;
 mod skills;
