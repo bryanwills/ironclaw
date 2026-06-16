@@ -691,6 +691,9 @@ impl HostRuntime for DefaultHostRuntime {
             approval_request_id,
         } = request;
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
+        let prior_approval_request_id = approval_request_id;
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
                 capability_id = %capability_id,
@@ -766,6 +769,12 @@ impl HostRuntime for DefaultHostRuntime {
                         required_secrets,
                         credential_requirements,
                     )),
+                    CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+                        if prior_approval_request_id.is_none() =>
+                    {
+                        self.translate_invocation_error(error, capability_id, scope, invocation_id)
+                            .await
+                    }
                     other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                         other,
                         capability_id,

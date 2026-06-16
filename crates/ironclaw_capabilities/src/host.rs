@@ -3,9 +3,10 @@ use ironclaw_authorization::{
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
-    CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, ExecutionContext,
-    InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate, ResourceScope,
+    ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, CapabilityDispatchRequest,
+    CapabilityDispatchResult, CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision,
+    DenyReason, ExecutionContext, InvocationFingerprint, InvocationId, Obligation, ProcessId,
+    ResourceEstimate, ResourceScope,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -83,6 +84,8 @@ enum ResumedLeaseState<'r> {
 /// method preamble before the shared tail begins.
 struct ResumedDispatchParams<'r> {
     run_state: &'r dyn RunStateStore,
+    approval_requests: Option<&'r dyn ApprovalRequestStore>,
+    run_state_approval_store: Option<&'r dyn RunStateApprovalStore>,
     scope: ResourceScope,
     invocation_id: InvocationId,
     capability_id: CapabilityId,
@@ -93,6 +96,20 @@ struct ResumedDispatchParams<'r> {
     descriptor: &'r CapabilityDescriptor,
     /// Approval-lease state for this resume.  See [`ResumedLeaseState`].
     lease_state: ResumedLeaseState<'r>,
+}
+
+struct ApprovalBlockParams<'r> {
+    run_state: Option<&'r dyn RunStateStore>,
+    approval_requests: Option<&'r dyn ApprovalRequestStore>,
+    run_state_approval_store: Option<&'r dyn RunStateApprovalStore>,
+    scope: &'r ResourceScope,
+    invocation_id: InvocationId,
+    context: &'r ExecutionContext,
+    capability_id: &'r CapabilityId,
+    estimate: &'r ResourceEstimate,
+    action_kind: CapabilityActionKind,
+    invocation_fingerprint: &'r InvocationFingerprint,
+    rollback_context: &'static str,
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -324,169 +341,27 @@ where
                     approval_request_id = %approval_request_id,
                     "capability authorization requires approval"
                 );
-                if let Err(error) = validate_approval_request_matches_invocation(
-                    &approval,
-                    &request.context,
-                    &request.capability_id,
-                    &request.estimate,
-                    CapabilityActionKind::Dispatch,
-                ) {
-                    debug!(
-                        approval_request_id = %approval_request_id,
-                        "capability approval request did not match invocation"
-                    );
-                    fail_run_if_configured(
-                        self.run_state,
-                        &scope,
+                save_pending_and_block_approval(
+                    approval,
+                    ApprovalBlockParams {
+                        run_state: self.run_state,
+                        approval_requests: self.approval_requests,
+                        run_state_approval_store: self.run_state_approval_store,
+                        scope: &scope,
                         invocation_id,
-                        "ApprovalRequestMismatch",
-                    )
-                    .await;
-                    return Err(error);
-                }
-
-                if let Some(existing) = &approval.invocation_fingerprint {
-                    if existing != &invocation_fingerprint {
-                        debug!(
-                            approval_request_id = %approval_request_id,
-                            "capability approval fingerprint mismatch"
-                        );
-                        fail_run_if_configured(
-                            self.run_state,
-                            &scope,
-                            invocation_id,
-                            "InvocationFingerprintMismatch",
-                        )
-                        .await;
-                        return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
-                            capability: request.capability_id,
-                        });
-                    }
-                } else {
-                    approval.invocation_fingerprint = Some(invocation_fingerprint);
-                }
-
-                match (self.run_state, self.approval_requests) {
-                    (Some(run_state), Some(approval_requests)) => {
-                        if let Some(combined_store) = self.run_state_approval_store {
-                            if let Err(error) = combined_store
-                                .save_pending_and_block_approval(
-                                    scope.clone(),
-                                    invocation_id,
-                                    approval,
-                                )
-                                .await
-                            {
-                                debug!(
-                                    approval_request_id = %approval_request_id,
-                                    "capability approval block failed in combined store"
-                                );
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            debug!(
-                                approval_request_id = %approval_request_id,
-                                "capability approval persisted and run state blocked"
-                            );
-                        } else {
-                            let approval_id = approval.id;
-                            if let Err(error) = approval_requests
-                                .save_pending(scope.clone(), approval.clone())
-                                .await
-                            {
-                                debug!(
-                                    approval_request_id = %approval_id,
-                                    "capability approval request persistence failed"
-                                );
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalStore",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            if let Err(error) = run_state
-                                .block_approval(&scope, invocation_id, approval)
-                                .await
-                            {
-                                debug!(
-                                    approval_request_id = %approval_id,
-                                    "capability run state approval block failed"
-                                );
-                                if let Err(discard_error) =
-                                    approval_requests.discard_pending(&scope, approval_id).await
-                                {
-                                    warn!(
-                                        approval_request_id = %approval_id,
-                                        invocation_id = %invocation_id,
-                                        transition_error_kind = run_state_error_kind(&discard_error),
-                                        "approval rollback failed after run-state block transition failed",
-                                    );
-                                }
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            debug!(
-                                approval_request_id = %approval_id,
-                                "capability approval persisted and run state blocked"
-                            );
-                        }
-                    }
-                    (Some(run_state), None) => {
-                        debug!(
-                            approval_request_id = %approval_request_id,
-                            store = "approval_requests",
-                            "capability approval cannot block because store is missing"
-                        );
-                        fail_run_if_configured(
-                            Some(run_state),
-                            &scope,
-                            invocation_id,
-                            "ApprovalStoreMissing",
-                        )
-                        .await;
-                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
-                            store: "approval_requests",
-                        });
-                    }
-                    (None, Some(_)) => {
-                        debug!(
-                            approval_request_id = %approval_request_id,
-                            store = "run_state",
-                            "capability approval cannot block because store is missing"
-                        );
-                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
-                            store: "run_state",
-                        });
-                    }
-                    (None, None) => {
-                        debug!(
-                            approval_request_id = %approval_request_id,
-                            store = "run_state and approval_requests",
-                            "capability approval cannot block because stores are missing"
-                        );
-                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
-                            store: "run_state and approval_requests",
-                        });
-                    }
-                }
+                        context: &request.context,
+                        capability_id: &request.capability_id,
+                        estimate: &request.estimate,
+                        action_kind: CapabilityActionKind::Dispatch,
+                        invocation_fingerprint: &invocation_fingerprint,
+                        rollback_context: "dispatch",
+                    },
+                )
+                .await?;
+                debug!(
+                    approval_request_id = %approval_request_id,
+                    "capability approval persisted and run state blocked"
+                );
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: request.capability_id,
                 });
@@ -752,6 +627,8 @@ where
 
         self.dispatch_resumed_capability(ResumedDispatchParams {
             run_state,
+            approval_requests: self.approval_requests,
+            run_state_approval_store: self.run_state_approval_store,
             scope,
             invocation_id,
             capability_id,
@@ -1074,6 +951,8 @@ where
 
         self.dispatch_resumed_capability(ResumedDispatchParams {
             run_state,
+            approval_requests: self.approval_requests,
+            run_state_approval_store: self.run_state_approval_store,
             scope,
             invocation_id,
             capability_id,
@@ -1536,126 +1415,23 @@ where
                     &request.capability_id,
                     &request.input,
                 );
-                if let Err(error) = validate_approval_request_matches_invocation(
-                    &approval,
-                    &request.context,
-                    &request.capability_id,
-                    &request.estimate,
-                    CapabilityActionKind::Spawn,
-                ) {
-                    fail_run_if_configured(
-                        self.run_state,
-                        &scope,
+                save_pending_and_block_approval(
+                    approval,
+                    ApprovalBlockParams {
+                        run_state: self.run_state,
+                        approval_requests: self.approval_requests,
+                        run_state_approval_store: self.run_state_approval_store,
+                        scope: &scope,
                         invocation_id,
-                        "ApprovalRequestMismatch",
-                    )
-                    .await;
-                    return Err(error);
-                }
-
-                if let Some(existing) = &approval.invocation_fingerprint {
-                    if existing != &invocation_fingerprint {
-                        fail_run_if_configured(
-                            self.run_state,
-                            &scope,
-                            invocation_id,
-                            "InvocationFingerprintMismatch",
-                        )
-                        .await;
-                        return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
-                            capability: request.capability_id,
-                        });
-                    }
-                } else {
-                    approval.invocation_fingerprint = Some(invocation_fingerprint);
-                }
-
-                match (self.run_state, self.approval_requests) {
-                    (Some(run_state), Some(approval_requests)) => {
-                        if let Some(combined_store) = self.run_state_approval_store {
-                            if let Err(error) = combined_store
-                                .save_pending_and_block_approval(
-                                    scope.clone(),
-                                    invocation_id,
-                                    approval,
-                                )
-                                .await
-                            {
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                        } else {
-                            let approval_id = approval.id;
-                            if let Err(error) = approval_requests
-                                .save_pending(scope.clone(), approval.clone())
-                                .await
-                            {
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalStore",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            if let Err(error) = run_state
-                                .block_approval(&scope, invocation_id, approval)
-                                .await
-                            {
-                                if let Err(discard_error) =
-                                    approval_requests.discard_pending(&scope, approval_id).await
-                                {
-                                    warn!(
-                                        approval_request_id = %approval_id,
-                                        invocation_id = %invocation_id,
-                                        transition_error_kind = run_state_error_kind(&discard_error),
-                                        "approval rollback failed after spawn run-state block transition failed",
-                                    );
-                                }
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                        }
-                    }
-                    (Some(run_state), None) => {
-                        fail_run_if_configured(
-                            Some(run_state),
-                            &scope,
-                            invocation_id,
-                            "ApprovalStoreMissing",
-                        )
-                        .await;
-                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
-                            store: "approval_requests",
-                        });
-                    }
-                    (None, Some(_)) => {
-                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
-                            store: "run_state",
-                        });
-                    }
-                    (None, None) => {
-                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
-                            store: "run_state and approval_requests",
-                        });
-                    }
-                }
+                        context: &request.context,
+                        capability_id: &request.capability_id,
+                        estimate: &request.estimate,
+                        action_kind: CapabilityActionKind::Spawn,
+                        invocation_fingerprint: &invocation_fingerprint,
+                        rollback_context: "spawn",
+                    },
+                )
+                .await?;
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: request.capability_id,
                 });
@@ -1734,6 +1510,8 @@ where
     ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
         let ResumedDispatchParams {
             run_state,
+            approval_requests,
+            run_state_approval_store,
             scope,
             invocation_id,
             capability_id,
@@ -1785,7 +1563,22 @@ where
                     reason,
                 });
             }
-            Decision::RequireApproval { .. } => {
+            Decision::RequireApproval { request: approval } => {
+                if matches!(lease_state, ResumedLeaseState::NoPriorLease) {
+                    return block_resumed_auth_for_approval(
+                        run_state,
+                        approval_requests,
+                        run_state_approval_store,
+                        approval,
+                        &scope,
+                        invocation_id,
+                        &authorized_context,
+                        &capability_id,
+                        &estimate,
+                        &input,
+                    )
+                    .await;
+                }
                 fail_run_if_configured(
                     Some(run_state),
                     &scope,
@@ -2145,6 +1938,180 @@ fn add_capability_input_display_hint(
     if command.truncated {
         reason.push_str("\n[truncated]");
     }
+}
+
+async fn save_pending_and_block_approval(
+    mut approval: ApprovalRequest,
+    params: ApprovalBlockParams<'_>,
+) -> Result<ApprovalRequestId, CapabilityInvocationError> {
+    let approval_request_id = approval.id;
+    if let Err(error) = validate_approval_request_matches_invocation(
+        &approval,
+        params.context,
+        params.capability_id,
+        params.estimate,
+        params.action_kind,
+    ) {
+        fail_run_if_configured(
+            params.run_state,
+            params.scope,
+            params.invocation_id,
+            "ApprovalRequestMismatch",
+        )
+        .await;
+        return Err(error);
+    }
+
+    if let Some(existing) = &approval.invocation_fingerprint {
+        if existing != params.invocation_fingerprint {
+            fail_run_if_configured(
+                params.run_state,
+                params.scope,
+                params.invocation_id,
+                "InvocationFingerprintMismatch",
+            )
+            .await;
+            return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
+                capability: params.capability_id.clone(),
+            });
+        }
+    } else {
+        approval.invocation_fingerprint = Some(params.invocation_fingerprint.clone());
+    }
+
+    let Some(run_state) = params.run_state else {
+        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+            capability: params.capability_id.clone(),
+            store: if params.approval_requests.is_some() {
+                "run_state"
+            } else {
+                "run_state and approval_requests"
+            },
+        });
+    };
+    let Some(approval_requests) = params.approval_requests else {
+        fail_run_if_configured(
+            Some(run_state),
+            params.scope,
+            params.invocation_id,
+            "ApprovalStoreMissing",
+        )
+        .await;
+        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+            capability: params.capability_id.clone(),
+            store: "approval_requests",
+        });
+    };
+
+    if let Some(combined_store) = params.run_state_approval_store {
+        if let Err(error) = combined_store
+            .save_pending_and_block_approval(params.scope.clone(), params.invocation_id, approval)
+            .await
+        {
+            fail_run_if_configured(
+                Some(run_state),
+                params.scope,
+                params.invocation_id,
+                "ApprovalBlock",
+            )
+            .await;
+            return Err(CapabilityInvocationError::from(error));
+        }
+    } else {
+        let approval_id = approval.id;
+        if let Err(error) = approval_requests
+            .save_pending(params.scope.clone(), approval.clone())
+            .await
+        {
+            fail_run_if_configured(
+                Some(run_state),
+                params.scope,
+                params.invocation_id,
+                "ApprovalStore",
+            )
+            .await;
+            return Err(CapabilityInvocationError::from(error));
+        }
+        if let Err(error) = run_state
+            .block_approval(params.scope, params.invocation_id, approval)
+            .await
+        {
+            if let Err(discard_error) = approval_requests
+                .discard_pending(params.scope, approval_id)
+                .await
+            {
+                warn!(
+                    approval_request_id = %approval_id,
+                    invocation_id = %params.invocation_id,
+                    transition_error_kind = run_state_error_kind(&discard_error),
+                    rollback_context = params.rollback_context,
+                    "approval rollback failed after run-state block transition failed",
+                );
+            }
+            fail_run_if_configured(
+                Some(run_state),
+                params.scope,
+                params.invocation_id,
+                "ApprovalBlock",
+            )
+            .await;
+            return Err(CapabilityInvocationError::from(error));
+        }
+    }
+
+    Ok(approval_request_id)
+}
+
+async fn block_resumed_auth_for_approval(
+    run_state: &dyn RunStateStore,
+    approval_requests: Option<&dyn ApprovalRequestStore>,
+    run_state_approval_store: Option<&dyn RunStateApprovalStore>,
+    approval: ApprovalRequest,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+    context: &ExecutionContext,
+    capability_id: &CapabilityId,
+    estimate: &ResourceEstimate,
+    input: &serde_json::Value,
+) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+    let invocation_fingerprint = invocation_fingerprint_for_kind(
+        CapabilityActionKind::Dispatch,
+        scope,
+        capability_id,
+        estimate,
+        input,
+    )
+    .map_err(|source| CapabilityInvocationError::InvocationFingerprint {
+        capability: capability_id.clone(),
+        source,
+    })?;
+    let approval_request_id = save_pending_and_block_approval(
+        approval,
+        ApprovalBlockParams {
+            run_state: Some(run_state),
+            approval_requests,
+            run_state_approval_store,
+            scope,
+            invocation_id,
+            context,
+            capability_id,
+            estimate,
+            action_kind: CapabilityActionKind::Dispatch,
+            invocation_fingerprint: &invocation_fingerprint,
+            rollback_context: "auth-resume",
+        },
+    )
+    .await?;
+
+    debug!(
+        approval_request_id = %approval_request_id,
+        invocation_id = %invocation_id,
+        capability_id = %capability_id,
+        "auth-resume without prior approval blocked for approval",
+    );
+    Err(CapabilityInvocationError::AuthorizationRequiresApproval {
+        capability: capability_id.clone(),
+    })
 }
 
 /// Cleans up a claimed lease after a resume-path error using best-effort

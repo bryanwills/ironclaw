@@ -3128,6 +3128,56 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
     );
 }
 
+#[tokio::test]
+async fn host_runtime_services_auth_resume_without_prior_approval_returns_first_approval_gate() {
+    // This mirrors the extension-activation ordering that triggered the QA
+    // failure: credential preflight blocks at auth before the side-effecting
+    // activation has passed an approval gate. After auth completes, auth-resume
+    // must surface the first approval gate, not fail the run as a capability
+    // authorization error.
+    let fixture = approval_resume_fixture();
+    let runtime = fixture.services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "auth first, approval second"});
+
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    let outcome = runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let gate = match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate,
+        other => panic!("expected first approval gate after auth-resume, got {other:?}"),
+    };
+    assert_eq!(gate.capability_id, script_capability_id());
+    assert_blocked_approval_run(&fixture, &scope, invocation_id, gate.approval_request_id).await;
+}
+
 // ---------------------------------------------------------------------------
 // auth-resume preflight rejection must fail the BlockedAuth run record
 //

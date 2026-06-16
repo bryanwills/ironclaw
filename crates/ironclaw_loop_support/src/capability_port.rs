@@ -2229,7 +2229,7 @@ fn runtime_model_visible_failure_to_loop(
         RuntimeFailureKind::Authorization | RuntimeFailureKind::PolicyDenied
     ) {
         return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-            reason_kind: capability_denied_reason_kind(failure.kind.as_str())?,
+            reason_kind: runtime_denied_reason_kind(failure.kind)?,
             safe_summary: runtime_failure_safe_summary(&failure, "capability authorization denied"),
         }));
     }
@@ -2315,6 +2315,16 @@ fn capability_denied_reason_kind(
             "capability denied reason kind could not be represented",
         )
     })
+}
+
+fn runtime_denied_reason_kind(
+    kind: RuntimeFailureKind,
+) -> Result<CapabilityDeniedReasonKind, AgentLoopHostError> {
+    match kind {
+        RuntimeFailureKind::Authorization => capability_denied_reason_kind("access_denied"),
+        RuntimeFailureKind::PolicyDenied => capability_denied_reason_kind("policy_denied"),
+        _ => capability_denied_reason_kind(kind.as_str()),
+    }
 }
 
 fn capability_failure_kind(
@@ -2677,6 +2687,19 @@ mod tests {
             CapabilityOutcome::Denied(denied)
                 if denied.reason_kind.as_str() == "policy_denied"
                     && denied.safe_summary == "policy denied request"
+        ));
+
+        let authorization_denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::Authorization,
+            Some("capability access denied".to_string()),
+        ))
+        .expect("convert authorization denial");
+        assert!(matches!(
+            authorization_denied,
+            CapabilityOutcome::Denied(denied)
+                if denied.reason_kind.as_str() == "access_denied"
+                    && denied.safe_summary == "capability access denied"
         ));
 
         let operation_failed = runtime_failure_to_loop(RuntimeCapabilityFailure::new(

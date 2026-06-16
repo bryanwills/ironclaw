@@ -724,6 +724,113 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
 }
 
 #[tokio::test]
+async fn auth_resume_without_prior_approval_surfaces_first_approval_gate() {
+    let capability_id = CapabilityId::new("gmail.list_messages").expect("valid capability id");
+    let provider_id = ExtensionId::new("gmail").expect("valid provider id");
+    let approval_request_id = ApprovalRequestId::new();
+    let runtime = Arc::new(
+        QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
+                RuntimeAuthGate {
+                    gate_id: RuntimeGateId::new(),
+                    capability_id: capability_id.clone(),
+                    reason: RuntimeBlockedReason::AuthRequired,
+                    required_secrets: Vec::new(),
+                    credential_requirements: Vec::new(),
+                },
+            ))],
+        )
+        .with_auth_resume_outcomes(vec![Ok(RuntimeCapabilityOutcome::ApprovalRequired(
+            RuntimeApprovalGate {
+                approval_request_id,
+                capability_id: capability_id.clone(),
+                reason: RuntimeBlockedReason::ApprovalRequired,
+            },
+        ))]),
+    );
+    let input = serde_json::json!({
+        "query": "newer_than:1d",
+        "max_results": 3
+    });
+    let resolver = Arc::new(OneShotInputResolver::new(input.clone()));
+    let context = execution_context("thread-auth-resume-first-approval");
+    let run_context = loop_run_context(&context).await;
+    let input_ref = CapabilityInputRef::new(format!("input:{}:gmail-list", run_context.run_id))
+        .expect("valid input ref");
+    let port = HostRuntimeLoopCapabilityPortFactory::new(
+        runtime.clone(),
+        visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+            provider_id,
+            dispatch_trust_decision(),
+        )])),
+        resolver,
+        Arc::new(RecordingResultWriter::default()),
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+    )
+    .port_for_run_context(run_context);
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("visible capabilities load");
+
+    let auth_blocked = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version.clone(),
+            capability_id: capability_id.clone(),
+            input_ref: input_ref.clone(),
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("first dispatch reaches auth gate");
+    let CapabilityOutcome::AuthRequired {
+        auth_resume: Some(auth_resume),
+        ..
+    } = auth_blocked
+    else {
+        panic!("auth gate must carry auth-resume metadata, got {auth_blocked:?}");
+    };
+    assert!(
+        auth_resume.prior_approval.is_none(),
+        "this regression covers auth before any approval was granted"
+    );
+
+    let auth_resumed = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id,
+            input_ref,
+            approval_resume: None,
+            auth_resume: Some(auth_resume),
+        })
+        .await
+        .expect("auth resume may surface the first approval gate");
+
+    let CapabilityOutcome::ApprovalRequired {
+        gate_ref,
+        safe_summary,
+        approval_resume: Some(approval_resume),
+    } = auth_resumed
+    else {
+        panic!("expected first approval gate after auth resume, got {auth_resumed:?}");
+    };
+    assert!(gate_ref.as_str().starts_with("gate:approval-"));
+    assert_eq!(safe_summary, "capability requires approval");
+    assert_eq!(approval_resume.approval_request_id, approval_request_id);
+    assert_eq!(approval_resume.input, input);
+    let requests = runtime.auth_resume_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].approval_request_id, None,
+        "auth resume must preserve that no approval existed yet"
+    );
+}
+
+#[tokio::test]
 async fn runtime_capability_unknown_outcome_with_invalid_kind_does_not_emit_failure_milestone() {
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");

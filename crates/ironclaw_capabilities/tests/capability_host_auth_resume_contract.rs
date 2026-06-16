@@ -687,6 +687,80 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
     assert_eq!(run.status, RunStatus::Completed);
 }
 
+#[tokio::test]
+async fn auth_resume_json_without_approval_request_id_can_block_for_first_approval() {
+    // Credential preflight can block a capability before the user has approved
+    // the dispatch. After the user completes auth, auth-resume must be allowed
+    // to open that first approval gate instead of failing the blocked run.
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "auth first, approval second"});
+
+    run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: capability_id(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+            approval_request_id: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+        ),
+        "expected first approval gate from auth-resume, got {err:?}"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "auth-resume must not dispatch before the first approval is granted"
+    );
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::BlockedApproval);
+    let approval_request_id = run
+        .approval_request_id
+        .expect("BlockedApproval run must point at approval request");
+    let approval = approval_requests
+        .get(&scope, approval_request_id)
+        .await
+        .unwrap()
+        .expect("approval request must be persisted");
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert!(
+        approval.request.invocation_fingerprint.is_some(),
+        "approval request must be fingerprinted for later resume"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // REAL-PATH BUG: lease is Revoked after resume_json dispatch auth bounce
 //
