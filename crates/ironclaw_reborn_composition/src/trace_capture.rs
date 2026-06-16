@@ -614,9 +614,19 @@ mod tests {
         // Treat a not-yet-created queue dir as empty, but fail loudly on any
         // other IO error so negative-path assertions can't pass for the wrong
         // reason (per .claude/rules/error-handling.md).
-        match std::fs::read_dir(queue_dir(scope)) {
+        let dir = queue_dir(scope);
+        match std::fs::read_dir(&dir) {
             Ok(entries) => entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
+                .map(|entry| {
+                    entry
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "failed to read a trace queue entry in {}: {error}",
+                                dir.display()
+                            )
+                        })
+                        .path()
+                })
                 .filter(|path| {
                     // Envelope entries only — exclude `.held.json` hold
                     // sidecars the flush path may write next to them.
