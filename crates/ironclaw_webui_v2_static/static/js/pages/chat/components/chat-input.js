@@ -208,6 +208,7 @@ export function ChatInput({
           ? html`
               <textarea
                 ref=${textareaRef}
+                data-testid="chat-composer"
                 value=${text}
                 onChange=${(e) => setText(e.target.value)}
                 onKeyDown=${onKeyDown}

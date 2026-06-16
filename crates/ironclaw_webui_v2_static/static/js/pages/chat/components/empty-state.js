@@ -321,7 +321,7 @@ function DesktopFrontDoor({
 
   return html`
     <div
-      className="v2-page-entrance flex min-h-0 flex-1 items-center overflow-y-auto px-4 py-6 sm:px-8 lg:px-12"
+      className="v2-page-entrance flex min-h-0 flex-1 items-start overflow-y-auto px-4 py-6 sm:px-8 lg:px-12"
     >
       <div
         className="mx-auto grid w-full max-w-6xl gap-7 lg:grid-cols-[1.08fr_0.92fr] lg:items-start"

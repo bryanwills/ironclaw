@@ -1,9 +1,8 @@
-import { Link, Navigate, Outlet, useLocation, useNavigate } from "react-router";
+import { Link, Outlet, useLocation, useNavigate } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme.js";
 import { Button } from "../design-system/button.js";
 import { useGatewayStatus } from "../hooks/useGatewayStatus.js";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders.js";
-import { shouldRouteToOnboarding } from "../lib/onboarding-gate.js";
 import { useSidebar } from "../hooks/useSidebar.js";
 import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
@@ -70,11 +69,11 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
   });
   const status = statusQuery.data;
 
-  // First-run gate: with no LLM provider configured yet, route to the welcome
-  // screen so the user picks one before hitting a dead chat. Settings stays
-  // reachable so they can configure there too; /welcome itself is exempt to
-  // avoid a redirect loop. Defaults are not treated as "configured" — the gate
-  // keys off the honest `hasActiveProvider` (a persisted selection).
+  // No first-run redirect: the chat front door is the prepared desk and renders
+  // its own "Connect NEAR AI Cloud" setup callout as the primary action when no
+  // model is active, so a no-model user sets up in place instead of being
+  // bounced to /welcome. (Sign-in itself is still gated by RequireAuth.) The
+  // provider snapshot below powers the inline model/setup affordances.
   const location = useLocation();
   const navigate = useNavigate();
   const llmProviders = useLlmProviders({
@@ -82,21 +81,6 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
     gatewayStatus: status,
     enabled: isAdmin,
   });
-  // Onboarding is admin-only; non-admins never see the first-run gate.
-  // Even for an admin, skip onboarding when the providers query errored —
-  // under multi-user / SSO auth the operator LLM-config route is gated
-  // (404), the provider is configured operator-side at boot, and `/welcome`
-  // can't reach the gated config UI, so a failed query must not trap an
-  // admin SSO user on `/welcome`.
-  const needsOnboarding =
-    isAdmin &&
-    shouldRouteToOnboarding({
-      isLoading: llmProviders.isLoading,
-      hasActiveProvider: llmProviders.hasActiveProvider,
-      isError: llmProviders.isError,
-    });
-  const onboardingExempt =
-    location.pathname === "/welcome" || location.pathname.startsWith("/settings");
 
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   React.useEffect(() => {
@@ -125,9 +109,6 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
     },
     [navigate, threadsState, t]
   );
-  if (needsOnboarding && !onboardingExempt) {
-    return html`<${Navigate} to="/welcome" replace />`;
-  }
 
   return html`
     <div className="flex h-[100dvh] overflow-hidden bg-[var(--v2-canvas)]">
