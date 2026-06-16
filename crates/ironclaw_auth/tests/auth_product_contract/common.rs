@@ -3,17 +3,24 @@ pub use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowKind, AuthFlowManager,
     AuthFlowStatus, AuthGateRef, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccount, CredentialAccountLabel, CredentialAccountListRequest,
-    CredentialAccountMutation, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
+    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
     CredentialAccountStatus, CredentialAccountUpdate, CredentialAccountUpdateBinding,
-    CredentialOwnership, CredentialSetupService, InMemoryAuthProductServices, LifecyclePackageRef,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope,
-    SecretCleanupAction, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, TurnRunRef,
+    CredentialOwnership, CredentialRecoveryKind, CredentialRecoveryProjection,
+    CredentialRecoveryReason, CredentialRecoveryRequest, CredentialRefreshRequest,
+    CredentialSelectionInput, CredentialSetupService, InMemoryAuthProductServices,
+    LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    ProviderCallbackOutcome, ProviderScope, SecretCleanupAction, SecretCleanupQuarantineReason,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    TurnRunRef,
 };
-pub use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
+pub use ironclaw_host_api::{
+    ExtensionId, InvocationId, ResourceScope, SecretHandle, ThreadId, UserId,
+};
 pub use secrecy::SecretString;
 
 pub fn scope(user: &str) -> AuthProductScope {
@@ -23,6 +30,19 @@ pub fn scope(user: &str) -> AuthProductScope {
         AuthSurface::Web,
     )
     .with_session_id(AuthSessionId::new(format!("session-{user}")).expect("valid session"))
+}
+
+/// A scope for the same owner/session/surface as [`scope`] but carrying a
+/// distinct `thread_id` and a fresh `invocation_id`. Models an OAuth /
+/// manual-token reconnect that arrives from a different chat thread (and a new
+/// per-flow invocation) than the one the bound account was created in — the
+/// #4935 defect-A shape. At durable owner granularity this is the same owner,
+/// so the reconnect must update the existing account; full scope equality would
+/// reject it.
+pub fn reconnect_scope(user: &str, thread: &str) -> AuthProductScope {
+    let mut scope = scope(user);
+    scope.resource.thread_id = Some(ThreadId::new(thread).expect("valid thread"));
+    scope
 }
 
 pub fn provider() -> AuthProviderId {
@@ -89,6 +109,15 @@ pub fn account_request(
     }
 }
 
+pub fn account_ids(accounts: &[CredentialAccountProjection]) -> Vec<CredentialAccountId> {
+    let mut ids = accounts
+        .iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
 pub fn update_binding(account: &CredentialAccount) -> CredentialAccountUpdateBinding {
     CredentialAccountUpdateBinding {
         account_id: account.id,
@@ -104,6 +133,7 @@ pub async fn oauth_flow(
 ) -> ironclaw_auth::AuthFlowRecord {
     services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
@@ -140,6 +170,7 @@ pub async fn try_oauth_update_flow(
 ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
     services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
