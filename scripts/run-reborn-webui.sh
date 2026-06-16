@@ -123,7 +123,15 @@ export IRONCLAW_REBORN_WEBUI_USER_ID="${IRONCLAW_REBORN_WEBUI_USER_ID:-${config_
 # exact scheme/host/port/path match on it — both handled here automatically.
 GOOGLE_REDIRECT_PATH="/api/reborn/product-auth/oauth/google/callback"
 if [ -n "${IRONCLAW_REBORN_GOOGLE_CLIENT_ID:-}" ] || [ -n "${GOOGLE_CLIENT_ID:-}" ]; then
-  export IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI="${IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI:-http://$REBORN_HOST:$REBORN_PORT$GOOGLE_REDIRECT_PATH}"
+  # Wildcard bind addresses can't appear in a redirect URI — Google rejects them
+  # and there's no browser at 0.0.0.0/::. Fall back to loopback for the callback.
+  redirect_host="$REBORN_HOST"
+  if [ "$redirect_host" = "0.0.0.0" ] || [ "$redirect_host" = "::" ]; then
+    redirect_host="127.0.0.1"
+  fi
+  # Honor an explicit redirect URI (prefixed wins, then legacy GOOGLE_OAUTH_REDIRECT_URI)
+  # before auto-deriving, so a caller who set either legacy or new var isn't overridden.
+  export IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI="${IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI:-${GOOGLE_OAUTH_REDIRECT_URI:-http://$redirect_host:$REBORN_PORT$GOOGLE_REDIRECT_PATH}}"
   GOOGLE_OAUTH_STATUS="enabled (redirect: $IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI)"
   if [ -z "${IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET:-}" ] && [ -z "${GOOGLE_CLIENT_SECRET:-}" ]; then
     GOOGLE_OAUTH_STATUS="$GOOGLE_OAUTH_STATUS [public-client PKCE; no secret set]"
