@@ -1,11 +1,11 @@
-import { React } from "../lib/html.js";
+import { React } from '../lib/html.js';
 
 export function useTeeAttestation() {
   const endpoint = React.useMemo(() => getTeeEndpoint(window.location), []);
   const [teeInfo, setTeeInfo] = React.useState(null);
   const [report, setReport] = React.useState(null);
   const [reportLoading, setReportLoading] = React.useState(false);
-  const [reportError, setReportError] = React.useState("");
+  const [reportError, setReportError] = React.useState('');
   const [copied, setCopied] = React.useState(false);
 
   React.useEffect(() => {
@@ -13,7 +13,7 @@ export function useTeeAttestation() {
     const controller = new AbortController();
 
     fetch(`${endpoint.base}/instances/${encodeURIComponent(endpoint.instance)}/attestation`, {
-      signal: controller.signal,
+      signal: controller.signal
     })
       .then((response) => {
         if (!response.ok) throw new Error(String(response.status));
@@ -30,7 +30,7 @@ export function useTeeAttestation() {
   const loadReport = React.useCallback(async () => {
     if (!endpoint || report || reportLoading) return report;
     setReportLoading(true);
-    setReportError("");
+    setReportError('');
     try {
       const response = await fetch(`${endpoint.base}/attestation/report`);
       if (!response.ok) throw new Error(String(response.status));
@@ -38,7 +38,7 @@ export function useTeeAttestation() {
       setReport(data);
       return data;
     } catch (err) {
-      setReportError(err.message || "Could not load attestation report.");
+      setReportError(err.message || 'Could not load attestation report.');
       return null;
     } finally {
       setReportLoading(false);
@@ -64,25 +64,25 @@ export function useTeeAttestation() {
     reportLoading,
     copied,
     loadReport,
-    copyReport,
+    copyReport
   };
 }
 
 function getTeeEndpoint(location) {
   const hostname = location.hostname;
-  if (!hostname || hostname === "localhost" || isIpAddress(hostname)) {
+  if (!hostname || hostname === 'localhost' || isIpAddress(hostname)) {
     return null;
   }
 
-  const parts = hostname.split(".");
+  const parts = hostname.split('.');
   if (parts.length < 2) return null;
 
   return {
-    base: `${location.protocol}//api.${parts.slice(1).join(".")}`,
-    instance: parts[0],
+    base: `${location.protocol}//api.${parts.slice(1).join('.')}`,
+    instance: parts[0]
   };
 }
 
 function isIpAddress(hostname) {
-  return hostname.includes(":") || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
+  return hostname.includes(':') || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
 }

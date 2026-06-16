@@ -1,11 +1,11 @@
-import { Button } from "../../../design-system/button.js";
-import { StatusPill } from "../../../design-system/primitives.js";
-import { html } from "../../../lib/html.js";
+import { Button } from '../../../design-system/button.js';
+import { StatusPill } from '../../../design-system/primitives.js';
+import { html } from '../../../lib/html.js';
 import {
   formatRoutineDate,
   routineStatusTone,
-  verificationTone,
-} from "../lib/routines-presenters.js";
+  verificationTone
+} from '../lib/routines-presenters.js';
 
 export function RoutineRow({
   routine,
@@ -13,18 +13,18 @@ export function RoutineRow({
   onSelectRoutine,
   onTriggerRoutine,
   onToggleRoutine,
-  isBusy,
+  isBusy
 }) {
   const selected = selectedRoutineId === routine.id;
 
   return html`
     <article
       className=${[
-        "group flex flex-col gap-4 rounded-[18px] border p-5",
+        'group flex flex-col gap-4 rounded-[18px] border p-5',
         selected
-          ? "border-signal/35 bg-signal/10"
-          : "border-iron-700 bg-iron-800/60 hover:border-signal/30 hover:bg-iron-800/80",
-      ].join(" ")}
+          ? 'border-signal/35 bg-signal/10'
+          : 'border-iron-700 bg-iron-800/60 hover:border-signal/30 hover:bg-iron-800/80'
+      ].join(' ')}
     >
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <button onClick=${() => onSelectRoutine(routine.id)} className="min-w-0 text-left">
@@ -32,17 +32,19 @@ export function RoutineRow({
             <h3 className="truncate text-lg font-semibold text-iron-100">${routine.name}</h3>
             <${StatusPill}
               tone=${routineStatusTone(routine.status, routine.enabled)}
-              label=${routine.enabled ? routine.status : "disabled"}
+              label=${routine.enabled ? routine.status : 'disabled'}
             />
             <${StatusPill}
               tone=${verificationTone(routine.verification_status)}
-              label=${routine.verification_status || "unknown"}
+              label=${routine.verification_status || 'unknown'}
             />
           </div>
           <p className="mt-2 line-clamp-2 text-sm leading-6 text-iron-300">
-            ${routine.description || routine.trigger_summary || "No description"}
+            ${routine.description || routine.trigger_summary || 'No description'}
           </p>
-          <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
+          <div
+            className="mt-3 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300"
+          >
             <span>${routine.trigger_type}</span>
             <span>${routine.action_type}</span>
             <span>runs ${routine.run_count || 0}</span>
@@ -65,7 +67,7 @@ export function RoutineRow({
             disabled=${isBusy}
             onClick=${() => onToggleRoutine(routine.id)}
           >
-            ${routine.enabled ? "Disable" : "Enable"}
+            ${routine.enabled ? 'Disable' : 'Enable'}
           <//>
           <${Button}
             variant="ghost"

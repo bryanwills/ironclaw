@@ -10,11 +10,11 @@ export function fetchMissionDetail(_missionId) {
   return Promise.resolve(null);
 }
 export function fireMission(_missionId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 missions endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 missions endpoint' });
 }
 export function pauseMission(_missionId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 missions endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 missions endpoint' });
 }
 export function resumeMission(_missionId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 missions endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 missions endpoint' });
 }

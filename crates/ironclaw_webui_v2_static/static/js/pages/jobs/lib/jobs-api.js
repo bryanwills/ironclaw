@@ -11,20 +11,20 @@ export function fetchJobDetail(_jobId) {
   return Promise.resolve(null);
 }
 export function cancelJob(_jobId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 jobs endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 jobs endpoint' });
 }
 export function restartJob(_jobId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 jobs endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 jobs endpoint' });
 }
 export function fetchJobEvents(_jobId) {
   return Promise.resolve({ events: [], todo: true });
 }
 export function sendJobPrompt(_jobId, _payload) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 jobs endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 jobs endpoint' });
 }
-export function fetchJobFiles(_jobId, _path = "") {
+export function fetchJobFiles(_jobId, _path = '') {
   return Promise.resolve({ entries: [], todo: true });
 }
 export function readJobFile(_jobId, _path) {
-  return Promise.resolve({ content: "", todo: true });
+  return Promise.resolve({ content: '', todo: true });
 }

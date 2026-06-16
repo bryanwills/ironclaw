@@ -24,10 +24,9 @@ export function extractWorkspaceFilePaths(content) {
   const seen = new Set();
   const paths = [];
   for (const match of stripCodeSpans(content).matchAll(WORKSPACE_FILE_PATH)) {
-    // The regex ends at `\.[A-Za-z0-9]+`, so a match always terminates on an
-    // alphanumeric character — trailing sentence/link punctuation (`. , ) ]`)
-    // is never captured and needs no stripping here.
-    const path = match[0];
+    // Strip trailing punctuation that rides along when a path ends a sentence
+    // or closes a markdown link (e.g. `/workspace/report.csv).`).
+    const path = match[0].replace(/[.,;:)\]]+$/, "");
     if (!seen.has(path)) {
       seen.add(path);
       paths.push(path);

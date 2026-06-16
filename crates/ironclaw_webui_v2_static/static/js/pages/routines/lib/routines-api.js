@@ -10,11 +10,11 @@ export function fetchRoutineDetail(_routineId) {
   return Promise.resolve(null);
 }
 export function triggerRoutine(_routineId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 routines endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 routines endpoint' });
 }
 export function toggleRoutine(_routineId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 routines endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 routines endpoint' });
 }
 export function deleteRoutine(_routineId) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 routines endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 routines endpoint' });
 }

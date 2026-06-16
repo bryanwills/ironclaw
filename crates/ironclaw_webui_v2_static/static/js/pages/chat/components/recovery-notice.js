@@ -1,10 +1,12 @@
-import { html } from "../../../lib/html.js";
+import { html } from '../../../lib/html.js';
 
 export function RecoveryNotice({ notice, onRecover }) {
   return html`
-    <div className="mx-auto flex max-w-xl flex-wrap items-center justify-center gap-3 rounded-lg border border-copper/30 bg-copper/10 px-4 py-3 text-sm text-copper">
+    <div
+      className="mx-auto flex max-w-xl flex-wrap items-center justify-center gap-3 rounded-lg border border-copper/30 bg-copper/10 px-4 py-3 text-sm text-copper"
+    >
       <span>${notice.message}</span>
-      ${notice.status !== "loading" &&
+      ${notice.status !== 'loading' &&
       html`
         <button
           type="button"

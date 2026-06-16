@@ -1,7 +1,7 @@
-import { fetchAuthProviders } from "../../../lib/api.js";
-import { React } from "../../../lib/html.js";
+import { fetchAuthProviders } from '../../../lib/api.js';
+import { React } from '../../../lib/html.js';
 
-const OAUTH_PROVIDER_ORDER = ["google", "github", "apple"];
+const OAUTH_PROVIDER_ORDER = ['google', 'github', 'apple'];
 
 export function useOAuthProviders() {
   const [providers, setProviders] = React.useState([]);

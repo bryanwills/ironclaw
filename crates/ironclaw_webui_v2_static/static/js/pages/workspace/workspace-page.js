@@ -1,21 +1,18 @@
-import { useNavigate, useParams } from "react-router";
-import { Button } from "../../design-system/button.js";
-import { React, html } from "../../lib/html.js";
-import { useT } from "../../lib/i18n.js";
-import { FeedbackBanner } from "../projects/components/feedback-banner.js";
-import { WorkspaceSidebar } from "./components/workspace-sidebar.js";
-import { WorkspaceViewer } from "./components/workspace-viewer.js";
-import { useWorkspaceBrowser } from "./hooks/useWorkspaceBrowser.js";
-import {
-  DEFAULT_WORKSPACE_PATH,
-  routeForWorkspacePath,
-} from "./lib/workspace-presenters.js";
+import { useNavigate, useParams } from 'react-router';
+import { Button } from '../../design-system/button.js';
+import { React, html } from '../../lib/html.js';
+import { useT } from '../../lib/i18n.js';
+import { FeedbackBanner } from '../projects/components/feedback-banner.js';
+import { WorkspaceSidebar } from './components/workspace-sidebar.js';
+import { WorkspaceViewer } from './components/workspace-viewer.js';
+import { useWorkspaceBrowser } from './hooks/useWorkspaceBrowser.js';
+import { DEFAULT_WORKSPACE_PATH, routeForWorkspacePath } from './lib/workspace-presenters.js';
 
 export function WorkspacePage() {
   const t = useT();
   const navigate = useNavigate();
   const params = useParams();
-  const selectedPath = params["*"] || DEFAULT_WORKSPACE_PATH;
+  const selectedPath = params['*'] || DEFAULT_WORKSPACE_PATH;
   const workspace = useWorkspaceBrowser(selectedPath);
 
   const handleSelectFile = React.useCallback(
@@ -40,19 +37,14 @@ export function WorkspacePage() {
           ${workspace.error &&
           html`
             <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+              className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
             >
               ${workspace.error.message}
             </div>
           `}
-          <${FeedbackBanner}
-            result=${workspace.result}
-            onDismiss=${workspace.clearResult}
-          />
+          <${FeedbackBanner} result=${workspace.result} onDismiss=${workspace.clearResult} />
 
-          <div
-            className="grid min-h-0 flex-1 gap-5 xl:grid-cols-[340px_minmax(0,1fr)]"
-          >
+          <div className="grid min-h-0 flex-1 gap-5 xl:grid-cols-[340px_minmax(0,1fr)]">
             <${WorkspaceSidebar}
               search=${workspace.search}
               onSearchChange=${workspace.setSearch}

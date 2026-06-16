@@ -1,15 +1,17 @@
 export function normalizeSearchQuery(query) {
-  return String(query || "").trim().toLowerCase();
+  return String(query || '')
+    .trim()
+    .toLowerCase();
 }
 
 function stringifySearchValue(value) {
-  if (value === null || value === undefined) return "";
-  if (Array.isArray(value)) return value.map(stringifySearchValue).join(" ");
-  if (typeof value === "object") {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.map(stringifySearchValue).join(' ');
+  if (typeof value === 'object') {
     try {
       return JSON.stringify(value);
     } catch (_) {
-      return "";
+      return '';
     }
   }
   return String(value);
@@ -18,11 +20,7 @@ function stringifySearchValue(value) {
 export function matchesSearch(query, values) {
   const normalized = normalizeSearchQuery(query);
   if (!normalized) return true;
-  return values
-    .map(stringifySearchValue)
-    .join(" ")
-    .toLowerCase()
-    .includes(normalized);
+  return values.map(stringifySearchValue).join(' ').toLowerCase().includes(normalized);
 }
 
 export function filterSettingsSections(sections, settings, searchQuery, t) {
@@ -31,14 +29,14 @@ export function filterSettingsSections(sections, settings, searchQuery, t) {
 
   return sections
     .map((section) => {
-      const groupLabel = section.groupKey ? t(section.groupKey) : "";
+      const groupLabel = section.groupKey ? t(section.groupKey) : '';
       const fields = section.fields.filter((field) =>
         matchesSearch(normalized, [
           groupLabel,
           field.key,
           field.labelKey ? t(field.labelKey) : field.label,
           field.descKey ? t(field.descKey) : field.description,
-          settings[field.key],
+          settings[field.key]
         ])
       );
       return { ...section, fields };

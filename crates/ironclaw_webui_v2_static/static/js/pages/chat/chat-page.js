@@ -1,13 +1,13 @@
-import { useLocation, useNavigate, useOutletContext, useParams } from "react-router";
-import { React, html } from "../../lib/html.js";
-import { Chat } from "./chat.js";
+import { useLocation, useNavigate, useOutletContext, useParams } from 'react-router';
+import { React, html } from '../../lib/html.js';
+import { Chat } from './chat.js';
 
 export function ChatPage() {
   const { threadsState, gatewayStatus } = useOutletContext();
   const { threadId: urlThreadId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const composerDraft = location.state?.composerDraft || "";
+  const composerDraft = location.state?.composerDraft || '';
 
   React.useEffect(() => {
     if (urlThreadId && urlThreadId !== threadsState.activeThreadId) {
@@ -21,7 +21,7 @@ export function ChatPage() {
     (id, options = {}) => {
       if (!id) {
         threadsState.setActiveThreadId(null);
-        navigate("/chat", options);
+        navigate('/chat', options);
         return;
       }
       threadsState.setActiveThreadId(id);

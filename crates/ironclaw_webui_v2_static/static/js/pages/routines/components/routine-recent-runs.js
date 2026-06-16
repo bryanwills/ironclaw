@@ -1,11 +1,11 @@
-import { StatusPill } from "../../../design-system/primitives.js";
-import { html } from "../../../lib/html.js";
-import { formatRoutineDate } from "../lib/routines-presenters.js";
+import { StatusPill } from '../../../design-system/primitives.js';
+import { html } from '../../../lib/html.js';
+import { formatRoutineDate } from '../lib/routines-presenters.js';
 
 function runTone(status) {
-  if (status === "ok") return "success";
-  if (status === "running") return "warning";
-  return "danger";
+  if (status === 'ok') return 'success';
+  if (status === 'running') return 'warning';
+  return 'danger';
 }
 
 export function RoutineRecentRuns({ runs }) {

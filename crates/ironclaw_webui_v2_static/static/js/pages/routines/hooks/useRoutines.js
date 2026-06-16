@@ -1,58 +1,56 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { React } from '../../../lib/html.js';
 import {
   deleteRoutine as deleteRoutineRequest,
   fetchRoutines,
   fetchRoutinesSummary,
   toggleRoutine as toggleRoutineRequest,
-  triggerRoutine as triggerRoutineRequest,
-} from "../lib/routines-api.js";
+  triggerRoutine as triggerRoutineRequest
+} from '../lib/routines-api.js';
 
 export function useRoutines() {
   const queryClient = useQueryClient();
   const [actionResult, setActionResult] = React.useState(null);
 
   const summaryQuery = useQuery({
-    queryKey: ["routines-summary"],
+    queryKey: ['routines-summary'],
     queryFn: fetchRoutinesSummary,
-    refetchInterval: 5000,
+    refetchInterval: 5000
   });
 
   const routinesQuery = useQuery({
-    queryKey: ["routines"],
+    queryKey: ['routines'],
     queryFn: fetchRoutines,
-    refetchInterval: 5000,
+    refetchInterval: 5000
   });
 
   const invalidate = React.useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ["routines"] });
-    queryClient.invalidateQueries({ queryKey: ["routines-summary"] });
-    queryClient.invalidateQueries({ queryKey: ["routine-detail"] });
+    queryClient.invalidateQueries({ queryKey: ['routines'] });
+    queryClient.invalidateQueries({ queryKey: ['routines-summary'] });
+    queryClient.invalidateQueries({ queryKey: ['routine-detail'] });
   }, [queryClient]);
 
   const mutationOptions = (request, message) => ({
     mutationFn: ({ routineId }) => request(routineId),
     onSuccess: () => {
-      setActionResult({ type: "success", message });
+      setActionResult({ type: 'success', message });
       invalidate();
     },
     onError: (error) => {
       setActionResult({
-        type: "error",
-        message: error.message || "Unable to update routine",
+        type: 'error',
+        message: error.message || 'Unable to update routine'
       });
-    },
+    }
   });
 
   const triggerMutation = useMutation(
-    mutationOptions(triggerRoutineRequest, "Routine run queued.")
+    mutationOptions(triggerRoutineRequest, 'Routine run queued.')
   );
   const toggleMutation = useMutation(
-    mutationOptions(toggleRoutineRequest, "Routine status updated.")
+    mutationOptions(toggleRoutineRequest, 'Routine status updated.')
   );
-  const deleteMutation = useMutation(
-    mutationOptions(deleteRoutineRequest, "Routine deleted.")
-  );
+  const deleteMutation = useMutation(mutationOptions(deleteRoutineRequest, 'Routine deleted.'));
 
   return {
     summary: summaryQuery.data || {
@@ -61,7 +59,7 @@ export function useRoutines() {
       disabled: 0,
       unverified: 0,
       failing: 0,
-      runs_today: 0,
+      runs_today: 0
     },
     routines: routinesQuery.data?.routines || [],
     isLoading: summaryQuery.isLoading || routinesQuery.isLoading,
@@ -72,10 +70,7 @@ export function useRoutines() {
     triggerRoutine: triggerMutation.mutateAsync,
     toggleRoutine: toggleMutation.mutateAsync,
     deleteRoutine: deleteMutation.mutateAsync,
-    isBusy:
-      triggerMutation.isPending ||
-      toggleMutation.isPending ||
-      deleteMutation.isPending,
-    invalidate,
+    isBusy: triggerMutation.isPending || toggleMutation.isPending || deleteMutation.isPending,
+    invalidate
   };
 }

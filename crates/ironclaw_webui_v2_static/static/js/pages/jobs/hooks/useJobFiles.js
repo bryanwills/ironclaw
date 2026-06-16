@@ -1,6 +1,6 @@
-import { React } from "../../../lib/html.js";
-import { useQuery } from "@tanstack/react-query";
-import { fetchJobFiles, readJobFile } from "../lib/jobs-api.js";
+import { React } from '../../../lib/html.js';
+import { useQuery } from '@tanstack/react-query';
+import { fetchJobFiles, readJobFile } from '../lib/jobs-api.js';
 
 function mapEntries(entries = []) {
   return entries.map((entry) => ({
@@ -9,7 +9,7 @@ function mapEntries(entries = []) {
     isDir: entry.is_dir,
     children: entry.is_dir ? [] : null,
     loaded: false,
-    expanded: false,
+    expanded: false
   }));
 }
 
@@ -38,37 +38,37 @@ function updateNode(nodes, targetPath, updater) {
 
 export function useJobFiles(job) {
   const [tree, setTree] = React.useState([]);
-  const [selectedPath, setSelectedPath] = React.useState("");
-  const [treeError, setTreeError] = React.useState("");
-  const [expandingPath, setExpandingPath] = React.useState("");
+  const [selectedPath, setSelectedPath] = React.useState('');
+  const [treeError, setTreeError] = React.useState('');
+  const [expandingPath, setExpandingPath] = React.useState('');
 
   const canBrowse = Boolean(job?.project_dir && job?.id);
 
   const rootQuery = useQuery({
-    queryKey: ["job-files-root", job?.id],
-    queryFn: () => fetchJobFiles(job.id, ""),
-    enabled: canBrowse,
+    queryKey: ['job-files-root', job?.id],
+    queryFn: () => fetchJobFiles(job.id, ''),
+    enabled: canBrowse
   });
 
   const fileQuery = useQuery({
-    queryKey: ["job-file", job?.id, selectedPath],
+    queryKey: ['job-file', job?.id, selectedPath],
     queryFn: () => readJobFile(job.id, selectedPath),
-    enabled: Boolean(canBrowse && selectedPath),
+    enabled: Boolean(canBrowse && selectedPath)
   });
 
   React.useEffect(() => {
     setTree([]);
-    setSelectedPath("");
-    setTreeError("");
-    setExpandingPath("");
+    setSelectedPath('');
+    setTreeError('');
+    setExpandingPath('');
   }, [job?.id]);
 
   React.useEffect(() => {
     if (rootQuery.data?.entries) {
       setTree(mapEntries(rootQuery.data.entries));
-      setTreeError("");
+      setTreeError('');
     } else if (rootQuery.error) {
-      setTreeError(rootQuery.error.message || "Unable to load project files");
+      setTreeError(rootQuery.error.message || 'Unable to load project files');
     }
   }, [rootQuery.data, rootQuery.error]);
 
@@ -78,12 +78,16 @@ export function useJobFiles(job) {
       if (!node || !job?.id) return;
 
       if (node.expanded) {
-        setTree((current) => updateNode(current, path, (currentNode) => ({ ...currentNode, expanded: false })));
+        setTree((current) =>
+          updateNode(current, path, (currentNode) => ({ ...currentNode, expanded: false }))
+        );
         return;
       }
 
       if (node.loaded) {
-        setTree((current) => updateNode(current, path, (currentNode) => ({ ...currentNode, expanded: true })));
+        setTree((current) =>
+          updateNode(current, path, (currentNode) => ({ ...currentNode, expanded: true }))
+        );
         return;
       }
 
@@ -95,14 +99,14 @@ export function useJobFiles(job) {
             ...currentNode,
             expanded: true,
             loaded: true,
-            children: mapEntries(response.entries),
+            children: mapEntries(response.entries)
           }))
         );
-        setTreeError("");
+        setTreeError('');
       } catch (error) {
-        setTreeError(error.message || "Unable to open folder");
+        setTreeError(error.message || 'Unable to open folder');
       } finally {
-        setExpandingPath("");
+        setExpandingPath('');
       }
     },
     [job?.id, tree]
@@ -114,11 +118,11 @@ export function useJobFiles(job) {
     selectedPath,
     selectPath: setSelectedPath,
     selectedFile: fileQuery.data || null,
-    fileError: fileQuery.error?.message || "",
+    fileError: fileQuery.error?.message || '',
     isLoadingTree: rootQuery.isLoading,
     isLoadingFile: fileQuery.isLoading || fileQuery.isFetching,
     expandingPath,
     treeError,
-    toggleDirectory,
+    toggleDirectory
   };
 }

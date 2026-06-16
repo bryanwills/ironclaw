@@ -1,19 +1,19 @@
-import { Navigate, useNavigate, useParams } from "react-router";
-import { React, html } from "../../lib/html.js";
-import { DashboardTab } from "./components/dashboard-tab.js";
-import { UsageTab } from "./components/usage-tab.js";
-import { UserDetail } from "./components/user-detail.js";
-import { AdminUsersTab } from "./components/users-tab.js";
+import { Navigate, useNavigate, useParams } from 'react-router';
+import { React, html } from '../../lib/html.js';
+import { DashboardTab } from './components/dashboard-tab.js';
+import { UsageTab } from './components/usage-tab.js';
+import { UserDetail } from './components/user-detail.js';
+import { AdminUsersTab } from './components/users-tab.js';
 
 export function AdminPage() {
-  const { tab = "dashboard" } = useParams();
+  const { tab = 'dashboard' } = useParams();
   const navigate = useNavigate();
   const [selectedUserId, setSelectedUserId] = React.useState(null);
 
   const handleSelectUser = React.useCallback(
     (id) => {
       setSelectedUserId(id);
-      navigate("/admin/users");
+      navigate('/admin/users');
     },
     [navigate]
   );
@@ -25,7 +25,7 @@ export function AdminPage() {
   const tabContent = {
     dashboard: html`<${DashboardTab}
       onSelectUser=${handleSelectUser}
-      onNavigateTab=${(id) => navigate("/admin/" + id)}
+      onNavigateTab=${(id) => navigate('/admin/' + id)}
     />`,
     users: selectedUserId
       ? html`<${UserDetail} userId=${selectedUserId} onBack=${handleBack} />`
@@ -33,7 +33,7 @@ export function AdminPage() {
           selectedUserId=${selectedUserId}
           onSelectUser=${handleSelectUser}
         />`,
-    usage: html`<${UsageTab} onSelectUser=${handleSelectUser} />`,
+    usage: html`<${UsageTab} onSelectUser=${handleSelectUser} />`
   };
 
   if (!tabContent[tab]) {

@@ -1,4 +1,4 @@
-import { html } from "../../../lib/html.js";
+import { html } from '../../../lib/html.js';
 
 export function SuggestionChips({ suggestions, onSelect }) {
   if (!suggestions || suggestions.length === 0) return null;

@@ -1,7 +1,7 @@
-import { html } from "../../../lib/html.js";
-import { useT } from "../../../lib/i18n.js";
-import { Panel } from "../../../design-system/primitives.js";
-import { WorkspaceSearchResults, WorkspaceTree } from "./workspace-tree.js";
+import { html } from '../../../lib/html.js';
+import { useT } from '../../../lib/i18n.js';
+import { Panel } from '../../../design-system/primitives.js';
+import { WorkspaceSearchResults, WorkspaceTree } from './workspace-tree.js';
 
 export function WorkspaceSidebar({
   search,
@@ -13,7 +13,7 @@ export function WorkspaceSidebar({
   isLoadingTree,
   isSearching,
   onToggleDirectory,
-  onSelectFile,
+  onSelectFile
 }) {
   const t = useT();
   const hasSearch = search.trim().length > 0;
@@ -24,7 +24,7 @@ export function WorkspaceSidebar({
         <input
           value=${search}
           onInput=${(event) => onSearchChange(event.target.value)}
-          placeholder=${t("workspace.searchPlaceholder")}
+          placeholder=${t('workspace.searchPlaceholder')}
           className="h-11 w-full rounded-md border border-white/10 bg-iron-950/80 px-3 text-sm text-white outline-none placeholder:text-iron-400 focus:border-signal/45"
         />
       </div>

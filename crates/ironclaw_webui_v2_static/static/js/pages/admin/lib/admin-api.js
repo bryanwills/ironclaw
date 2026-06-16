@@ -14,22 +14,22 @@ export function fetchAdminUser(_id) {
   return Promise.resolve(null);
 }
 export function createAdminUser(_payload) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 admin endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 admin endpoint' });
 }
 export function updateAdminUser(_id, _payload) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 admin endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 admin endpoint' });
 }
 export function deleteAdminUser(_id) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 admin endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 admin endpoint' });
 }
 export function suspendAdminUser(_id) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 admin endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 admin endpoint' });
 }
 export function activateAdminUser(_id) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 admin endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 admin endpoint' });
 }
 export function createUserToken(_userId, _name) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 admin endpoint" });
+  return Promise.resolve({ success: false, message: 'TODO: requires v2 admin endpoint' });
 }
 export function fetchUsageSummary() {
   return Promise.resolve({
@@ -43,9 +43,9 @@ export function fetchUsageSummary() {
     active_jobs: 0,
     uptime_seconds: 0,
     recent_users: [],
-    ...ADMIN_TODO_PAYLOAD,
+    ...ADMIN_TODO_PAYLOAD
   });
 }
-export function fetchUsage(_period = "day", _userId) {
+export function fetchUsage(_period = 'day', _userId) {
   return Promise.resolve({ entries: [], ...ADMIN_TODO_PAYLOAD });
 }

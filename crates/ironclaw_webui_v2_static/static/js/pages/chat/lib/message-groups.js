@@ -12,7 +12,7 @@ export function groupMessages(messages) {
     if (isFinalAssistantReply(msg)) {
       const activity = followingActivity(orderedMessages, index + 1);
       const boundary = orderedMessages[index + 1 + activity.length];
-      if (activity.length > 0 && (!boundary || boundary.role === "user")) {
+      if (activity.length > 0 && (!boundary || boundary.role === 'user')) {
         appendActivityRun(items, activity);
         appendMessage(items, msg);
         index += activity.length;
@@ -91,28 +91,28 @@ function sameActivityRun(referenceRunId, msg) {
 function appendActivityRun(items, activity) {
   if (activity.length === 0) return;
   items.push({
-    type: "activity-run",
+    type: 'activity-run',
     id: `activity-run-${activity[0].id}`,
-    activity,
+    activity
   });
 }
 
 function appendMessage(items, message) {
-  items.push({ type: "message", id: message.id, message });
+  items.push({ type: 'message', id: message.id, message });
 }
 
 function isFinalAssistantReply(msg) {
   return (
-    msg.role === "assistant" &&
+    msg.role === 'assistant' &&
     !hasToolCalls(msg) &&
     (msg.isFinalReply === true ||
-      ((msg.kind === "assistant" || msg.kind === "assistant_message") &&
-        msg.status === "finalized"))
+      ((msg.kind === 'assistant' || msg.kind === 'assistant_message') &&
+        msg.status === 'finalized'))
   );
 }
 
 function isActivity(msg) {
-  return msg.role === "thinking" || msg.role === "tool_activity" || hasToolCalls(msg);
+  return msg.role === 'thinking' || msg.role === 'tool_activity' || hasToolCalls(msg);
 }
 
 function hasToolCalls(msg) {

@@ -1,5 +1,5 @@
-import { React } from "../lib/html.js";
-import { useNavigate } from "react-router";
+import { React } from '../lib/html.js';
+import { useNavigate } from 'react-router';
 
 export function useSidebar({ onNewChat } = {}) {
   const navigate = useNavigate();
@@ -15,9 +15,8 @@ export function useSidebar({ onNewChat } = {}) {
   // from the first keystroke.
   const newChat = React.useCallback(async () => {
     const result = await onNewChat?.();
-    const newThreadId =
-      typeof result === "string" && result.length > 0 ? result : null;
-    navigate(newThreadId ? `/chat/${newThreadId}` : "/chat");
+    const newThreadId = typeof result === 'string' && result.length > 0 ? result : null;
+    navigate(newThreadId ? `/chat/${newThreadId}` : '/chat');
     close();
   }, [navigate, close, onNewChat]);
 

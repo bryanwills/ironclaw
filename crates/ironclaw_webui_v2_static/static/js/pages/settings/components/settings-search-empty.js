@@ -1,7 +1,7 @@
-import { Card } from "../../../design-system/card.js";
-import { Icon } from "../../../design-system/icons.js";
-import { html } from "../../../lib/html.js";
-import { useT } from "../../../lib/i18n.js";
+import { Card } from '../../../design-system/card.js';
+import { Icon } from '../../../design-system/icons.js';
+import { html } from '../../../lib/html.js';
+import { useT } from '../../../lib/i18n.js';
 
 export function SettingsSearchEmpty({ query }) {
   const t = useT();
@@ -16,7 +16,7 @@ export function SettingsSearchEmpty({ query }) {
         </span>
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-[var(--v2-text-strong)]">
-            ${t("settings.noMatchingSettings", { query })}
+            ${t('settings.noMatchingSettings', { query })}
           </h3>
         </div>
       </div>
