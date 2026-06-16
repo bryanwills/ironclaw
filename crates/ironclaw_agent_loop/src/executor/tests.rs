@@ -1869,6 +1869,11 @@ async fn budget_nudge_model_failure_falls_back_to_failed_exit() {
         .await
         .expect("nudge model failure must not propagate out of the budget stage");
 
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "budget nudge attempted exactly one model call before failing open"
+    );
     assert!(
         matches!(step, BudgetStep::Exit(LoopExit::Failed(_))),
         "budget nudge model failure must fall back to the failed exit"
