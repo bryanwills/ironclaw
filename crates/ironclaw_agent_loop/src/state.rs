@@ -687,6 +687,7 @@ mod tests {
             resume_token: None,
             prior_approval: None,
             replay: None,
+            disposition: None,
         });
 
         let rebased = state.clone().rebase_for_run(&target_context);
