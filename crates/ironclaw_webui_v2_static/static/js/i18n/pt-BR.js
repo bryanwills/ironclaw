@@ -712,6 +712,7 @@ registerPack("pt-BR", {
   "automations.summary.activeDetail": "Programações habilitadas aguardando sua próxima execução.",
   "automations.summary.paused": "Pausado",
   "automations.summary.pausedDetail": "Programações que não estão previstas para serem executadas no momento.",
+  "automations.summary.filterAction": "Mostrar {label}",
   "automations.summary.nextRun": "Próxima execução",
   "automations.summary.none": "Nenhuma",
   "automations.summary.nextRunDetail": "Primeira execução agendada nesta lista.",

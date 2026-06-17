@@ -712,6 +712,7 @@ registerPack("uk", {
   "automations.summary.activeDetail": "Увімкнені розклади, які очікують наступного запуску.",
   "automations.summary.paused": "Призупинено",
   "automations.summary.pausedDetail": "Розклади наразі не запускаються.",
+  "automations.summary.filterAction": "Показати {label}",
   "automations.summary.nextRun": "Наступний запуск",
   "automations.summary.none": "Жодного",
   "automations.summary.nextRunDetail": "Найближчий запланований запуск у цьому списку.",

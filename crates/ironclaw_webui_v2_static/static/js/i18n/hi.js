@@ -712,6 +712,7 @@ registerPack("hi", {
   "automations.summary.activeDetail": "सक्षम शेड्यूल अपने अगले रन की प्रतीक्षा कर रहे हैं।",
   "automations.summary.paused": "रोका गया",
   "automations.summary.pausedDetail": "शेड्यूल फिलहाल चलने की उम्मीद नहीं है।",
+  "automations.summary.filterAction": "{label} दिखाएँ",
   "automations.summary.nextRun": "अगला रन",
   "automations.summary.none": "कोई नहीं",
   "automations.summary.nextRunDetail": "इस सूची में सबसे जल्दी शेड्यूल किया गया रन।",

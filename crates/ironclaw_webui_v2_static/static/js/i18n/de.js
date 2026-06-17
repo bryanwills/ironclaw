@@ -712,6 +712,7 @@ registerPack("de", {
   "automations.summary.activeDetail": "Aktivierte Zeitpläne, die auf ihre nächste Ausführung warten.",
   "automations.summary.paused": "Angehalten",
   "automations.summary.pausedDetail": "Zeitpläne werden derzeit voraussichtlich nicht ausgeführt.",
+  "automations.summary.filterAction": "{label} anzeigen",
   "automations.summary.nextRun": "Nächster Lauf",
   "automations.summary.none": "Keine",
   "automations.summary.nextRunDetail": "Frühester geplanter Lauf in dieser Liste.",

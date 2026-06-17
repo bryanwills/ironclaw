@@ -712,6 +712,7 @@ registerPack("es", {
   "automations.summary.activeDetail": "Horarios habilitados esperando su próxima ejecución.",
   "automations.summary.paused": "En pausa",
   "automations.summary.pausedDetail": "Actualmente no se espera que se ejecuten los horarios.",
+  "automations.summary.filterAction": "Mostrar {label}",
   "automations.summary.nextRun": "Próxima ejecución",
   "automations.summary.none": "Ninguno",
   "automations.summary.nextRunDetail": "Ejecución programada más próxima en esta lista.",
