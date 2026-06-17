@@ -70,10 +70,7 @@ export function AutomationsEmptyState() {
   return html`
     <${Panel} className="p-6 sm:p-8">
       <div className="max-w-2xl">
-        <div className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]">
-          <${Icon} name="calendar" className="h-5 w-5 text-[var(--v2-accent-text)]" />
-        </div>
-        <h2 className="mt-4 text-2xl font-semibold tracking-tight text-iron-100">
+        <h2 className="mt-4 text-2xl font-semibold tracking-tight text-iron-100 flex items-center gap-3">
           ${t("automations.empty.onboardingTitle")}
         </h2>
         <p className="mt-3 text-sm leading-6 text-iron-300">

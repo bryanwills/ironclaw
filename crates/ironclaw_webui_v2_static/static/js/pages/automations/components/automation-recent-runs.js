@@ -17,7 +17,7 @@ export function recentRunKey(run) {
 // When more runs exist than fit, an overflow chip ("+N") makes the hidden count
 // explicit instead of silently dropping runs off the end (#4988). Each dot
 // keeps a hover tooltip describing its status and fire time.
-export function RunDots({ runs }) {
+export function RunDots({ runs = [] }) {
   const t = useT();
   const visibleRuns = runs.slice(0, MAX_VISIBLE_DOTS);
   if (!visibleRuns.length) {
@@ -57,7 +57,7 @@ export function RunDots({ runs }) {
 // Compact textual breakdown of recent-run statuses ("12 runs · 9 OK · 2 failed
 // · 1 running"). Zero-count categories are omitted. This is the "run count
 // summary" the dot strip alone can't convey at a glance (#4988).
-export function RunHistorySummary({ runs, className = "" }) {
+export function RunHistorySummary({ runs = [], className = "" }) {
   const t = useT();
   const counts = summarizeRuns(runs);
   if (!counts.total) {
