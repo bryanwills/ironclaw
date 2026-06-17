@@ -13,5 +13,6 @@ pub(crate) fn notion_provider_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "notion",
         resource: Some(NOTION_RESOURCE),
         exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
+        requires_refresh_token_on_exchange: false,
     }
 }

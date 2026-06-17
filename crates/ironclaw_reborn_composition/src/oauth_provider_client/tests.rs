@@ -112,6 +112,37 @@ async fn google_exchange_fails_closed_when_response_omits_scope() {
 }
 
 #[tokio::test]
+async fn google_exchange_fails_closed_when_response_omits_refresh_token() {
+    let egress = Arc::new(RecordingEgress::ok(
+        br#"{"access_token":"access-token","scope":"gmail.readonly","expires_in":3600}"#.to_vec(),
+    ));
+    let store = Arc::new(RecordingSecretStore::recording());
+    let client = HostOAuthProviderClient::new(
+        google_spec(),
+        egress,
+        store.clone(),
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("google-client").unwrap(),
+        OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+    )
+    .unwrap();
+
+    let error = client
+        .exchange_callback(
+            exchange_context(),
+            callback_request("google", "work google", &["gmail.readonly"]),
+        )
+        .await
+        .expect_err("google accounts must be refresh-capable after setup");
+
+    assert_eq!(
+        error.code(),
+        ironclaw_auth::AuthErrorCode::TokenExchangeFailed
+    );
+    assert!(store.put_handles().is_empty());
+}
+
+#[tokio::test]
 async fn exchange_maps_provider_5xx_to_retryable_backend_unavailable() {
     let egress = Arc::new(RecordingEgress::with_status(
         503,
@@ -334,6 +365,7 @@ fn google_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "google",
         resource: None,
         exchange_scope_policy: ExchangeScopePolicy::RequireProviderScope,
+        requires_refresh_token_on_exchange: true,
     }
 }
 
@@ -345,6 +377,7 @@ fn notion_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "notion",
         resource: Some("https://mcp.notion.com/mcp"),
         exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
+        requires_refresh_token_on_exchange: false,
     }
 }
 
