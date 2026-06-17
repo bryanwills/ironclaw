@@ -7,7 +7,7 @@ import { cn } from "../../../utils/cn.js";
 import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters.js";
 import { AutomationDetailPanel } from "./automation-detail-panel.js";
 import { AutomationsEmptyState } from "./automations-empty-state.js";
-import { RunDots } from "./automation-recent-runs.js";
+import { RunDots, RunHistorySummary } from "./automation-recent-runs.js";
 
 export function AutomationsList({
   automations,
@@ -149,7 +149,10 @@ export function AutomationsList({
                               ${automation.next_run_label}
                             </td>
                             <td className="px-5 py-4 align-top">
-                              <${RunDots} runs=${automation.recent_runs} />
+                              <div className="space-y-2">
+                                <${RunDots} runs=${automation.recent_runs} />
+                                <${RunHistorySummary} runs=${automation.recent_runs} />
+                              </div>
                             </td>
                             <td className="px-5 py-4 align-top">
                               <${StatusPill}

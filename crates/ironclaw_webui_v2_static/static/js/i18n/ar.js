@@ -736,6 +736,11 @@ registerPack("ar", {
   "automations.table.nextRun": "التشغيل التالي",
   "automations.table.lastRun": "التشغيل الأخير",
   "automations.table.status": "الحالة",
+  "automations.runs.total": "{count} عمليات تشغيل حديثة",
+  "automations.runs.ok": "{count} ناجحة",
+  "automations.runs.error": "{count} فاشلة",
+  "automations.runs.running": "{count} قيد التشغيل",
+  "automations.runs.showingOf": "عرض {shown} من {total} عمليات تشغيل حديثة",
 
   // Routines page
   "routines.explorer": "المهام",

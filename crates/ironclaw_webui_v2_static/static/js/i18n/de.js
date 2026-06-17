@@ -736,6 +736,11 @@ registerPack("de", {
   "automations.table.nextRun": "Nächster Lauf",
   "automations.table.lastRun": "Letzter Lauf",
   "automations.table.status": "Status",
+  "automations.runs.total": "{count} letzte Ausführungen",
+  "automations.runs.ok": "{count} OK",
+  "automations.runs.error": "{count} fehlgeschlagen",
+  "automations.runs.running": "{count} laufend",
+  "automations.runs.showingOf": "{shown} von {total} letzten Ausführungen werden angezeigt",
 
   // Routines page
   "routines.explorer": "Aufgaben",

@@ -736,6 +736,11 @@ registerPack("uk", {
   "automations.table.nextRun": "Наступний запуск",
   "automations.table.lastRun": "Останній запуск",
   "automations.table.status": "Статус",
+  "automations.runs.total": "{count} останніх запусків",
+  "automations.runs.ok": "{count} успішних",
+  "automations.runs.error": "{count} з помилкою",
+  "automations.runs.running": "{count} виконується",
+  "automations.runs.showingOf": "Показано {shown} з {total} останніх запусків",
 
   // Routines page
   "routines.explorer": "Завдання",

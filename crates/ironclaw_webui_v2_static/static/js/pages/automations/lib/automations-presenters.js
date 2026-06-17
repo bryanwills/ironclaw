@@ -308,6 +308,19 @@ function normalizeRunStatus(status) {
   return "unknown";
 }
 
+// Count recent runs by status so the UI can show a "how many" summary instead
+// of relying on the reader counting densely-packed status dots. The API can
+// return up to 25 recent runs while the dot strip only has room for a handful,
+// so callers use `total` to render an overflow indicator (#4988).
+export function summarizeRuns(runs) {
+  const list = Array.isArray(runs) ? runs : [];
+  const counts = { total: list.length, ok: 0, error: 0, running: 0, unknown: 0 };
+  for (const run of list) {
+    counts[normalizeRunStatus(run?.status)] += 1;
+  }
+  return counts;
+}
+
 function successRateLabel(runs, t) {
   const tx = tr(t);
   const terminalRuns = runs.filter((run) => run.status === "ok" || run.status === "error");

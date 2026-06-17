@@ -736,6 +736,11 @@ registerPack("ko", {
   "automations.table.nextRun": "다음 실행",
   "automations.table.lastRun": "마지막 실행",
   "automations.table.status": "상태",
+  "automations.runs.total": "최근 실행 {count}건",
+  "automations.runs.ok": "성공 {count}건",
+  "automations.runs.error": "실패 {count}건",
+  "automations.runs.running": "실행 중 {count}건",
+  "automations.runs.showingOf": "최근 실행 {total}건 중 {shown}건 표시",
 
   // Routines page
   "routines.explorer": "작업",

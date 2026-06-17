@@ -6,6 +6,7 @@ import {
   filterAutomations,
   normalizeAutomations as normalizeAutomationsRaw,
   scheduleLabel as scheduleLabelRaw,
+  summarizeRuns,
 } from "./automations-presenters.js";
 
 // Schedule labels are now localized: the presenter takes a translator + locale.
@@ -449,4 +450,33 @@ test("normalizeAutomations emits chat_path for any status when thread_id is pres
     "/chat/550e8400-e29b-41d4-a716-446655440000",
     "accepted run with thread_id must produce a chat_path",
   );
+});
+
+test("summarizeRuns counts runs by normalized status", () => {
+  const counts = summarizeRuns([
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "weird-unknown-status" },
+    {},
+  ]);
+  assert.deepEqual(counts, {
+    total: 6,
+    ok: 2,
+    error: 1,
+    running: 1,
+    // both the unrecognized status and the missing status fold into "unknown"
+    unknown: 2,
+  });
+});
+
+test("summarizeRuns tolerates non-array input", () => {
+  assert.deepEqual(summarizeRuns(undefined), {
+    total: 0,
+    ok: 0,
+    error: 0,
+    running: 0,
+    unknown: 0,
+  });
 });
