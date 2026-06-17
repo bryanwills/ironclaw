@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
 use crate::outbound_preferences::{OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider};
-use crate::slack_actor_identity::SlackUserIdentityActorResolver;
+use crate::slack_actor_identity::{RebornUserIdentityLookup, SlackUserIdentityActorResolver};
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
@@ -99,7 +99,7 @@ pub(super) fn build_runtime_mounts(
     let resolver = DynamicSlackInstallationResolver::new(
         Arc::clone(&parts),
         Arc::clone(&setup_service),
-        state,
+        state.clone(),
         pairing.clone(),
         Arc::clone(&channel_route_store),
     );
@@ -124,6 +124,7 @@ pub(super) fn build_runtime_mounts(
             channel_route_store,
             personal_dm_target_store,
         )),
+        outbound_delivery_target_provider_registered: false,
     })
 }
 
@@ -188,7 +189,7 @@ impl ProtocolHttpEgress for DynamicSlackProtocolHttpEgress {
 struct DynamicSlackInstallationResolver {
     parts: Arc<SlackHostBetaRuntimeParts>,
     setup_service: Arc<SlackSetupService>,
-    state: Arc<FilesystemSlackHostState<crate::factory::LocalDevRootFilesystem>>,
+    state: Arc<dyn RebornUserIdentityLookup>,
     pairing: SlackPersonalBindingPairingService,
     channel_route_store: Arc<dyn SlackChannelRouteStore>,
     cached_resolver: Arc<Mutex<DynamicSlackInstallationResolverCache>>,
@@ -198,7 +199,7 @@ impl DynamicSlackInstallationResolver {
     fn new(
         parts: Arc<SlackHostBetaRuntimeParts>,
         setup_service: Arc<SlackSetupService>,
-        state: Arc<FilesystemSlackHostState<crate::factory::LocalDevRootFilesystem>>,
+        state: Arc<dyn RebornUserIdentityLookup>,
         pairing: SlackPersonalBindingPairingService,
         channel_route_store: Arc<dyn SlackChannelRouteStore>,
     ) -> Self {

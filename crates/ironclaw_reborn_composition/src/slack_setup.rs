@@ -282,8 +282,11 @@ impl SlackSetupService {
             })
             .unwrap_or(false);
 
-        let (bot_token_handle, pending_bot_token) = match update.bot_token {
-            Some(secret) if !secret.expose_secret().is_empty() => (
+        let bot_token = normalize_secret(update.bot_token);
+        let signing_secret = normalize_secret(update.signing_secret);
+
+        let (bot_token_handle, pending_bot_token) = match bot_token {
+            Some(secret) => (
                 bot_token_handle(&self.tenant_id, &installation_id, revision)?,
                 Some(secret),
             ),
@@ -296,8 +299,8 @@ impl SlackSetupService {
                 (previous.bot_token_handle.clone(), None)
             }
         };
-        let (signing_secret_handle, pending_signing_secret) = match update.signing_secret {
-            Some(secret) if !secret.expose_secret().is_empty() => (
+        let (signing_secret_handle, pending_signing_secret) = match signing_secret {
+            Some(secret) => (
                 signing_secret_handle(&self.tenant_id, &installation_id, revision)?,
                 Some(secret),
             ),
@@ -395,6 +398,12 @@ fn validate_optional_user(
             })
         })
         .transpose()
+}
+
+fn normalize_secret(value: Option<SecretString>) -> Option<SecretString> {
+    let secret = value?;
+    let trimmed = secret.expose_secret().trim();
+    (!trimmed.is_empty()).then(|| SecretString::from(trimmed.to_string()))
 }
 
 fn bot_token_handle(
@@ -668,6 +677,36 @@ mod tests {
                 .expect("stored"),
             original
         );
+    }
+
+    #[tokio::test]
+    async fn save_rejects_whitespace_only_fresh_secrets() {
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            Arc::new(InMemorySecretStore::new()),
+        );
+
+        let error = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("   ")),
+                signing_secret: Some(SecretString::from("slack-signing-secret")),
+            })
+            .await
+            .expect_err("whitespace-only bot token is missing");
+
+        assert!(matches!(
+            error,
+            SlackSetupError::MissingField { field: "bot_token" }
+        ));
     }
 
     #[tokio::test]

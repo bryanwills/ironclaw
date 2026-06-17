@@ -57,8 +57,8 @@ export function SlackSetupPanel({ action, setupQuery }) {
     form.installation_id.trim() &&
     form.team_id.trim() &&
     form.api_app_id.trim() &&
-    (status?.bot_token_configured || form.bot_token) &&
-    (status?.signing_secret_configured || form.signing_secret);
+    (status?.bot_token_configured || form.bot_token.trim()) &&
+    (status?.signing_secret_configured || form.signing_secret.trim());
 
   return html`
     <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">

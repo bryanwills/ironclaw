@@ -14,8 +14,8 @@ export function saveSlackSetup(setup) {
     user_id: optionalString(setup.user_id),
     shared_subject_user_id: optionalString(setup.shared_subject_user_id),
   };
-  const botToken = String(setup.bot_token || "");
-  const signingSecret = String(setup.signing_secret || "");
+  const botToken = String(setup.bot_token || "").trim();
+  const signingSecret = String(setup.signing_secret || "").trim();
   if (botToken) body.bot_token = botToken;
   if (signingSecret) body.signing_secret = signingSecret;
   return apiFetch(SLACK_SETUP_PATH, {

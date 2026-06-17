@@ -42,6 +42,7 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
         }
     };
     let outbound_delivery_target_providers = slack_mounts
+        .filter(|mounts| !mounts.outbound_delivery_target_provider_registered)
         .map(|mounts| vec![Arc::clone(&mounts.outbound_delivery_target_provider)])
         .unwrap_or_default();
     let connectable_channels = slack_mounts.and_then(|mounts| {

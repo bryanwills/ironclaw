@@ -525,7 +525,7 @@ impl SlackChannelRouteAdminRouteConfig {
             SlackChannelRouteAdminScope::Dynamic { setup_service, .. } => {
                 Ok(Arc::clone(setup_service))
             }
-            SlackChannelRouteAdminScope::Static { .. } => Err(SlackRouteError::Unavailable),
+            SlackChannelRouteAdminScope::Static { .. } => Err(SlackRouteError::NotFound),
         }
     }
 

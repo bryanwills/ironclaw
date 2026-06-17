@@ -357,7 +357,8 @@ Required Slack settings:
 | `[slack].enabled = true` | Mounts the Slack route during `serve`. |
 | WebUI Slack workspace setup | Stores Slack installation ids, channel mappings, and Slack bot/signing secrets. |
 
-More detailed command notes live in [`docs/reborn-binary.md`](docs/reborn-binary.md).
+More detailed Slack setup notes live in
+[`docs/reborn/setup-slack-for-reborn-binary.md`](docs/reborn/setup-slack-for-reborn-binary.md).
 
 ## Philosophy
 

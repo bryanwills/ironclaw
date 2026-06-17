@@ -201,3 +201,26 @@ test("SlackSetupPanel clears secrets and accepts saved status after successful s
     ["extensions"],
   ]);
 });
+
+test("SlackSetupPanel rejects whitespace-only fresh secrets", () => {
+  const state = { hookIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const { context } = setupContext(state);
+  const status = {
+    configured: false,
+    installation_id: "install_saved",
+    team_id: "T0SAVED",
+    api_app_id: "A0SAVED",
+    user_id: "",
+    shared_subject_user_id: "",
+    bot_token_configured: false,
+    signing_secret_configured: false,
+  };
+
+  renderPanel(context, state, { data: status });
+  let rendered = renderPanel(context, state, { data: status });
+  valuesAfter(rendered, "onChange=")[5]({ target: { value: "   " } });
+  valuesAfter(rendered, "onChange=")[6]({ target: { value: "   " } });
+  rendered = renderPanel(context, state, { data: status });
+
+  assert.equal(valuesAfter(rendered, "disabled=")[0], true);
+});

@@ -296,13 +296,6 @@ pub struct SlackSection {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SlackChannelRouteSection {
-    pub channel_id: Option<String>,
-    pub subject_user_id: Option<String>,
-}
-
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
 ///
 /// Composition uses these as defaults when first seeding a user/project

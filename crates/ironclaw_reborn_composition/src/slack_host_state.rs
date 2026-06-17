@@ -685,7 +685,7 @@ where
         self.read_record(&path)
             .await
             .map(|record| record.map(|(setup, _)| setup))
-            .map_err(|_| SlackSetupError::StoreUnavailable)
+            .map_err(map_setup_fs_error)
     }
 
     async fn put_slack_installation_setup(
@@ -697,7 +697,7 @@ where
         self.write_record(&path, setup, CasExpectation::Any)
             .await
             .map(|_| ())
-            .map_err(|_| SlackSetupError::StoreUnavailable)
+            .map_err(map_setup_fs_error)
     }
 }
 
@@ -1676,6 +1676,11 @@ fn map_route_fs_error(error: FilesystemError) -> SlackChannelRouteError {
 fn map_personal_dm_target_fs_error(error: FilesystemError) -> SlackPersonalDmTargetError {
     tracing::debug!(%error, "Slack personal DM target filesystem operation failed");
     SlackPersonalDmTargetError::StoreUnavailable
+}
+
+fn map_setup_fs_error(error: FilesystemError) -> SlackSetupError {
+    tracing::debug!(%error, "Slack setup filesystem operation failed");
+    SlackSetupError::StoreUnavailable
 }
 
 fn is_unsupported_delete_error(error: &FilesystemError) -> bool {

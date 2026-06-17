@@ -8,8 +8,9 @@ Slack support has two gates:
 1. The binary must be built with the `slack-v2-host-beta` Cargo feature.
 2. Runtime config must set `[slack].enabled = true`.
 
-Slack secrets are environment variables only. Do not put bot tokens, signing
-secrets, OAuth client secrets, or LLM keys in `config.toml`.
+Slack bot token and signing secret are configured in WebUI Slack setup and
+stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
+in `config.toml`.
 
 ## Build or Run With Slack
 
