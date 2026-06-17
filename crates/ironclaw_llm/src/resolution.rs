@@ -468,7 +468,10 @@ fn nearai_config_from_dedicated(
 
     Ok(build_nearai_config(
         NearAiRuntimeFields {
-            model: resolved.model.clone(),
+            // Resolve the `auto` alias here too, so a dedicated provider config
+            // carrying `auto` doesn't reach a gateway that rejects it (same fix
+            // as the env path).
+            model: resolve_nearai_model(Some(resolved.model.clone())),
             api_key,
             base_url,
             failover_cooldown_secs: parse_optional_u64("LLM_FAILOVER_COOLDOWN_SECS", "nearai")?
@@ -776,10 +779,16 @@ mod tests {
         // that would reject it.
         assert_eq!(resolve_nearai_model(Some("auto".into())), NEARAI_AUTO_MODEL);
         assert_eq!(resolve_nearai_model(Some("AUTO".into())), NEARAI_AUTO_MODEL);
-        assert_eq!(resolve_nearai_model(Some("  Auto ".into())), NEARAI_AUTO_MODEL);
+        assert_eq!(
+            resolve_nearai_model(Some("  Auto ".into())),
+            NEARAI_AUTO_MODEL
+        );
         assert_eq!(NEARAI_AUTO_MODEL, "z-ai/glm-5.2");
         // An explicit model id passes through unchanged.
-        assert_eq!(resolve_nearai_model(Some("z-ai/glm-5".into())), "z-ai/glm-5");
+        assert_eq!(
+            resolve_nearai_model(Some("z-ai/glm-5".into())),
+            "z-ai/glm-5"
+        );
         assert_eq!(
             resolve_nearai_model(Some("anthropic/claude-haiku-4-5".into())),
             "anthropic/claude-haiku-4-5"
