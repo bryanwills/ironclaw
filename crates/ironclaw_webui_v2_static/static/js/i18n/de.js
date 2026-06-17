@@ -719,6 +719,18 @@ registerPack("de", {
   "automations.empty.matchingDescription": "Versuchen Sie es mit einem anderen Statusfilter.",
   "automations.empty.noneTitle": "Noch keine geplanten Automatisierungen.",
   "automations.empty.noneDescription": "Dieser Agent hat keine geplanten Arbeiten zum Anzeigen.",
+  "automations.empty.onboardingTitle": "Noch keine Automatisierungen",
+  "automations.empty.onboardingDescription":
+    "Automatisierungen werden im Chat mit deinem Agenten erstellt – es gibt kein Formular. Bitte ihn, etwas nach einem Zeitplan zu erledigen, und er richtet eine wiederkehrende Automatisierung für dich ein.",
+  "automations.empty.examplesTitle": "Frag deinen Agenten zum Beispiel",
+  "automations.empty.example1":
+    "Prüfe das Repo nearai/ironclaw alle 10 Minuten und fasse neue Issues, PRs und Commits zusammen.",
+  "automations.empty.example2":
+    "Schick mir jeden Werktag um 9 Uhr eine Zusammenfassung meiner ungelesenen E-Mails.",
+  "automations.empty.example3":
+    "Erinnere mich jeden Nachmittag um 15 Uhr daran, offene Pull Requests zu prüfen.",
+  "automations.empty.startInChat": "Im Chat starten",
+  "automations.refreshing": "Wird aktualisiert …",
   "automations.table.name": "Name",
   "automations.table.schedule": "Zeitplan",
   "automations.table.nextRun": "Nächster Lauf",

@@ -6,6 +6,7 @@ import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
 import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters.js";
 import { AutomationDetailPanel } from "./automation-detail-panel.js";
+import { AutomationsEmptyState } from "./automations-empty-state.js";
 import { RunDots } from "./automation-recent-runs.js";
 
 export function AutomationsList({
@@ -68,26 +69,28 @@ export function AutomationsList({
               variant="secondary"
               size="icon-sm"
               aria-label=${t("automations.refresh")}
+              title=${isRefreshing ? t("automations.refreshing") : t("automations.refresh")}
               disabled=${isRefreshing}
               onClick=${onRefresh}
             >
-              <${Icon} name="retry" className="h-4 w-4" />
+              <${Icon}
+                name="retry"
+                className=${cn("h-4 w-4", isRefreshing && "animate-spin")}
+              />
             <//>
           </div>
         </div>
       <//>
 
       ${!filtered.length
-        ? html`
-            <${EmptyPanel}
-              title=${hasAutomations
-                ? t("automations.empty.matchingTitle")
-                : t("automations.empty.noneTitle")}
-              description=${hasAutomations
-                ? t("automations.empty.matchingDescription")
-                : t("automations.empty.noneDescription")}
-            />
-          `
+        ? hasAutomations
+          ? html`
+              <${EmptyPanel}
+                title=${t("automations.empty.matchingTitle")}
+                description=${t("automations.empty.matchingDescription")}
+              />
+            `
+          : html`<${AutomationsEmptyState} />`
         : html`
             <div className="grid gap-5 xl:grid-cols-[minmax(0,1.12fr)_minmax(22rem,0.88fr)]">
               <${Panel} className="overflow-hidden">

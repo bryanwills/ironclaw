@@ -719,6 +719,18 @@ registerPack("pt-BR", {
   "automations.empty.matchingDescription": "Experimente um filtro de status diferente.",
   "automations.empty.noneTitle": "Ainda não há automações programadas.",
   "automations.empty.noneDescription": "Este agente não tem trabalho agendado para mostrar.",
+  "automations.empty.onboardingTitle": "Ainda não há automações",
+  "automations.empty.onboardingDescription":
+    "As automações são criadas conversando com seu agente — não há formulário para preencher. Peça para ele fazer algo em um horário e ele configurará uma automação recorrente para você.",
+  "automations.empty.examplesTitle": "Experimente pedir ao seu agente",
+  "automations.empty.example1":
+    "Verifique o repositório nearai/ironclaw a cada 10 minutos e resuma novas issues, PRs e commits.",
+  "automations.empty.example2":
+    "Todo dia útil às 9h, envie-me um resumo dos meus e-mails não lidos.",
+  "automations.empty.example3":
+    "Lembre-me de revisar os pull requests abertos toda tarde às 15h.",
+  "automations.empty.startInChat": "Começar no chat",
+  "automations.refreshing": "Atualizando…",
   "automations.table.name": "Nome",
   "automations.table.schedule": "Programação",
   "automations.table.nextRun": "Próxima execução",

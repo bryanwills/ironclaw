@@ -778,6 +778,18 @@ registerPack("en", {
   "automations.empty.matchingDescription": "Try a different status filter.",
   "automations.empty.noneTitle": "No scheduled automations yet.",
   "automations.empty.noneDescription": "This agent has no scheduled work to show.",
+  "automations.empty.onboardingTitle": "No automations yet",
+  "automations.empty.onboardingDescription":
+    "Automations are created by chatting with your agent — there's no form to fill out. Ask it to do something on a schedule and it will set up a recurring automation for you.",
+  "automations.empty.examplesTitle": "Try asking your agent",
+  "automations.empty.example1":
+    "Check the nearai/ironclaw repo every 10 minutes and summarize new issues, PRs, and commits.",
+  "automations.empty.example2":
+    "Every weekday at 9am, send me a summary of my unread email.",
+  "automations.empty.example3":
+    "Remind me to review open pull requests every afternoon at 3pm.",
+  "automations.empty.startInChat": "Start in chat",
+  "automations.refreshing": "Refreshing…",
   "automations.table.name": "Name",
   "automations.table.schedule": "Schedule",
   "automations.table.nextRun": "Next run",

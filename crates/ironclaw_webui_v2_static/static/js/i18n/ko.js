@@ -719,6 +719,18 @@ registerPack("ko", {
   "automations.empty.matchingDescription": "다른 상태 필터를 사용해 보세요.",
   "automations.empty.noneTitle": "아직 예정된 자동화가 없습니다.",
   "automations.empty.noneDescription": "이 에이전트는 표시할 예정된 작업이 없습니다.",
+  "automations.empty.onboardingTitle": "아직 자동화가 없습니다",
+  "automations.empty.onboardingDescription":
+    "자동화는 에이전트와 대화하여 만듭니다. 작성할 양식은 없습니다. 일정에 따라 무언가를 하도록 요청하면 반복 자동화를 설정해 줍니다.",
+  "automations.empty.examplesTitle": "에이전트에게 이렇게 요청해 보세요",
+  "automations.empty.example1":
+    "nearai/ironclaw 저장소를 10분마다 확인하고 새로운 이슈, PR, 커밋을 요약해 줘.",
+  "automations.empty.example2":
+    "평일 매일 오전 9시에 읽지 않은 이메일 요약을 보내 줘.",
+  "automations.empty.example3":
+    "매일 오후 3시에 열려 있는 풀 리퀘스트를 검토하라고 알려 줘.",
+  "automations.empty.startInChat": "채팅에서 시작",
+  "automations.refreshing": "새로고침 중…",
   "automations.table.name": "이름",
   "automations.table.schedule": "일정",
   "automations.table.nextRun": "다음 실행",

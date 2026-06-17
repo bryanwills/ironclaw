@@ -719,6 +719,18 @@ registerPack("ja", {
   "automations.empty.matchingDescription": "別のステータス フィルターを試してください。",
   "automations.empty.noneTitle": "スケジュールされた自動化はまだありません。",
   "automations.empty.noneDescription": "このエージェントには表示する予定の作業がありません。",
+  "automations.empty.onboardingTitle": "自動化はまだありません",
+  "automations.empty.onboardingDescription":
+    "自動化はエージェントとのチャットで作成します。入力フォームはありません。スケジュールに沿って何かを行うよう頼めば、繰り返し実行される自動化を設定してくれます。",
+  "automations.empty.examplesTitle": "エージェントにこう頼んでみましょう",
+  "automations.empty.example1":
+    "nearai/ironclaw リポジトリを10分ごとに確認し、新しい issue、PR、コミットを要約して。",
+  "automations.empty.example2":
+    "平日の毎朝9時に、未読メールの要約を送って。",
+  "automations.empty.example3":
+    "毎日午後3時に、未対応のプルリクエストを確認するようリマインドして。",
+  "automations.empty.startInChat": "チャットで始める",
+  "automations.refreshing": "更新中…",
   "automations.table.name": "名前",
   "automations.table.schedule": "スケジュール",
   "automations.table.nextRun": "次の実行",

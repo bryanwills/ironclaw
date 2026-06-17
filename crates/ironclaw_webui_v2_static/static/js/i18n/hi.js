@@ -719,6 +719,18 @@ registerPack("hi", {
   "automations.empty.matchingDescription": "एक भिन्न स्थिति फ़िल्टर आज़माएँ।",
   "automations.empty.noneTitle": "अभी तक कोई निर्धारित स्वचालन नहीं।",
   "automations.empty.noneDescription": "इस एजेंट के पास दिखाने के लिए कोई निर्धारित कार्य नहीं है।",
+  "automations.empty.onboardingTitle": "अभी तक कोई ऑटोमेशन नहीं",
+  "automations.empty.onboardingDescription":
+    "ऑटोमेशन आपके एजेंट से बातचीत करके बनाए जाते हैं — भरने के लिए कोई फ़ॉर्म नहीं है। उससे किसी शेड्यूल पर कुछ करने को कहें और वह आपके लिए एक आवर्ती ऑटोमेशन सेट कर देगा।",
+  "automations.empty.examplesTitle": "अपने एजेंट से यह पूछकर देखें",
+  "automations.empty.example1":
+    "हर 10 मिनट में nearai/ironclaw रिपॉज़िटरी जाँचें और नए issues, PRs और commits का सारांश दें।",
+  "automations.empty.example2":
+    "हर कार्यदिवस सुबह 9 बजे, मुझे मेरे अपठित ईमेल का सारांश भेजें।",
+  "automations.empty.example3":
+    "हर दोपहर 3 बजे मुझे खुले pull requests की समीक्षा करने की याद दिलाएँ।",
+  "automations.empty.startInChat": "चैट में शुरू करें",
+  "automations.refreshing": "ताज़ा किया जा रहा है…",
   "automations.table.name": "नाम",
   "automations.table.schedule": "शेड्यूल",
   "automations.table.nextRun": "अगला रन",

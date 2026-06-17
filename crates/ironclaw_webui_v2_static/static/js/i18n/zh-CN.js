@@ -719,6 +719,18 @@ registerPack("zh-CN", {
   "automations.empty.matchingDescription": "尝试通过另外调整一下筛查选项状态。可能有助于进行查看。",
   "automations.empty.noneTitle": "由于这里可能尚未开始启用并且排产任何的自动化操作情况。",
   "automations.empty.noneDescription": "目前的配置上并尚未见到代理会在此具备预期内正活跃要呈现出现的计划执行项或调度运作中自动内容。您可以添加并再查看此列表情况情况是否产生了增加或者有变化！",
+  "automations.empty.onboardingTitle": "暂无自动化",
+  "automations.empty.onboardingDescription":
+    "自动化是通过与你的代理对话来创建的——无需填写任何表单。让它按计划执行某项任务，它就会为你设置一个周期性自动化。",
+  "automations.empty.examplesTitle": "试着这样问你的代理",
+  "automations.empty.example1":
+    "每 10 分钟检查一次 nearai/ironclaw 仓库，并汇总新的 issue、PR 和提交。",
+  "automations.empty.example2":
+    "每个工作日早上 9 点，给我发送一份未读邮件摘要。",
+  "automations.empty.example3":
+    "每天下午 3 点提醒我查看待处理的 pull request。",
+  "automations.empty.startInChat": "在聊天中开始",
+  "automations.refreshing": "正在刷新…",
   "automations.table.name": "活动计划标题",
   "automations.table.schedule": "时刻编排",
   "automations.table.nextRun": "近期下一个执行的节点时间",

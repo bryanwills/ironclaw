@@ -719,6 +719,18 @@ registerPack("fr", {
   "automations.empty.matchingDescription": "Essayez un filtre de statut différent.",
   "automations.empty.noneTitle": "Aucune automatisation programmée pour l'instant.",
   "automations.empty.noneDescription": "Cet agent n'a aucun travail prévu à afficher.",
+  "automations.empty.onboardingTitle": "Aucune automatisation pour l'instant",
+  "automations.empty.onboardingDescription":
+    "Les automatisations se créent en discutant avec votre agent — aucun formulaire à remplir. Demandez-lui de faire quelque chose selon un planning et il configurera une automatisation récurrente pour vous.",
+  "automations.empty.examplesTitle": "Essayez de demander à votre agent",
+  "automations.empty.example1":
+    "Vérifie le dépôt nearai/ironclaw toutes les 10 minutes et résume les nouvelles issues, PR et commits.",
+  "automations.empty.example2":
+    "Chaque jour ouvré à 9 h, envoie-moi un résumé de mes e-mails non lus.",
+  "automations.empty.example3":
+    "Rappelle-moi de passer en revue les pull requests ouvertes chaque après-midi à 15 h.",
+  "automations.empty.startInChat": "Commencer dans le chat",
+  "automations.refreshing": "Actualisation…",
   "automations.table.name": "Nom",
   "automations.table.schedule": "Calendrier",
   "automations.table.nextRun": "Prochaine exécution",
