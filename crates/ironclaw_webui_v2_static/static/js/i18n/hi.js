@@ -739,11 +739,11 @@ registerPack("hi", {
   "automations.table.nextRun": "अगला रन",
   "automations.table.lastRun": "अंतिम रन",
   "automations.table.status": "स्थिति",
-  "automations.runs.total": "{count} हाल के रन",
-  "automations.runs.ok": "{count} ठीक",
-  "automations.runs.error": "{count} विफल",
-  "automations.runs.running": "{count} चल रहे",
-  "automations.runs.unknown": "{count} अज्ञात",
+  "automations.runs.total": "हाल के रन: {count}",
+  "automations.runs.ok": "ठीक: {count}",
+  "automations.runs.error": "विफल: {count}",
+  "automations.runs.running": "चल रहे: {count}",
+  "automations.runs.unknown": "अज्ञात: {count}",
   "automations.runs.showingOf": "{total} हाल के रन में से {shown} दिखाए जा रहे हैं",
 
   // Routines page

@@ -739,11 +739,11 @@ registerPack("zh-CN", {
   "automations.table.nextRun": "近期下一个执行的节点时间",
   "automations.table.lastRun": "前一次最临近过去运作周期时间",
   "automations.table.status": "当前整体状态情况",
-  "automations.runs.total": "最近 {count} 次运行",
-  "automations.runs.ok": "{count} 次成功",
-  "automations.runs.error": "{count} 次失败",
-  "automations.runs.running": "{count} 次运行中",
-  "automations.runs.unknown": "{count} 次未知",
+  "automations.runs.total": "最近运行：{count} 次",
+  "automations.runs.ok": "成功：{count} 次",
+  "automations.runs.error": "失败：{count} 次",
+  "automations.runs.running": "运行中：{count} 次",
+  "automations.runs.unknown": "未知：{count} 次",
   "automations.runs.showingOf": "正在显示最近 {total} 次运行中的 {shown} 次",
 
   // Routines page

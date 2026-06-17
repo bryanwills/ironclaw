@@ -739,11 +739,11 @@ registerPack("pt-BR", {
   "automations.table.nextRun": "Próxima execução",
   "automations.table.lastRun": "Última execução",
   "automations.table.status": "Status",
-  "automations.runs.total": "{count} execuções recentes",
-  "automations.runs.ok": "{count} OK",
-  "automations.runs.error": "{count} com falha",
-  "automations.runs.running": "{count} em execução",
-  "automations.runs.unknown": "{count} desconhecidas",
+  "automations.runs.total": "Execuções recentes: {count}",
+  "automations.runs.ok": "OK: {count}",
+  "automations.runs.error": "Com falha: {count}",
+  "automations.runs.running": "Em execução: {count}",
+  "automations.runs.unknown": "Desconhecido: {count}",
   "automations.runs.showingOf": "Mostrando {shown} de {total} execuções recentes",
 
   // Routines page

@@ -739,11 +739,11 @@ registerPack("ar", {
   "automations.table.nextRun": "التشغيل التالي",
   "automations.table.lastRun": "التشغيل الأخير",
   "automations.table.status": "الحالة",
-  "automations.runs.total": "{count} عمليات تشغيل حديثة",
-  "automations.runs.ok": "{count} ناجحة",
-  "automations.runs.error": "{count} فاشلة",
-  "automations.runs.running": "{count} قيد التشغيل",
-  "automations.runs.unknown": "{count} غير معروفة",
+  "automations.runs.total": "عمليات التشغيل الأخيرة: {count}",
+  "automations.runs.ok": "ناجحة: {count}",
+  "automations.runs.error": "فاشلة: {count}",
+  "automations.runs.running": "قيد التشغيل: {count}",
+  "automations.runs.unknown": "غير معروفة: {count}",
   "automations.runs.showingOf": "عرض {shown} من {total} عمليات تشغيل حديثة",
 
   // Routines page

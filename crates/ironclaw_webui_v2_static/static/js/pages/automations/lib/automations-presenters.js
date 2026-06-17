@@ -321,6 +321,20 @@ export function summarizeRuns(runs) {
   return counts;
 }
 
+// Ordered, non-empty status buckets for the recent-run summary chips. Kept in
+// the presenter (not inline in the component) so a caller-level test can assert
+// that no counted status — including `unknown` — is dropped from what the UI
+// renders. Each entry carries the i18n key suffix and the chip tone class.
+export function runStatusBreakdown(runs) {
+  const counts = summarizeRuns(runs);
+  return [
+    { key: "ok", tone: "text-emerald-300", count: counts.ok },
+    { key: "error", tone: "text-red-300", count: counts.error },
+    { key: "running", tone: "text-sky-300", count: counts.running },
+    { key: "unknown", tone: "text-iron-400", count: counts.unknown },
+  ].filter((part) => part.count > 0);
+}
+
 function successRateLabel(runs, t) {
   const tx = tr(t);
   const terminalRuns = runs.filter((run) => run.status === "ok" || run.status === "error");

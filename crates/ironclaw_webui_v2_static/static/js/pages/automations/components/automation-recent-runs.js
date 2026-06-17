@@ -4,7 +4,7 @@ import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
-import { summarizeRuns } from "../lib/automations-presenters.js";
+import { runStatusBreakdown, summarizeRuns } from "../lib/automations-presenters.js";
 import { buildScopedLogsPath } from "../../logs/lib/logs-data.js";
 
 const MAX_VISIBLE_DOTS = 8;
@@ -66,13 +66,8 @@ export function RunHistorySummary({ runs = [], className = "" }) {
     </span>`;
   }
 
-  const parts = [
-    counts.ok > 0 && { key: "ok", tone: "text-emerald-300", count: counts.ok },
-    counts.error > 0 && { key: "error", tone: "text-red-300", count: counts.error },
-    counts.running > 0 && { key: "running", tone: "text-sky-300", count: counts.running },
-    // Surface unknown-status runs too so the breakdown always sums to total.
-    counts.unknown > 0 && { key: "unknown", tone: "text-iron-400", count: counts.unknown },
-  ].filter(Boolean);
+  // Includes the unknown bucket so the chips always sum to total.
+  const parts = runStatusBreakdown(runs);
 
   return html`
     <div className=${cn("flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]", className)}>

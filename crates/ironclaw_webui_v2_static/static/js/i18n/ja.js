@@ -739,11 +739,11 @@ registerPack("ja", {
   "automations.table.nextRun": "次の実行",
   "automations.table.lastRun": "前回の実行",
   "automations.table.status": "ステータス",
-  "automations.runs.total": "直近の実行 {count} 件",
-  "automations.runs.ok": "成功 {count} 件",
-  "automations.runs.error": "失敗 {count} 件",
-  "automations.runs.running": "実行中 {count} 件",
-  "automations.runs.unknown": "不明 {count} 件",
+  "automations.runs.total": "直近の実行: {count} 件",
+  "automations.runs.ok": "成功: {count} 件",
+  "automations.runs.error": "失敗: {count} 件",
+  "automations.runs.running": "実行中: {count} 件",
+  "automations.runs.unknown": "不明: {count} 件",
   "automations.runs.showingOf": "直近の実行 {total} 件のうち {shown} 件を表示",
 
   // Routines page

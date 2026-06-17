@@ -5,6 +5,7 @@ import {
   automationSummary,
   filterAutomations,
   normalizeAutomations as normalizeAutomationsRaw,
+  runStatusBreakdown,
   scheduleLabel as scheduleLabelRaw,
   summarizeRuns,
 } from "./automations-presenters.js";
@@ -479,4 +480,40 @@ test("summarizeRuns tolerates non-array input", () => {
     running: 0,
     unknown: 0,
   });
+});
+
+// Regression for #4988: the recent-run summary chips render straight from
+// runStatusBreakdown. Every counted status — including the `unknown` bucket
+// produced by unrecognized/missing statuses — must appear, so a future edit
+// can't silently drop a bucket from what the UI shows.
+test("runStatusBreakdown surfaces every non-empty bucket incl. unknown", () => {
+  const parts = runStatusBreakdown([
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "mystery-status" }, // unrecognized -> unknown
+    {}, // missing -> unknown
+  ]);
+  const byKey = Object.fromEntries(parts.map((part) => [part.key, part.count]));
+  assert.deepEqual(byKey, { ok: 2, error: 1, running: 1, unknown: 2 });
+  assert.ok(
+    parts.some((part) => part.key === "unknown"),
+    "unknown bucket must be present when unknown-status runs exist",
+  );
+  // Chips must sum to the same total the summary header shows.
+  const total = parts.reduce((sum, part) => sum + part.count, 0);
+  assert.equal(total, summarizeRuns([
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "mystery-status" },
+    {},
+  ]).total);
+});
+
+test("runStatusBreakdown omits zero-count buckets", () => {
+  const parts = runStatusBreakdown([{ status: "ok" }]);
+  assert.deepEqual(parts.map((part) => part.key), ["ok"]);
 });

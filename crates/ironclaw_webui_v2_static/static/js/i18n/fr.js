@@ -739,11 +739,11 @@ registerPack("fr", {
   "automations.table.nextRun": "Prochaine exécution",
   "automations.table.lastRun": "Dernière exécution",
   "automations.table.status": "Statut",
-  "automations.runs.total": "{count} exécutions récentes",
-  "automations.runs.ok": "{count} OK",
-  "automations.runs.error": "{count} en échec",
-  "automations.runs.running": "{count} en cours",
-  "automations.runs.unknown": "{count} inconnues",
+  "automations.runs.total": "Exécutions récentes : {count}",
+  "automations.runs.ok": "OK : {count}",
+  "automations.runs.error": "En échec : {count}",
+  "automations.runs.running": "En cours : {count}",
+  "automations.runs.unknown": "Inconnu : {count}",
   "automations.runs.showingOf": "Affichage de {shown} sur {total} exécutions récentes",
 
   // Routines page

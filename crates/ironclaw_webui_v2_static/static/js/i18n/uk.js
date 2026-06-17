@@ -739,11 +739,11 @@ registerPack("uk", {
   "automations.table.nextRun": "Наступний запуск",
   "automations.table.lastRun": "Останній запуск",
   "automations.table.status": "Статус",
-  "automations.runs.total": "{count} останніх запусків",
-  "automations.runs.ok": "{count} успішних",
-  "automations.runs.error": "{count} з помилкою",
-  "automations.runs.running": "{count} виконується",
-  "automations.runs.unknown": "{count} невідомих",
+  "automations.runs.total": "Останні запуски: {count}",
+  "automations.runs.ok": "Успішні: {count}",
+  "automations.runs.error": "З помилкою: {count}",
+  "automations.runs.running": "Виконується: {count}",
+  "automations.runs.unknown": "Невідомо: {count}",
   "automations.runs.showingOf": "Показано {shown} з {total} останніх запусків",
 
   // Routines page
