@@ -15,16 +15,29 @@
 //! libSQL handle on the `reborn-local-dev.db` path — it does not reuse a
 //! running runtime's handle — so it is intended for offline/operator use:
 //! running it against a live server can hit transient SQLite busy/lock errors.
+//!
+//! Reassign (`--reassign` / `--reassign-to-current-sso-owner`) rewrites a
+//! stranded trigger's `creator_user_id` AND re-pairs the new owner's trusted
+//! external actor through the SAME filesystem-backed conversation store the
+//! runtime's trigger poller binds against at fire time
+//! (`factory::build_trigger_conversation_services_from_libsql`, scoped over the
+//! `/tenants` libSQL mount via the production `wrap_scoped` resolver). Seeding
+//! the access row alone is insufficient: fire-time binding fails closed for
+//! unpaired actors, so without the re-pair the repair would report success
+//! while the next fire still fails (#4992).
 
 use std::path::Path;
 use std::sync::Arc;
 
+use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_reborn::local_trigger_access::{
     LocalAccessState, LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
     RebornLibSqlLocalTriggerAccessStore, RebornLocalTriggerAccessStoreError,
 };
 use ironclaw_triggers::{LibSqlTriggerRepository, TriggerError, TriggerRecord, TriggerRepository};
+
+use crate::factory::{build_trigger_conversation_services_from_libsql, pair_trigger_creator};
 
 /// What the repair pass should do beyond reporting.
 #[derive(Debug, Clone)]
@@ -87,6 +100,11 @@ pub enum TriggerAccessRepairError {
          Log in via SSO first, or pass an explicit target user id."
     )]
     NoSsoOwner,
+    #[error(
+        "reassigned trigger ownership but could not re-pair the new owner's trusted \
+         trigger actor (fire-time binding fails closed for unpaired actors): {reason}"
+    )]
+    Pairing { reason: String },
 }
 
 impl From<TriggerError> for TriggerAccessRepairError {
@@ -193,13 +211,39 @@ pub async fn repair_local_trigger_access(
             }
         }
         TriggerAccessRepairAction::Reassign(target) => {
-            apply_reassign(&repository, &access, tenant_id, &stranded_records, &target).await?;
+            let conversations = build_trigger_conversation_services_from_libsql(Arc::clone(&db))
+                .await
+                .map_err(|error| TriggerAccessRepairError::Pairing {
+                    reason: format!("open trigger conversation services: {error}"),
+                })?;
+            apply_reassign(
+                &repository,
+                &access,
+                &conversations,
+                tenant_id,
+                &stranded_records,
+                &target,
+            )
+            .await?;
             report.reassigned = stranded_records.len();
             report.reassigned_to = Some(target.as_str().to_string());
         }
         TriggerAccessRepairAction::ReassignToCurrentSsoOwner => {
             let target = resolve_current_sso_owner(&access, tenant_id).await?;
-            apply_reassign(&repository, &access, tenant_id, &stranded_records, &target).await?;
+            let conversations = build_trigger_conversation_services_from_libsql(Arc::clone(&db))
+                .await
+                .map_err(|error| TriggerAccessRepairError::Pairing {
+                    reason: format!("open trigger conversation services: {error}"),
+                })?;
+            apply_reassign(
+                &repository,
+                &access,
+                &conversations,
+                tenant_id,
+                &stranded_records,
+                &target,
+            )
+            .await?;
             report.reassigned = stranded_records.len();
             report.reassigned_to = Some(target.as_str().to_string());
         }
@@ -225,6 +269,7 @@ async fn resolve_current_sso_owner(
 async fn apply_reassign(
     repository: &LibSqlTriggerRepository,
     access: &RebornLibSqlLocalTriggerAccessStore,
+    conversations: &RebornFilesystemConversationServices,
     tenant_id: &TenantId,
     stranded_records: &[(TriggerRecord, LocalAccessState)],
     target: &UserId,
@@ -232,8 +277,21 @@ async fn apply_reassign(
     for (trigger, _) in stranded_records {
         let mut updated = trigger.clone();
         updated.creator_user_id = target.clone();
-        repository.upsert_trigger(updated).await?;
+        repository.upsert_trigger(updated.clone()).await?;
         seed_creator_access(access, tenant_id, trigger, target).await?;
+        // The access row alone is not enough: fire-time conversation binding
+        // (`TriggerTrustedInboundBinding::for_fire`) keys the external actor on
+        // the trigger's `creator_user_id`, and binding resolution FAILS CLOSED
+        // for unpaired actors. Without re-pairing the new owner here, the next
+        // fire still fails even though the access row exists — the false-success
+        // trap this repair must not leave behind (#4992). `pair_trigger_creator`
+        // mirrors the create-time pairing in `factory::pair_trigger_creator`,
+        // pairing on the UPDATED record so the actor ref is keyed on `target`.
+        pair_trigger_creator(conversations, &updated)
+            .await
+            .map_err(|error| TriggerAccessRepairError::Pairing {
+                reason: error.to_string(),
+            })?;
     }
     Ok(())
 }

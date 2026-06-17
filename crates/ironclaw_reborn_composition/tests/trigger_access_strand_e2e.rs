@@ -38,8 +38,9 @@ use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
     LocalTriggerAccessSource, RebornCompositionProfile, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalRuntimeProfileOptions, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    TriggerPollerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
-    open_local_trigger_access_store,
+    TriggerAccessRepairAction, TriggerPollerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options, open_local_trigger_access_store,
+    repair_local_trigger_access,
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
@@ -534,4 +535,163 @@ async fn relogin_env_reconcile_does_not_strand_seeded_sso_creator() {
         row.thread_id.is_some(),
         "the fire must record a non-null thread_id — row: {row:?}",
     );
+}
+
+/// Scenario 4 (#4992 reassign regression — the false-success trap): a trigger
+/// whose original creator is GONE is reassigned to a fresh owner via the
+/// operator repair tool. The repair seeds the new owner's access row AND must
+/// re-pair the new owner's trusted external actor in the same filesystem-backed
+/// conversation store the poller binds against. The test deliberately NEVER
+/// calls `pair_creator` for the target — only the repair pairs it. After the
+/// reassign, the target's fire must bind successfully end-to-end (status `Ok`,
+/// non-null `run_id` AND `thread_id`).
+///
+/// WITHOUT the repair's pairing fix this fails: fire-time binding fails closed
+/// for the unpaired reassigned actor, so the run-history row is `Error` with
+/// `run_id = None` / `thread_id = None`, even though the repair reported
+/// success and the access row exists.
+#[tokio::test]
+async fn reassigned_owner_fires_end_to_end_after_repair_pairs_the_actor() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway::default());
+    let runtime_owner = "strand-reassign-runtime-owner";
+
+    // Open the store on the shared substrate file FIRST so the access table is
+    // migrated before the repair / runtime open the same file.
+    let access_store = open_local_trigger_access_store(&substrate_db_path(&root))
+        .await
+        .expect("open local trigger access store");
+
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let gone_creator = UserId::new("strand-reassign-gone-creator").expect("user id");
+    let target = UserId::new("strand-reassign-target-owner").expect("user id");
+    let agent_id = AgentId::new(AGENT).expect("agent id");
+
+    // Seed a trigger owned by the gone creator on the substrate trigger repo so
+    // the repair's strand scan finds it. The repair opens its own libSQL handle
+    // on the same file, so the record must already be persisted there.
+    let trigger_id = TriggerId::new();
+    {
+        let repo: Arc<dyn TriggerRepository> = open_local_trigger_access_store_repo(&root).await;
+        repo.upsert_trigger(due_trigger(
+            trigger_id,
+            &tenant_id,
+            &gone_creator,
+            &agent_id,
+            "trigger-strand-reassign",
+        ))
+        .await
+        .expect("seed stranded trigger");
+    }
+
+    // Precondition: neither the gone creator nor the target has active access.
+    assert!(
+        !access_store
+            .has_active_local_access(&tenant_id, &gone_creator, Some(&agent_id), None)
+            .await
+            .expect("read access"),
+        "the gone creator must be stranded before the repair",
+    );
+    assert!(
+        !access_store
+            .has_active_local_access(&tenant_id, &target, Some(&agent_id), None)
+            .await
+            .expect("read access"),
+        "the target must have no access before the repair",
+    );
+
+    // Run the operator repair: reassign the stranded trigger to the target.
+    // This rewrites `creator_user_id`, seeds the target's access row, AND must
+    // re-pair the target's trusted external actor.
+    let applied = repair_local_trigger_access(
+        &substrate_db_path(&root),
+        &tenant_id,
+        TriggerAccessRepairAction::Reassign(target.clone()),
+    )
+    .await
+    .expect("reassign repair");
+    assert_eq!(applied.reassigned, 1, "exactly one trigger reassigned");
+    assert_eq!(applied.reassigned_to.as_deref(), Some(target.as_str()));
+
+    // Build the runtime AFTER the repair so the poller reads the repaired state.
+    let runtime = build_runtime_with_real_checker(
+        &root,
+        runtime_owner,
+        Arc::clone(&recording_gateway),
+        Arc::clone(&access_store),
+    )
+    .await;
+
+    // Deliberately do NOT pair the target here — the repair must have done it.
+
+    // Make the reassigned trigger due now so the poller fires it.
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let reassigned = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get reassigned trigger")
+        .expect("reassigned trigger present");
+    assert_eq!(
+        reassigned.creator_user_id, target,
+        "the repair must have rewritten the trigger creator to the target",
+    );
+    repo.upsert_trigger(due_trigger(
+        trigger_id,
+        &tenant_id,
+        &target,
+        &agent_id,
+        "trigger-strand-reassign",
+    ))
+    .await
+    .expect("re-arm reassigned trigger as due");
+
+    let row =
+        wait_for_run_history_row(&repo, &tenant_id, trigger_id, Duration::from_secs(20)).await;
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let row = row.expect("a terminal run-history row should be recorded within 20s");
+    assert_eq!(
+        row.status,
+        TriggerRunHistoryStatus::Ok,
+        "the reassigned owner's fire must bind and reach accepted-turn submission \
+         (the repair re-paired the actor) — row: {row:?}",
+    );
+    assert!(
+        row.run_id.is_some(),
+        "the reassigned owner's fire must record a non-null run_id — row: {row:?}",
+    );
+    assert!(
+        row.thread_id.is_some(),
+        "the reassigned owner's fire must record a non-null thread_id \
+         (binding succeeded for the paired reassigned actor) — row: {row:?}",
+    );
+    assert!(
+        row.failure_reason.is_none(),
+        "a successful reassigned fire must not carry a failure_reason — row: {row:?}",
+    );
+}
+
+/// Open a trigger repository on the shared substrate file to seed a trigger
+/// record before the repair runs. Mirrors how the repair and runtime open the
+/// same `reborn-local-dev.db` substrate.
+async fn open_local_trigger_access_store_repo(
+    root: &tempfile::TempDir,
+) -> Arc<dyn TriggerRepository> {
+    use ironclaw_triggers::LibSqlTriggerRepository;
+    let path = substrate_db_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create substrate dir");
+    }
+    let db = Arc::new(
+        libsql::Builder::new_local(&path)
+            .build()
+            .await
+            .expect("open substrate db"),
+    );
+    let repo = LibSqlTriggerRepository::new(db);
+    repo.run_migrations().await.expect("migrate trigger repo");
+    Arc::new(repo)
 }

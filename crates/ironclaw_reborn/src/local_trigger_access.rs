@@ -44,10 +44,22 @@ pub enum LocalTriggerAccessSource {
     /// this; rows are seeded LAZILY for the exact
     /// `(tenant, creator, agent, project)` scope — by fire-time self-heal (the
     /// `TriggerFireAccessChecker` on the first fire of an `Absent`-scope
-    /// trigger) and by the operator repair tool. Using a distinct source keeps
-    /// these rows immune to the env/sso/run reconcile, which only deactivates
-    /// rows of its own source, so a trigger's fire access is not silently
-    /// revoked by a later login/boot reconcile.
+    /// trigger) and by the operator repair tool.
+    ///
+    /// The table keys one row per `(tenant, user, agent, project)` scope WITHOUT
+    /// `source`, so a scope holds whatever source first inserted it. Fire-time
+    /// self-heal only writes a `LocalDevTriggerCreateBootstrap` row when the
+    /// scope is `Absent`; if an env/sso row already exists the scope reads
+    /// `Active` and no trigger-owned row is created. So this source does NOT
+    /// confer per-source immunity. A stranded creator's recovery is durable
+    /// today only because no production reconcile excludes a live trigger
+    /// creator: env/run reconcile carry only their single owner, and there is no
+    /// production SSO reconcile (`seed_for_user` is additive `ON CONFLICT DO
+    /// NOTHING`, never deactivating).
+    ///
+    /// NOTE: true per-source durability would require adding `source` to the
+    /// PRIMARY KEY and making `local_access_state` source-aware — a deliberately
+    /// deferred dual-backend schema change, not done here.
     LocalDevTriggerCreateBootstrap,
 }
 
