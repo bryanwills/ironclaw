@@ -88,6 +88,7 @@ pub(super) async fn try_final_answer_nudge(
     // answer in prose. `surface_version: None` only strips tools from the prompt
     // *text*, not from the provider tool array, so it is not sufficient on its own.
     let model_request = LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: bundle.messages,
         surface_version: None,
         model_preference,

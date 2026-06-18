@@ -71,6 +71,7 @@ pub(super) async fn explain_failure(
     let response = match await_explanation_model_call(
         ctx,
         ctx.host.stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,

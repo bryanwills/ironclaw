@@ -10,7 +10,10 @@ use tracing::debug;
 
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
-    strategies::{ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope},
+    strategies::{
+        ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope,
+        model_error_to_failure_kind,
+    },
 };
 
 use super::prompt::build_prompt_bundle_for_surface;
@@ -27,6 +30,7 @@ pub(crate) struct ModelStage;
 pub(super) struct ModelInput {
     pub(super) state: LoopExecutionState,
     pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
+    pub(super) inline_messages: Vec<ironclaw_turns::run_profile::LoopInlineMessage>,
     pub(super) surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
     pub(super) capability_view: LoopModelCapabilityView,
 }
@@ -71,6 +75,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
         let capability_view = input.capability_view;
         let mut request = LoopModelRequest {
             messages: input.messages,
+            inline_messages: input.inline_messages,
             surface_version: Some(surface_version.clone()),
             model_preference,
             capability_view: Some(capability_view.clone()),
@@ -129,7 +134,9 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         });
                     };
                     if !recorded_failure {
-                        state.recent_failure_kinds.push(LoopFailureKind::ModelError);
+                        state
+                            .recent_failure_kinds
+                            .push(model_error_to_failure_kind(class));
                         recorded_failure = true;
                     }
                     let summary = ModelErrorSummary {
@@ -178,8 +185,10 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 &state,
                                 surface_version.clone(),
                                 capability_view.clone(),
+                                alter.as_ref(),
                             )
                             .await?;
+                            request.inline_messages = bundle.inline_messages();
                             match CheckpointStage.cancel_if_requested(ctx, state).await? {
                                 CancelCheck::Continue(next) => state = *next,
                                 CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
@@ -255,6 +264,13 @@ async fn apply_model_retry_alteration(
             }
             state.compaction_state.force_compact_on_next_iteration = true;
             return Ok(ModelRetryAction::RetryIteration);
+        }
+        Some(RetryAlteration::RepairInvalidModelOutput) => {
+            if scope != RetryScope::Call {
+                return Err(AgentLoopExecutorError::PlannerContract {
+                    detail: "invalid model output repair retry requires call scope",
+                });
+            }
         }
         Some(RetryAlteration::AdvanceFallback) | None => {}
     }

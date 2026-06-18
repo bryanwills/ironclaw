@@ -621,6 +621,8 @@ pub enum AgentLoopHostErrorKind {
     /// The request payload itself is well-formed but its content is invalid in
     /// the current host state (e.g. schema id/version mismatch on checkpoint load).
     Invalid,
+    /// The model/provider output was structurally invalid for the active loop contract.
+    InvalidOutput,
     PolicyDenied,
     BudgetExceeded,
     /// The model call would push utilization past the configured pause
@@ -648,6 +650,7 @@ impl AgentLoopHostErrorKind {
             Self::StaleSurface => "stale_surface",
             Self::InvalidInvocation => "invalid_invocation",
             Self::Invalid => "invalid",
+            Self::InvalidOutput => "invalid_output",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
             Self::BudgetApprovalRequired => "budget_approval_required",
@@ -933,6 +936,8 @@ pub struct LoopModelCapabilityView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelRequest {
     pub messages: Vec<LoopModelMessage>,
+    #[serde(default)]
+    pub inline_messages: Vec<LoopInlineMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub model_preference: Option<ModelProfileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
