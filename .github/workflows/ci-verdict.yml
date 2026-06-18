@@ -1,0 +1,157 @@
+# ci-verdict is the single intended required status check for branch protection.
+# It rolls up deterministic pre-merge gates from code_style.yml/code-style,
+# test.yml/run-tests (including replay-gate.yml/replay-snapshots when the legacy
+# aggregator requires it), reborn-tests.yml/reborn-tests, reborn-e2e.yml/reborn-e2e
+# when its PR path filters schedule it, and regression-test-check.yml/regression-test
+# on pull requests. A repo admin must make the one-time branch-protection change
+# to require ci-verdict and remove the individual rolled-up checks.
+
+name: ci-verdict
+
+on:
+  pull_request:
+    branches:
+      - main
+  merge_group:
+    branches:
+      - main
+    types:
+      - checks_requested
+
+permissions:
+  checks: read
+  contents: read
+
+concurrency:
+  group: ci-verdict-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-verdict:
+    name: ci-verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check deterministic gate results
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          changed_files="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
+
+          required_checks=(
+            "Code Style (fmt + clippy)"
+            "Tests (Legacy)"
+            "Tests (Reborn)"
+          )
+
+          reborn_e2e_required=false
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            required_checks+=("Regression test enforcement")
+
+            while IFS= read -r path || [[ -n "$path" ]]; do
+              [[ -n "$path" ]] || continue
+              case "$path" in
+                crates/ironclaw_*/*|docs/reborn/*|scripts/reborn-e2e-rust.sh|tests/e2e/*|build.rs|providers.json|Cargo.toml|Cargo.lock|.github/workflows/reborn-e2e.yml)
+                  reborn_e2e_required=true
+                  break
+                  ;;
+              esac
+            done <<< "$changed_files"
+          fi
+
+          if [[ "$reborn_e2e_required" == "true" ]]; then
+            required_checks+=("Reborn E2E")
+          fi
+
+          echo "Evaluating deterministic CI gates for $EVENT_NAME on $HEAD_SHA"
+          echo "Required check-runs:"
+          printf '  - %s\n' "${required_checks[@]}"
+
+          latest_check_run() {
+            local check_name="$1"
+            gh api --method GET \
+              "repos/${REPO}/commits/${HEAD_SHA}/check-runs" \
+              -f "check_name=${check_name}" \
+              -f filter=latest \
+              -f per_page=100 \
+              --jq '
+                .check_runs
+                | map(select(.app.slug == "github-actions"))
+                | sort_by(.started_at // .completed_at // .created_at // "")
+                | last
+                | if . == null then "" else
+                    [.name, .status, (.conclusion // ""), (.html_url // .details_url // "")]
+                    | @tsv
+                  end
+              '
+          }
+
+          deadline=$((SECONDS + 75 * 60))
+          interval_seconds=60
+
+          while true; do
+            missing=()
+            pending=()
+            failed=()
+
+            for check_name in "${required_checks[@]}"; do
+              result="$(latest_check_run "$check_name")"
+
+              if [[ -z "$result" ]]; then
+                echo "$check_name: missing"
+                missing+=("$check_name")
+                continue
+              fi
+
+              IFS=$'\t' read -r name status conclusion url <<< "$result"
+
+              if [[ "$status" != "completed" ]]; then
+                echo "$check_name: $status ($url)"
+                pending+=("$check_name:$status")
+                continue
+              fi
+
+              if [[ "$conclusion" != "success" ]]; then
+                echo "$check_name: $conclusion ($url)"
+                failed+=("$check_name:$conclusion")
+                continue
+              fi
+
+              echo "$check_name: success ($url)"
+            done
+
+            if (( ${#failed[@]} > 0 )); then
+              echo "::error::Deterministic CI gate failure(s): ${failed[*]}"
+              exit 1
+            fi
+
+            if (( ${#missing[@]} == 0 && ${#pending[@]} == 0 )); then
+              echo "ci-verdict: all deterministic gates passed"
+              exit 0
+            fi
+
+            if (( SECONDS >= deadline )); then
+              if (( ${#missing[@]} > 0 )); then
+                echo "::error::Missing deterministic CI check-run(s): ${missing[*]}"
+              fi
+              if (( ${#pending[@]} > 0 )); then
+                echo "::error::Timed out waiting for deterministic CI check-run(s): ${pending[*]}"
+              fi
+              exit 1
+            fi
+
+            echo "Waiting for deterministic gates: missing=${missing[*]:-none} pending=${pending[*]:-none}"
+            sleep "$interval_seconds"
+          done
