@@ -225,21 +225,22 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   fire-time authorization request is a host-owned shape over
   `tenant_id`/`creator_user_id`/`agent_id`/`project_id`/`trigger_id`/`fire_slot`;
   trigger-domain crates must not own the access policy. Until that request
-  is backed by the real agent/project access source of truth, a normal
-  runtime must fail closed instead of enabling the trigger poller with the
-  tenant-scope placeholder. Single-operator `serve` deployments may satisfy
-  the contract with exact trusted host configuration when the authenticated
-  WebUI user is also the runtime owner.
+  is backed by the real agent/project access source of truth, runtimes that
+  cannot prove the fire came from their durable trigger repository must fail
+  closed instead of enabling the trigger poller with the tenant-scope
+  placeholder. Production `serve` may satisfy the interim contract by using
+  the claimed durable trigger record as creator authority and validating its
+  exact scope against trusted host configuration.
 - Local-dev `run` and `serve` may satisfy that contract by seeding active
   access rows from trusted operator configuration at boot. `run` reconciles the
   configured CLI owner for its tenant/agent/no-project scope because the generic
   `run` path does not yet wire `[identity].default_project` into trigger create
-  scope. `serve` reconciles the env-bearer WebUI user and, when local-dev SSO is
-  enabled, existing admitted SSO users at boot plus each admitted SSO identity
-  at login. Both paths wire the same store as the fire-time access checker.
-  This local-dev access table is bootstrap authorization state only; it is not
-  the production agent/project membership source of truth and must not be used
-  to justify enabling trigger polling in a production or multi-tenant runtime.
+  scope. Local-dev `serve` reconciles the env-bearer WebUI user and, when SSO is
+  enabled, keeps previously seeded SSO access rows while seeding each admitted
+  SSO identity at login. Both paths wire the same local store as the fire-time
+  access checker. This local-dev access table is bootstrap authorization state
+  only; it is not the production agent/project membership source of truth and
+  must not be treated as a production membership API.
   Bootstrap-owned active rows no longer present in the trusted local admission
   set are marked inactive, while manually inactive rows are not silently
   reactivated. The seeded row is exact
@@ -247,13 +248,16 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   project is not a wildcard.
 - Production `serve` defaults the trigger poller off; operators must explicitly
   opt in with `[trigger_poller].enabled = true` or the deployment environment.
-  When enabled with env-bearer WebUI auth, it may satisfy the fire-time access
-  contract by wiring an exact secure-tenant checker over the trusted host tenant,
-  the authenticated WebUI user/runtime owner, the default agent, and the
-  optional default project. This checker is not a multi-tenant membership source
-  of truth; it intentionally authorizes only the configured single-operator
-  scope and denies any trigger persisted for another tenant, creator, agent, or
-  project.
+  When enabled, production `serve` must use the durable trigger record as the
+  persisted authority for the trigger creator. The trusted fire request is
+  minted only after the production `TriggerRepository` has returned and claimed
+  a persisted fire; the production checker therefore validates the stored
+  trigger scope against trusted host configuration (`tenant_id`, default
+  `agent_id`, and optional default `project_id`) without requiring
+  `creator_user_id` to equal the startup env-bearer user. A persisted trigger
+  created by an authenticated SSO user remains fireable for its exact stored
+  scope, and a trigger persisted for another tenant, agent, or project is
+  denied.
 - The trusted inbound request is a host-owned synthetic inbound shape around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it has no adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
 

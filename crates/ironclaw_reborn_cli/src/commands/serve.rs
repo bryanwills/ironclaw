@@ -11,9 +11,10 @@ use ironclaw_reborn_composition::build_openai_compat_route_mount;
 use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
-    ExactScopeTriggerFireAccessChecker, GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation,
-    LocalTriggerAccessRole, LocalTriggerAccessSource, RebornBuildInput, RebornCompositionProfile,
-    RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
+    GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
+    LocalTriggerAccessSource, RebornBuildInput, RebornCompositionProfile, RebornReadiness,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, TriggerFireAccessCheck,
+    TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
     WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime, open_local_trigger_access_store,
     webui_v2_app_with_lifecycle,
 };
@@ -281,7 +282,7 @@ impl ServeCommand {
                  value is {token_byte_len} bytes — generate one with e.g. `openssl rand -hex 32`."
             ));
         }
-        // Substrate DB the reborn local-dev runtime opens (a second handle to
+        // Local-dev substrate DB the reborn runtime opens (a second handle to
         // the same `reborn-local-dev.db`). It backs the local trigger-fire
         // access store used to seed default-user and SSO-user trigger access;
         // canonical identity itself lives on the runtime's scoped filesystem,
@@ -355,6 +356,10 @@ impl ServeCommand {
             )
             .await?;
 
+            let serve_profile = runtime_input
+                .services
+                .as_ref()
+                .map(|services| services.profile());
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
@@ -413,10 +418,29 @@ impl ServeCommand {
                 None
             };
 
+            let local_trigger_access_bootstrap = match serve_profile {
+                Some(
+                    RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo,
+                ) => Some(
+                    crate::commands::webui_auth::LocalTriggerAccessBootstrapConfig {
+                        access_store_path: user_store_path.clone(),
+                        tenant_id: tenant_id.clone(),
+                        agent_id: default_agent_id.clone(),
+                        project_id: default_project_id.clone(),
+                    },
+                ),
+                Some(
+                    RebornCompositionProfile::Production
+                    | RebornCompositionProfile::MigrationDryRun
+                    | RebornCompositionProfile::Disabled,
+                )
+                | None => None,
+            };
+
             // Assemble the WebChat v2 auth surface (authenticator + optional
             // public login mount). The auth/identity module owns the
             // signed-session wiring; `serve` supplies host config, the
-            // runtime-owned identity resolver, and the local trigger-access
+            // runtime-owned identity resolver, and the local-dev trigger-access
             // bootstrap that seeds an admitted SSO user's trigger access on
             // login.
             let crate::commands::webui_auth::WebuiAuthSurface {
@@ -428,14 +452,7 @@ impl ServeCommand {
                 tenant_id.clone(),
                 session_signing_secret,
                 env_authenticator,
-                Some(
-                    crate::commands::webui_auth::LocalTriggerAccessBootstrapConfig {
-                        access_store_path: user_store_path.clone(),
-                        tenant_id: tenant_id.clone(),
-                        agent_id: default_agent_id.clone(),
-                        project_id: default_project_id.clone(),
-                    },
-                ),
+                local_trigger_access_bootstrap,
             )
             .await?;
 
@@ -718,15 +735,66 @@ async fn with_serve_trigger_fire_access_checker(
         }
         Some(RebornCompositionProfile::Production) => Ok(runtime_input
             .with_trigger_fire_access_checker(Arc::new(
-                ExactScopeTriggerFireAccessChecker::for_default_agent(
+                ProductionServeTriggerFireAccessChecker::new(
                     tenant_id.clone(),
-                    user_id.clone(),
                     default_agent_id.clone(),
                     default_project_id.cloned(),
                 ),
             ))),
         Some(RebornCompositionProfile::MigrationDryRun | RebornCompositionProfile::Disabled)
         | None => Ok(runtime_input),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProductionServeTriggerFireAccessChecker {
+    tenant_id: TenantId,
+    default_agent_id: AgentId,
+    default_project_id: Option<ProjectId>,
+}
+
+impl ProductionServeTriggerFireAccessChecker {
+    fn new(
+        tenant_id: TenantId,
+        default_agent_id: AgentId,
+        default_project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            default_agent_id,
+            default_project_id,
+        }
+    }
+
+    fn deny(reason: impl Into<String>) -> TriggerFireAccessDecision {
+        TriggerFireAccessDecision::Denied {
+            reason: reason.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TriggerFireAccessChecker for ProductionServeTriggerFireAccessChecker {
+    async fn check_trigger_fire_access(
+        &self,
+        request: TriggerFireAccessCheck,
+    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+        if request.tenant_id != self.tenant_id {
+            return Ok(Self::deny(
+                "trigger tenant does not match the WebChat v2 tenant",
+            ));
+        }
+        if request.agent_id.as_ref() != Some(&self.default_agent_id) {
+            return Ok(Self::deny(
+                "trigger agent does not match the WebChat v2 default agent",
+            ));
+        }
+        if request.project_id.as_ref() != self.default_project_id.as_ref() {
+            return Ok(Self::deny(
+                "trigger project does not match the WebChat v2 default project",
+            ));
+        }
+        Ok(TriggerFireAccessDecision::Allowed)
     }
 }
 
@@ -802,43 +870,48 @@ mod tests {
     use super::*;
 
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+    #[cfg(feature = "postgres")]
+    const TEST_PRODUCTION_POSTGRES_URL_ENV: &str =
+        "IRONCLAW_REBORN_SERVE_TRIGGER_ACCESS_POSTGRES_URL";
+    #[cfg(feature = "postgres")]
+    const TEST_PRODUCTION_SECRET_MASTER_KEY_ENV: &str =
+        "IRONCLAW_REBORN_SERVE_TRIGGER_ACCESS_SECRET_MASTER_KEY";
+
+    #[cfg(feature = "postgres")]
+    struct ScopedEnvVar {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    #[cfg(feature = "postgres")]
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            // SAFETY: these tests use unique env-var names and restore them on
+            // drop, so no sibling test in this crate observes partial mutation.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prior }
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                // SAFETY: restores the process env var captured by
+                // `ScopedEnvVar::set`.
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                // SAFETY: restores the process env var captured by
+                // `ScopedEnvVar::set`.
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     fn clear_webui_env() {
         // SAFETY: tests are serialized by `WEBUI_BASE_URL_ENV_LOCK`; no other
         // thread reads or writes this env var while the guard is held.
         unsafe { std::env::remove_var(WEBUI_BASE_URL_ENV) };
-    }
-
-    #[cfg(feature = "postgres")]
-    struct EnvVarGuard {
-        name: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    #[cfg(feature = "postgres")]
-    impl EnvVarGuard {
-        fn set(name: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(name);
-            // SAFETY: this helper uses test-unique environment variable names,
-            // so it does not race production code or other tests.
-            unsafe { std::env::set_var(name, value) };
-            Self { name, previous }
-        }
-    }
-
-    #[cfg(feature = "postgres")]
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // SAFETY: this guard restores only the same test-unique variable it
-            // set, during test teardown.
-            unsafe {
-                if let Some(previous) = &self.previous {
-                    std::env::set_var(self.name, previous);
-                } else {
-                    std::env::remove_var(self.name);
-                }
-            }
-        }
     }
 
     #[test]
@@ -905,106 +978,6 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
-    }
-
-    #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn production_trigger_poller_bootstrap_wires_exact_scope_checker() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tenant_id = TenantId::new("serve-prod-trigger-tenant").expect("tenant");
-        let user_id = UserId::new("serve-prod-trigger-user").expect("user");
-        let agent_id = AgentId::new("serve-prod-trigger-agent").expect("agent");
-        let project_id = ProjectId::new("serve-prod-trigger-project").expect("project");
-        let local_store_path = dir.path().join("unused-local-access.db");
-        let _postgres_url = EnvVarGuard::set(
-            "IRONCLAW_REBORN_SERVE_TRIGGER_TEST_POSTGRES_URL",
-            "postgres://localhost/ironclaw_reborn_cli_serve_trigger_test",
-        );
-        let _secret_master_key = EnvVarGuard::set(
-            "IRONCLAW_REBORN_SERVE_TRIGGER_TEST_SECRET_MASTER_KEY",
-            "01234567890123456789012345678901",
-        );
-        let config_file = ironclaw_reborn_config::RebornConfigFile {
-            storage: Some(ironclaw_reborn_config::StorageSection {
-                backend: Some(ironclaw_reborn_config::StorageBackend::Postgres),
-                url_env: Some("IRONCLAW_REBORN_SERVE_TRIGGER_TEST_POSTGRES_URL".to_string()),
-                secret_master_key_env: Some(
-                    "IRONCLAW_REBORN_SERVE_TRIGGER_TEST_SECRET_MASTER_KEY".to_string(),
-                ),
-                pool_max_size: None,
-            }),
-            policy: Some(ironclaw_reborn_config::PolicySection {
-                deployment_mode: Some("hosted_multi_tenant".to_string()),
-                default_profile: Some("secure_default".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let runtime_input =
-            RebornRuntimeInput::from_services(
-                RebornBuildInput::postgres_from_config_and_env(
-                    RebornCompositionProfile::Production,
-                    "serve-prod-trigger-owner",
-                    Some(&config_file),
-                )
-                .expect("production services input"),
-            )
-            .with_trigger_poller_settings(
-                ironclaw_reborn_composition::TriggerPollerSettings::enabled(),
-            );
-
-        let runtime_input = with_serve_trigger_fire_access_checker(
-            runtime_input,
-            &local_store_path,
-            &tenant_id,
-            &user_id,
-            &agent_id,
-            Some(&project_id),
-        )
-        .await
-        .expect("bootstrap production trigger fire access checker");
-
-        assert!(
-            !local_store_path.exists(),
-            "production bootstrap must not create the local-dev access store"
-        );
-        let checker = runtime_input
-            .trigger_fire_access_checker
-            .expect("checker is wired");
-
-        let allowed = checker
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id: tenant_id.clone(),
-                creator_user_id: user_id.clone(),
-                agent_id: Some(agent_id.clone()),
-                project_id: Some(project_id.clone()),
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check trigger fire access");
-        assert_eq!(
-            allowed,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Allowed
-        );
-
-        let other_project_decision = checker
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id,
-                creator_user_id: user_id,
-                agent_id: Some(agent_id),
-                project_id: Some(ProjectId::new("serve-prod-other-project").expect("project")),
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check trigger fire access");
-        assert_eq!(
-            other_project_decision,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
-                reason: "trigger project does not match configured trigger-fire scope".to_string(),
-            }
-        );
     }
 
     #[tokio::test]
@@ -1190,6 +1163,121 @@ mod tests {
             ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
                 reason: "trigger creator does not have active local access for this scope"
                     .to_string(),
+            }
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn production_serve_trigger_access_allows_durable_trigger_creator_scope() {
+        let _postgres_url = ScopedEnvVar::set(
+            TEST_PRODUCTION_POSTGRES_URL_ENV,
+            "postgres://localhost/ironclaw_reborn_cli_test",
+        );
+        let _secret_master_key =
+            ScopedEnvVar::set(TEST_PRODUCTION_SECRET_MASTER_KEY_ENV, "test-master-key");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reborn_home = dir.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir reborn home");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            format!(
+                r#"
+[identity]
+tenant = "prod-sso-trigger-tenant"
+default_agent = "prod-sso-trigger-agent"
+default_project = "prod-sso-trigger-project"
+
+[storage]
+backend = "postgres"
+url_env = "{TEST_PRODUCTION_POSTGRES_URL_ENV}"
+secret_master_key_env = "{TEST_PRODUCTION_SECRET_MASTER_KEY_ENV}"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#
+            ),
+        )
+        .expect("write production config");
+        let boot_config = ironclaw_reborn_config::RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+        let runtime_input =
+            crate::runtime::build_runtime_input(
+                &boot_config,
+                crate::runtime::RuntimeInputCaller::Serve,
+            )
+            .expect("production serve runtime input")
+            .with_trigger_poller_settings(
+                ironclaw_reborn_composition::TriggerPollerSettings::enabled(),
+            );
+        assert_eq!(
+            runtime_input.services.as_ref().expect("services").profile(),
+            RebornCompositionProfile::Production
+        );
+
+        let tenant_id = TenantId::new("prod-sso-trigger-tenant").expect("tenant");
+        let env_user_id = UserId::new("prod-env-owner").expect("env user");
+        let sso_user_id = UserId::new("prod-sso-user").expect("sso user");
+        let agent_id = AgentId::new("prod-sso-trigger-agent").expect("agent");
+        let other_agent_id = AgentId::new("prod-other-agent").expect("other agent");
+        let project_id = ProjectId::new("prod-sso-trigger-project").expect("project");
+        let user_store_path = dir.path().join("reborn-local-dev.db");
+
+        let runtime_input = with_serve_trigger_fire_access_checker(
+            runtime_input,
+            &user_store_path,
+            &tenant_id,
+            &env_user_id,
+            &agent_id,
+            Some(&project_id),
+        )
+        .await
+        .expect("production serve trigger access checker");
+        assert!(
+            !user_store_path.exists(),
+            "production trigger access must not create a local sidecar access store"
+        );
+
+        let checker = runtime_input
+            .trigger_fire_access_checker
+            .expect("checker is wired");
+        let sso_decision = checker
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id: tenant_id.clone(),
+                creator_user_id: sso_user_id.clone(),
+                agent_id: Some(agent_id.clone()),
+                project_id: Some(project_id.clone()),
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check SSO trigger fire access");
+        assert_eq!(
+            sso_decision,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Allowed
+        );
+
+        let other_agent_decision = checker
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: sso_user_id,
+                agent_id: Some(other_agent_id),
+                project_id: Some(project_id),
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check wrong-scope trigger fire access");
+        assert_eq!(
+            other_agent_decision,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
+                reason: "trigger agent does not match the WebChat v2 default agent".to_string(),
             }
         );
     }
