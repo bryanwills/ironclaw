@@ -23,13 +23,11 @@ use ironclaw_filesystem::{
     ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
-    CapabilityId, HostApiError, Principal, ResourceScope, ScopedPath, Timestamp,
+    CapabilityId, HostApiError, Principal, ResourceScope, ScopedPath, TenantId, Timestamp, UserId,
     sha256_digest_token,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use crate::PersistentApprovalScope;
 
 const OVERRIDE_PREFIX: &str = "/approvals/tool-permissions";
 const OVERRIDE_PATH_CACHE_MAX_ENTRIES: usize = 1024;
@@ -67,20 +65,26 @@ impl From<FilesystemError> for ToolPermissionStoreError {
     }
 }
 
-/// Identifies one override record: a capability within a persistent-approval
-/// scope (tenant, user, optional agent/project). Reuses
-/// [`PersistentApprovalScope`] so the override and always-allow legs share an
-/// identical scoping rule.
+/// Identifies one override record: a capability scoped to `(tenant, user)`.
+///
+/// Agent/project/thread are intentionally dropped so a permission set from the
+/// settings UI (built from the caller's default agent/project) resolves
+/// identically at dispatch time regardless of the run's agent/project — a
+/// per-user tool preference, mirroring the global auto-approve setting's
+/// scoping. A non-matching scope would otherwise make the override silently
+/// no-op.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ToolPermissionOverrideKey {
-    pub scope: PersistentApprovalScope,
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
     pub capability_id: CapabilityId,
 }
 
 impl ToolPermissionOverrideKey {
     pub fn new(scope: &ResourceScope, capability_id: CapabilityId) -> Self {
         Self {
-            scope: PersistentApprovalScope::from_resource_scope(scope),
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
             capability_id,
         }
     }
@@ -380,28 +384,14 @@ fn deserialize_versioned_record(
 }
 
 fn override_path(key: &ToolPermissionOverrideKey) -> Result<ScopedPath, ToolPermissionStoreError> {
+    // The scoped filesystem already isolates by (tenant, user) at the mount, so
+    // the in-mount path is just the per-capability digest.
     ScopedPath::new(format!(
-        "{}/{}/{}.json",
+        "{}/{}.json",
         OVERRIDE_PREFIX,
-        within_tenant_scope(&key.scope),
         override_digest(key)?
     ))
     .map_err(invalid_path)
-}
-
-fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
-    let mut segments = Vec::new();
-    if let Some(agent_id) = &scope.agent_id {
-        segments.push(format!("agents/{agent_id}"));
-    }
-    if let Some(project_id) = &scope.project_id {
-        segments.push(format!("projects/{project_id}"));
-    }
-    if segments.is_empty() {
-        "scope".to_string()
-    } else {
-        segments.join("/")
-    }
 }
 
 fn override_digest(key: &ToolPermissionOverrideKey) -> Result<String, ToolPermissionStoreError> {
@@ -416,10 +406,10 @@ fn override_digest(key: &ToolPermissionOverrideKey) -> Result<String, ToolPermis
 
 fn resource_scope_for_override_key(key: &ToolPermissionOverrideKey) -> ResourceScope {
     ResourceScope {
-        tenant_id: key.scope.tenant_id.clone(),
-        user_id: key.scope.user_id.clone(),
-        agent_id: key.scope.agent_id.clone(),
-        project_id: key.scope.project_id.clone(),
+        tenant_id: key.tenant_id.clone(),
+        user_id: key.user_id.clone(),
+        agent_id: None,
+        project_id: None,
         mission_id: None,
         thread_id: None,
         invocation_id: ironclaw_host_api::InvocationId::new(),
@@ -619,6 +609,38 @@ mod tests {
         assert!(
             store.get(&key_for(&thread_b)).await.unwrap().is_some(),
             "override applies across threads in the same scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn override_scope_is_agent_and_project_agnostic() {
+        // A per-tool permission set from the settings UI (built with the
+        // caller's default agent/project) must resolve at dispatch time under a
+        // different agent/project — otherwise the override silently no-ops.
+        let store = InMemoryToolPermissionOverrideStore::new();
+        let set_scope = ResourceScope {
+            agent_id: Some(AgentId::new("agent-a").unwrap()),
+            project_id: Some(ProjectId::new("project-a").unwrap()),
+            ..scope(None, None)
+        };
+        store
+            .set(input(set_scope, ToolPermissionState::Disabled))
+            .await
+            .unwrap();
+
+        let dispatch_scope = ResourceScope {
+            agent_id: Some(AgentId::new("agent-b").unwrap()),
+            project_id: Some(ProjectId::new("project-b").unwrap()),
+            ..scope(None, None)
+        };
+        assert_eq!(
+            store
+                .get(&key_for(&dispatch_scope))
+                .await
+                .unwrap()
+                .map(|record| record.state),
+            Some(ToolPermissionState::Disabled),
+            "override must apply regardless of the run's agent/project"
         );
     }
 }
