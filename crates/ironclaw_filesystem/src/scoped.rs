@@ -426,7 +426,7 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         FilesystemOperation::ListDir => permissions.list,
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,
-        FilesystemOperation::MountLocal => false,
+        FilesystemOperation::MountLocal | FilesystemOperation::Connect => false,
         FilesystemOperation::Query => permissions.read && permissions.list,
         FilesystemOperation::Tail | FilesystemOperation::HeadSeq => permissions.read,
     }

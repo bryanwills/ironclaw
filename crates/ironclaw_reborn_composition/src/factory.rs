@@ -4647,29 +4647,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_nearai_mcp_rebootstrap_updates_existing_account() {
+    async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("local-dev");
         let owner = "local-dev-nearai-mcp-idempotent-owner";
-
-        let first = build_reborn_services(nearai_bootstrap_input(
-            owner,
-            root.clone(),
-            "nearai-first-key",
-        ))
-        .await
-        .expect("first local-dev services build");
-        drop(first);
-
-        let second =
-            build_reborn_services(nearai_bootstrap_input(owner, root, "nearai-second-key"))
-                .await
-                .expect("second local-dev services build");
         let auth_scope = AuthProductScope::new(
             ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
             AuthSurface::Api,
         );
-        let accounts = second
+
+        let first = build_reborn_services(nearai_bootstrap_input(owner, root, "nearai-first-key"))
+            .await
+            .expect("first local-dev services build");
+        let first_account = first
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_record_source()
+            .accounts_for_owner(&auth_scope)
+            .await
+            .expect("credential accounts load")
+            .into_iter()
+            .find(|account| account.provider.as_str() == "nearai")
+            .expect("NEAR AI product-auth account");
+        let extension_management = first
+            .local_runtime
+            .as_ref()
+            .expect("local runtime")
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+            Some(
+                crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                    "https://private.near.ai",
+                    secrecy::SecretString::from("nearai-second-key"),
+                )
+                .expect("valid NEAR AI MCP bootstrap config"),
+            ),
+            first.product_auth.as_ref().expect("product auth"),
+            extension_management,
+            &UserId::new(owner).unwrap(),
+        )
+        .await
+        .expect("second NEAR AI MCP bootstrap");
+        let accounts = first
             .product_auth
             .as_ref()
             .expect("product auth")
@@ -4683,6 +4705,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(nearai_accounts.len(), 1);
+        assert_eq!(nearai_accounts[0].id, first_account.id);
+        assert_eq!(
+            nearai_accounts[0].access_secret,
+            first_account.access_secret
+        );
+        assert_eq!(nearai_accounts[0].updated_at, first_account.updated_at);
         assert_eq!(
             nearai_accounts[0].status,
             CredentialAccountStatus::Configured
