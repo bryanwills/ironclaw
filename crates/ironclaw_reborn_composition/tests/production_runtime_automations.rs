@@ -122,6 +122,10 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     let runtime = build_reborn_runtime(input)
         .await
         .expect("production runtime builds");
+    assert!(
+        runtime.trigger_repository().is_some(),
+        "production runtime must expose its durable trigger repository to test-support accessors"
+    );
 
     let bundle = build_webui_services(&runtime, None).expect("webui bundle builds");
     let caller = WebUiAuthenticatedCaller::new(

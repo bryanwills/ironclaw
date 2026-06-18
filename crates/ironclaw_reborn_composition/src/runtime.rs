@@ -1046,20 +1046,29 @@ impl RebornRuntime {
 
     /// Test-only accessor for the composition-owned trigger repository so
     /// integration tests can seed `TriggerRecord` rows that the spawned
-    /// trigger poller will observe through its production read path. Returns
-    /// `None` when the runtime was built without a local-runtime substrate
-    /// (e.g. production-shape profiles that haven't been wired end-to-end
-    /// yet). Gated behind `test-support` so the substrate handle never leaks
-    /// into production builds. Mirrors the production read path exercised by
-    /// the spawned trigger poller worker, which calls
+    /// trigger poller will observe through the same local-dev or production
+    /// repository selected by runtime composition. Returns `None` only when
+    /// the runtime was built without any trigger repository. Gated behind
+    /// `test-support` so the substrate handle never leaks into production
+    /// builds. Mirrors the read path exercised by the spawned trigger poller
+    /// worker, which calls
     /// `TriggerRepository::list_due_triggers` on every tick and the
     /// per-trigger `claim_due_fire` / `mark_fire_*` mutation methods.
     #[cfg(any(test, feature = "test-support"))]
     pub fn trigger_repository(&self) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
-        self.services
+        let from_local = self
+            .services
             .local_runtime
             .as_ref()
-            .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository))
+            .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository));
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let from_local = from_local.or_else(|| {
+            self.services
+                .production_runtime
+                .as_ref()
+                .map(|production_runtime| production_runtime.trigger_repository())
+        });
+        from_local
     }
 
     /// Test-only accessor for the SAME `ConversationActorPairingService`

@@ -11,10 +11,9 @@ use ironclaw_reborn_composition::build_openai_compat_route_mount;
 use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
-    LocalTriggerAccessSource, RebornBuildInput, RebornCompositionProfile, RebornReadiness,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, TriggerFireAccessCheck,
-    TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
+    GoogleOAuthRouteConfig, HostScopeTriggerFireAccessChecker, LocalTriggerAccessReconciliation,
+    LocalTriggerAccessRole, LocalTriggerAccessSource, RebornBuildInput, RebornCompositionProfile,
+    RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
     WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime, open_local_trigger_access_store,
     webui_v2_app_with_lifecycle,
 };
@@ -735,7 +734,7 @@ async fn with_serve_trigger_fire_access_checker(
         }
         Some(RebornCompositionProfile::Production) => Ok(runtime_input
             .with_trigger_fire_access_checker(Arc::new(
-                ProductionServeTriggerFireAccessChecker::new(
+                HostScopeTriggerFireAccessChecker::for_default_agent(
                     tenant_id.clone(),
                     default_agent_id.clone(),
                     default_project_id.cloned(),
@@ -743,58 +742,6 @@ async fn with_serve_trigger_fire_access_checker(
             ))),
         Some(RebornCompositionProfile::MigrationDryRun | RebornCompositionProfile::Disabled)
         | None => Ok(runtime_input),
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ProductionServeTriggerFireAccessChecker {
-    tenant_id: TenantId,
-    default_agent_id: AgentId,
-    default_project_id: Option<ProjectId>,
-}
-
-impl ProductionServeTriggerFireAccessChecker {
-    fn new(
-        tenant_id: TenantId,
-        default_agent_id: AgentId,
-        default_project_id: Option<ProjectId>,
-    ) -> Self {
-        Self {
-            tenant_id,
-            default_agent_id,
-            default_project_id,
-        }
-    }
-
-    fn deny(reason: impl Into<String>) -> TriggerFireAccessDecision {
-        TriggerFireAccessDecision::Denied {
-            reason: reason.into(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl TriggerFireAccessChecker for ProductionServeTriggerFireAccessChecker {
-    async fn check_trigger_fire_access(
-        &self,
-        request: TriggerFireAccessCheck,
-    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
-        if request.tenant_id != self.tenant_id {
-            return Ok(Self::deny(
-                "trigger tenant does not match the WebChat v2 tenant",
-            ));
-        }
-        if request.agent_id.as_ref() != Some(&self.default_agent_id) {
-            return Ok(Self::deny(
-                "trigger agent does not match the WebChat v2 default agent",
-            ));
-        }
-        if request.project_id.as_ref() != self.default_project_id.as_ref() {
-            return Ok(Self::deny(
-                "trigger project does not match the WebChat v2 default project",
-            ));
-        }
-        Ok(TriggerFireAccessDecision::Allowed)
     }
 }
 
@@ -880,13 +827,13 @@ mod tests {
     #[cfg(feature = "postgres")]
     struct ScopedEnvVar {
         key: &'static str,
-        prior: Option<String>,
+        prior: Option<std::ffi::OsString>,
     }
 
     #[cfg(feature = "postgres")]
     impl ScopedEnvVar {
         fn set(key: &'static str, value: &str) -> Self {
-            let prior = std::env::var(key).ok();
+            let prior = std::env::var_os(key);
             // SAFETY: these tests use unique env-var names and restore them on
             // drop, so no sibling test in this crate observes partial mutation.
             unsafe { std::env::set_var(key, value) };
@@ -1277,7 +1224,7 @@ default_profile = "secure_default"
         assert_eq!(
             other_agent_decision,
             ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
-                reason: "trigger agent does not match the WebChat v2 default agent".to_string(),
+                reason: "trigger agent does not match configured trigger-fire scope".to_string(),
             }
         );
     }

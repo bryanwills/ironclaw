@@ -78,8 +78,9 @@ pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(20
 pub struct TriggerFireAccessCheck {
     /// Tenant that owns the persisted trigger.
     pub tenant_id: TenantId,
-    /// User that created the persisted trigger and whose access is evaluated
-    /// again at fire time.
+    /// User that created the persisted trigger. Some checkers validate this
+    /// creator directly; durable-host checkers may instead rely on the claimed
+    /// trigger record as creator authority and validate only host-owned scope.
     pub creator_user_id: UserId,
     /// Optional agent scope stored on the trigger.
     pub agent_id: Option<AgentId>,
@@ -96,9 +97,9 @@ pub struct TriggerFireAccessCheck {
 /// Result of a fire-time trigger access check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerFireAccessDecision {
-    /// The trigger creator is still authorized for the exact trigger scope.
+    /// The persisted trigger fire is authorized for its stored scope.
     Allowed,
-    /// The trigger creator is not authorized for the exact trigger scope.
+    /// The persisted trigger fire is not authorized for its stored scope.
     Denied { reason: String },
 }
 
@@ -114,8 +115,8 @@ pub enum TriggerFireAccessError {
 /// Fire-time trigger access checker supplied by the composition root.
 #[async_trait]
 pub trait TriggerFireAccessChecker: Send + Sync {
-    /// Check whether the persisted trigger creator may fire the trigger for
-    /// the exact stored tenant/agent/project scope.
+    /// Check whether a persisted trigger fire may be submitted for the exact
+    /// stored tenant/creator/agent/project scope.
     async fn check_trigger_fire_access(
         &self,
         request: TriggerFireAccessCheck,
@@ -185,6 +186,72 @@ impl TriggerFireAccessChecker for ExactScopeTriggerFireAccessChecker {
         if request.creator_user_id != self.creator_user_id {
             return Ok(Self::deny(
                 "trigger creator does not match configured trigger-fire scope",
+            ));
+        }
+        if request.agent_id != self.agent_id {
+            return Ok(Self::deny(
+                "trigger agent does not match configured trigger-fire scope",
+            ));
+        }
+        if request.project_id != self.project_id {
+            return Ok(Self::deny(
+                "trigger project does not match configured trigger-fire scope",
+            ));
+        }
+        Ok(TriggerFireAccessDecision::Allowed)
+    }
+}
+
+/// Fire-time trigger access checker for a host-configured durable trigger scope.
+///
+/// This checker is for hosts that have already minted the fire request from a
+/// claimed durable trigger record. The persisted record is the creator
+/// authority; this checker only verifies that the record's stored
+/// tenant/agent/project scope still belongs to the host surface being served.
+#[derive(Debug, Clone)]
+pub struct HostScopeTriggerFireAccessChecker {
+    tenant_id: TenantId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+}
+
+impl HostScopeTriggerFireAccessChecker {
+    pub fn new(
+        tenant_id: TenantId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            agent_id,
+            project_id,
+        }
+    }
+
+    pub fn for_default_agent(
+        tenant_id: TenantId,
+        default_agent_id: AgentId,
+        default_project_id: Option<ProjectId>,
+    ) -> Self {
+        Self::new(tenant_id, Some(default_agent_id), default_project_id)
+    }
+
+    fn deny(reason: impl Into<String>) -> TriggerFireAccessDecision {
+        TriggerFireAccessDecision::Denied {
+            reason: reason.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl TriggerFireAccessChecker for HostScopeTriggerFireAccessChecker {
+    async fn check_trigger_fire_access(
+        &self,
+        request: TriggerFireAccessCheck,
+    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+        if request.tenant_id != self.tenant_id {
+            return Ok(Self::deny(
+                "trigger tenant does not match configured trigger-fire scope",
             ));
         }
         if request.agent_id != self.agent_id {
@@ -707,6 +774,53 @@ mod tests {
             other_project_decision,
             TriggerFireAccessDecision::Denied {
                 reason: "trigger project does not match configured trigger-fire scope".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn host_scope_trigger_fire_checker_uses_durable_creator_authority() {
+        let tenant_id = TenantId::new("host-scope-tenant").expect("tenant");
+        let env_user_id = UserId::new("host-scope-env-user").expect("user");
+        let sso_user_id = UserId::new("host-scope-sso-user").expect("user");
+        let agent_id = AgentId::new("host-scope-agent").expect("agent");
+        let project_id = ProjectId::new("host-scope-project").expect("project");
+        let checker = HostScopeTriggerFireAccessChecker::for_default_agent(
+            tenant_id.clone(),
+            agent_id.clone(),
+            Some(project_id.clone()),
+        );
+
+        let decision = checker
+            .check_trigger_fire_access(TriggerFireAccessCheck {
+                tenant_id: tenant_id.clone(),
+                creator_user_id: sso_user_id,
+                agent_id: Some(agent_id.clone()),
+                project_id: Some(project_id.clone()),
+                trigger_id: TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check trigger fire access");
+
+        assert_eq!(decision, TriggerFireAccessDecision::Allowed);
+
+        let other_agent_decision = checker
+            .check_trigger_fire_access(TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: env_user_id,
+                agent_id: Some(AgentId::new("host-scope-other-agent").expect("agent")),
+                project_id: Some(project_id),
+                trigger_id: TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check trigger fire access");
+
+        assert_eq!(
+            other_agent_decision,
+            TriggerFireAccessDecision::Denied {
+                reason: "trigger agent does not match configured trigger-fire scope".to_string(),
             }
         );
     }
