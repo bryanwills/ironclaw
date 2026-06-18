@@ -1,6 +1,12 @@
-use std::time::Duration;
+use std::{path::Path, sync::Arc, time::Duration};
 
-use ironclaw_reborn_composition::TriggerPollerSettings;
+use anyhow::Context;
+use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_reborn_composition::{
+    HostScopeTriggerFireAccessChecker, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
+    LocalTriggerAccessSource, RebornCompositionProfile, RebornRuntimeInput, TriggerPollerSettings,
+    open_local_trigger_access_store,
+};
 use ironclaw_reborn_config::RebornProfile;
 
 use super::RuntimeInputCaller;
@@ -207,6 +213,77 @@ pub(super) fn trigger_poller_settings(
     }
 
     Ok(settings)
+}
+
+pub(crate) async fn with_serve_trigger_fire_access_checker(
+    runtime_input: RebornRuntimeInput,
+    user_store_path: &Path,
+    tenant_id: &TenantId,
+    user_id: &UserId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+) -> anyhow::Result<RebornRuntimeInput> {
+    if !runtime_input.trigger_poller.enabled {
+        return Ok(runtime_input);
+    }
+
+    match runtime_input
+        .services
+        .as_ref()
+        .map(|services| services.profile())
+    {
+        Some(RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo) => {
+            with_serve_local_trigger_fire_access_checker(
+                runtime_input,
+                user_store_path,
+                tenant_id,
+                user_id,
+                default_agent_id,
+                default_project_id,
+            )
+            .await
+        }
+        Some(RebornCompositionProfile::Production) => Ok(runtime_input
+            .with_trigger_fire_access_checker(Arc::new(
+                HostScopeTriggerFireAccessChecker::for_default_agent(
+                    tenant_id.clone(),
+                    default_agent_id.clone(),
+                    default_project_id.cloned(),
+                ),
+            ))),
+        Some(RebornCompositionProfile::MigrationDryRun | RebornCompositionProfile::Disabled)
+        | None => Ok(runtime_input),
+    }
+}
+
+pub(crate) async fn with_serve_local_trigger_fire_access_checker(
+    runtime_input: RebornRuntimeInput,
+    user_store_path: &Path,
+    tenant_id: &TenantId,
+    user_id: &UserId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+) -> anyhow::Result<RebornRuntimeInput> {
+    if !runtime_input.trigger_poller.enabled {
+        return Ok(runtime_input);
+    }
+
+    let access_store = open_local_trigger_access_store(user_store_path)
+        .await
+        .context("failed to initialize local trigger-fire access store")?;
+    let user_ids = [user_id.clone()];
+    access_store
+        .reconcile_local_access(LocalTriggerAccessReconciliation {
+            tenant_id,
+            user_ids: &user_ids,
+            agent_id: Some(default_agent_id),
+            project_id: default_project_id,
+            role: LocalTriggerAccessRole::Owner,
+            source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
+        })
+        .await
+        .context("failed to reconcile local trigger-fire access")?;
+    Ok(runtime_input.with_trigger_fire_access_checker(access_store))
 }
 
 #[cfg(test)]

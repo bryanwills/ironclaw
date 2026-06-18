@@ -27,6 +27,7 @@ use ulid::Ulid;
 mod libsql;
 #[cfg(feature = "postgres")]
 mod postgres;
+mod scoped;
 mod trusted_submit;
 mod worker;
 
@@ -996,6 +997,7 @@ pub use libsql::LibSqlTriggerRepository;
 /// Feature-gated durable PostgreSQL repository type for composition/test wiring.
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
+pub use scoped::HostScopedTriggerRepository;
 pub use worker::{
     TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest,
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,

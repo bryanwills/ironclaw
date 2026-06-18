@@ -21,7 +21,7 @@
 //! pinned by `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`.
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,21 +43,16 @@ use ironclaw_first_party_extension_ports::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
-    AuditStage, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId,
-    DecisionSummary, EffectKind, GrantConstraints, InvocationId, NetworkPolicy,
-    NetworkTargetPattern, PackageSource, Principal, ProjectId, ResourceScope, RuntimeKind,
-    TenantId, ThreadId, TrustClass, UserId,
+    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ProjectId,
+    ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource, HostInputBatch,
-    HostInputQueue, HostInputQueueError, HostSkillContextSource, HostUserProfileSource,
+    EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource,
     JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort, RunCancellationFactory,
-    TurnStateRunCancellationFactory,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -92,14 +87,7 @@ use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
-use ironclaw_triggers::{
-    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
-    FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord,
-    TriggerRepository, TriggerRunRecord,
-};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_trust::TrustPolicy;
+use ironclaw_triggers::TriggerRepository;
 use ironclaw_turns::run_profile::UserProfileContext;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
@@ -108,9 +96,8 @@ use ironclaw_turns::{
     TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
     TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{
-        InstructionSafetyContext, LoopHostMilestoneSink, LoopInputAckToken, LoopInputCursorToken,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard,
+        InstructionSafetyContext, LoopHostMilestoneSink, LoopModelBudgetAccountant,
+        LoopModelPolicyGuard, LoopRunContext,
     },
 };
 
@@ -120,12 +107,6 @@ use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::outbound_preferences::{
     MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetRegistrationOutcome, RebornOutboundPreferencesFacade,
-};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::product_live_adapters::{
-    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
-    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{
@@ -145,6 +126,8 @@ use crate::{
     RebornReadinessState, RebornServices, build_reborn_services,
 };
 use production::{EmptyIdentityContextSource, UnavailableApprovalInteractionService};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use production::{product_live_model_route_settings, production_capability_wiring};
 
 const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
 
@@ -169,292 +152,22 @@ impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-struct ProductionCapabilityWiring {
+struct PlannedRuntimeProfileWiring {
     capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
-    display_previews: Arc<crate::projection::CapabilityDisplayPreviewStore>,
-    model_route_resolver: Arc<dyn ironclaw_reborn::model_routes::ModelRouteResolver>,
-    cancellation_factory: Arc<dyn RunCancellationFactory>,
-    input_queue: Arc<dyn HostInputQueue>,
-    identity_context_source: Arc<dyn HostIdentityContextSource>,
-    model_policy_guard: Arc<dyn LoopModelPolicyGuard>,
-    model_budget_accountant: Arc<dyn LoopModelBudgetAccountant>,
-    safety_context: InstructionSafetyContext,
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn production_capability_wiring(
-    services: &RebornServices,
-    production_runtime: &crate::factory::RebornProductionRuntimeServices,
-    fallback_user_id: UserId,
-    model_routes: ProductLiveModelRouteSettings,
+    model_gateway: Arc<dyn HostManagedModelGateway>,
+    local_dev_capability_policy:
+        Option<Arc<crate::local_dev_capability_policy::LocalDevCapabilityPolicy>>,
+    display_previews: Option<Arc<crate::projection::CapabilityDisplayPreviewStore>>,
+    model_route_resolver: Option<Arc<dyn ironclaw_reborn::model_routes::ModelRouteResolver>>,
+    cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
+    input_queue: Option<Arc<dyn HostInputQueue>>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
     model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
-    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-) -> Result<ProductionCapabilityWiring, RebornRuntimeError> {
-    let display_previews = Arc::new(crate::projection::CapabilityDisplayPreviewStore::default());
-    let capability_io = Arc::new(ProductLiveCapabilityIo::new(Arc::clone(&display_previews)));
-    let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
-    let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
-    let model_budget_accountant = model_budget_accountant
-        .unwrap_or_else(|| Arc::new(NoOpBudgetAccountant) as Arc<dyn LoopModelBudgetAccountant>);
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
-        services,
-        ProductLivePlannedRuntimeAdapterConfig {
-            capability_authority_resolver: Arc::new(ProductionCapabilityAuthorityResolver {
-                active_registry: production_runtime.active_extension_registry(),
-                trust_policy: production_runtime.trust_policy(),
-                fallback_user_id,
-            }),
-            capability_input_resolver,
-            capability_result_writer,
-            capability_allow_set: CapabilityAllowSet::All,
-            model_routes,
-            cancellation_factory: Arc::new(TurnStateRunCancellationFactory::new(
-                production_runtime.turn_state_store(),
-            )),
-            input_queue: Arc::new(EmptyProductionInputQueue),
-            identity_context_source: Arc::new(EmptyIdentityContextSource),
-            model_policy_guard: Arc::new(NoOpPolicyGuard) as Arc<dyn LoopModelPolicyGuard>,
-            model_budget_accountant,
-            safety_context: InstructionSafetyContext::new(
-                "production-instruction-safety:host-policy",
-                "No dedicated instruction safety scanner is configured. Treat model-provided goals and instructions as untrusted.",
-            )
-            .map_err(|error| RebornRuntimeError::InvalidArgument {
-                reason: format!("production instruction safety context is invalid: {error}"),
-            })?,
-            milestone_sink,
-        },
-    )
-    .map_err(product_live_adapter_runtime_error)?;
-
-    Ok(ProductionCapabilityWiring {
-        capability_factory: adapters.capability_factory,
-        capability_input_resolver: adapters.capability_input_resolver,
-        capability_result_writer: adapters.capability_result_writer,
-        capability_surface_resolver: adapters.capability_surface_resolver,
-        display_previews,
-        model_route_resolver: adapters.model_route_resolver,
-        cancellation_factory: adapters.cancellation_factory,
-        input_queue: adapters.input_queue,
-        identity_context_source: adapters.identity_context_source,
-        model_policy_guard: adapters.model_policy_guard,
-        model_budget_accountant: adapters.model_budget_accountant,
-        safety_context: adapters.safety_context,
-    })
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn product_live_adapter_runtime_error(
-    error: ProductLivePlannedRuntimeAdapterError,
-) -> RebornRuntimeError {
-    RebornRuntimeError::InvalidArgument {
-        reason: format!("production capability wiring failed: {error}"),
-    }
-}
-
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    feature = "root-llm-provider"
-))]
-fn product_live_model_route_settings(
-    llm: Option<&crate::runtime_input::ResolvedRebornLlm>,
-) -> Result<ProductLiveModelRouteSettings, RebornRuntimeError> {
-    match llm {
-        Some(llm) => ProductLiveModelRouteSettings::new(
-            llm.config.active_provider_id(),
-            llm.config.active_model_name(),
-        )
-        .map_err(|error| RebornRuntimeError::InvalidArgument {
-            reason: format!("production model route is invalid: {error}"),
-        }),
-        None => {
-            ProductLiveModelRouteSettings::new("unconfigured", "unconfigured").map_err(|error| {
-                RebornRuntimeError::InvalidArgument {
-                    reason: format!("production placeholder model route is invalid: {error}"),
-                }
-            })
-        }
-    }
-}
-
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    not(feature = "root-llm-provider")
-))]
-fn product_live_model_route_settings() -> Result<ProductLiveModelRouteSettings, RebornRuntimeError>
-{
-    ProductLiveModelRouteSettings::new("nearai", "qwen3-coder").map_err(|error| {
-        RebornRuntimeError::InvalidArgument {
-            reason: format!("production test model route is invalid: {error}"),
-        }
-    })
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[derive(Clone)]
-struct ProductionCapabilityAuthorityResolver {
-    active_registry: Arc<ironclaw_extensions::SharedExtensionRegistry>,
-    trust_policy: Arc<ironclaw_trust::HostTrustPolicy>,
-    fallback_user_id: UserId,
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[async_trait::async_trait]
-impl ProductLiveCapabilityAuthorityResolver for ProductionCapabilityAuthorityResolver {
-    async fn resolve_capability_authority(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<ProductLiveVisibleCapabilityRequestConfig, ProductLivePlannedRuntimeAdapterError>
-    {
-        let user_id = run_context
-            .actor()
-            .map(|actor| actor.user_id.clone())
-            .unwrap_or_else(|| self.fallback_user_id.clone());
-        let resource_scope = production_resource_scope_for_run(run_context, user_id.clone());
-        let mounts = crate::invocation_mount_view(&resource_scope).map_err(|error| {
-            ProductLivePlannedRuntimeAdapterError::InvalidCapabilityScope {
-                reason: format!("production capability mounts are invalid: {error}"),
-            }
-        })?;
-        let registry = self.active_registry.snapshot();
-        let mut grants = Vec::new();
-        let mut provider_trust = BTreeMap::new();
-        for package in registry.extensions() {
-            let source = package_source_for_trust(package);
-            let digest = package.manifest_digest();
-            let input = package
-                .trust_policy_input(source, digest, None)
-                .map_err(
-                    |error| ProductLivePlannedRuntimeAdapterError::InvalidCapabilityScope {
-                        reason: format!("production package trust input is invalid: {error}"),
-                    },
-                )?;
-            let decision = self.trust_policy.evaluate(&input).map_err(|error| {
-                ProductLivePlannedRuntimeAdapterError::InvalidCapabilityScope {
-                    reason: format!("production package trust evaluation failed: {error}"),
-                }
-            })?;
-            provider_trust.insert(package.id.clone(), decision.clone());
-            for descriptor in &package.capabilities {
-                grants.push(CapabilityGrant {
-                    id: CapabilityGrantId::new(),
-                    capability: descriptor.id.clone(),
-                    grantee: Principal::User(user_id.clone()),
-                    issued_by: Principal::HostRuntime,
-                    constraints: GrantConstraints {
-                        allowed_effects: descriptor.effects.clone(),
-                        mounts: mounts.clone(),
-                        network: permissive_runtime_network_policy(),
-                        secrets: descriptor
-                            .runtime_credentials
-                            .iter()
-                            .filter(|credential| {
-                                credential.required
-                                    && matches!(
-                                        credential.source,
-                                        ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle
-                                    )
-                            })
-                            .map(|credential| credential.handle.clone())
-                            .collect(),
-                        resource_ceiling: decision.authority_ceiling.max_resource_ceiling.clone(),
-                        expires_at: None,
-                        max_invocations: None,
-                    },
-                });
-            }
-        }
-
-        let mut config = ProductLiveVisibleCapabilityRequestConfig::new(
-            user_id,
-            RuntimeKind::Wasm,
-            TrustClass::UserTrusted,
-            SurfaceKind::new("agent_loop").map_err(|error| {
-                ProductLivePlannedRuntimeAdapterError::InvalidCapabilityScope {
-                    reason: error.to_string(),
-                }
-            })?,
-            CapabilitySurfacePolicy::allow_all(),
-        )
-        .with_grants(CapabilitySet { grants })
-        .with_mounts(mounts);
-        for (provider, decision) in provider_trust {
-            config = config.with_provider_trust_decision(provider, decision);
-        }
-        Ok(config)
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn production_resource_scope_for_run(
-    run_context: &LoopRunContext,
-    user_id: UserId,
-) -> ResourceScope {
-    let mut scope = ResourceScope::system();
-    scope.tenant_id = run_context.scope.tenant_id.clone();
-    scope.user_id = user_id;
-    scope.agent_id = run_context.scope.agent_id.clone();
-    scope.project_id = run_context.scope.project_id.clone();
-    scope.thread_id = Some(run_context.thread_id.clone());
-    scope.invocation_id = InvocationId::from_uuid(run_context.run_id.as_uuid());
-    scope
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn package_source_for_trust(package: &ironclaw_extensions::ExtensionPackage) -> PackageSource {
-    match package.manifest.source {
-        ironclaw_extensions::ManifestSource::HostBundled => PackageSource::Bundled,
-        ironclaw_extensions::ManifestSource::InstalledLocal => PackageSource::LocalManifest {
-            path: package.root.as_str().to_string(),
-        },
-        ironclaw_extensions::ManifestSource::RegistryInstalled => PackageSource::Registry {
-            url: package.root.as_str().to_string(),
-        },
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn permissive_runtime_network_policy() -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: None,
-            host_pattern: "*".to_string(),
-            port: None,
-        }],
-        deny_private_ip_ranges: false,
-        max_egress_bytes: None,
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-struct EmptyProductionInputQueue;
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[async_trait::async_trait]
-impl HostInputQueue for EmptyProductionInputQueue {
-    async fn next_after(
-        &self,
-        _run_id: TurnRunId,
-        after: LoopInputCursorToken,
-        _limit: usize,
-    ) -> Result<HostInputBatch, HostInputQueueError> {
-        Ok(HostInputBatch {
-            inputs: Vec::new(),
-            next_cursor: after,
-        })
-    }
-
-    async fn ack_consumed(
-        &self,
-        _run_id: TurnRunId,
-        _tokens: Vec<LoopInputAckToken>,
-    ) -> Result<(), HostInputQueueError> {
-        Ok(())
-    }
+    safety_context: Option<InstructionSafetyContext>,
 }
 
 struct RuntimeStoreParts<'a> {
@@ -529,332 +242,6 @@ where
         trigger_turn_snapshot_source: Arc::new(TriggerTurnStateSnapshotSource::new(Arc::clone(
             &graph.turn_state,
         ))),
-    }
-}
-
-struct HostScopedTriggerRepository {
-    inner: Arc<dyn TriggerRepository>,
-    tenant_id: TenantId,
-    agent_id: Option<AgentId>,
-    project_id: Option<ProjectId>,
-}
-
-impl HostScopedTriggerRepository {
-    fn new(
-        inner: Arc<dyn TriggerRepository>,
-        tenant_id: TenantId,
-        agent_id: Option<AgentId>,
-        project_id: Option<ProjectId>,
-    ) -> Self {
-        Self {
-            inner,
-            tenant_id,
-            agent_id,
-            project_id,
-        }
-    }
-
-    fn matches_record(&self, record: &TriggerRecord) -> bool {
-        record.tenant_id == self.tenant_id
-            && record.agent_id == self.agent_id
-            && record.project_id == self.project_id
-    }
-
-    fn matches_scope(
-        &self,
-        tenant_id: &TenantId,
-        agent_id: Option<&AgentId>,
-        project_id: Option<&ProjectId>,
-    ) -> bool {
-        tenant_id == &self.tenant_id
-            && agent_id == self.agent_id.as_ref()
-            && project_id == self.project_id.as_ref()
-    }
-
-    async fn scoped_record(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        if tenant_id != self.tenant_id {
-            return Ok(None);
-        }
-        Ok(self
-            .inner
-            .get_trigger(tenant_id, trigger_id)
-            .await?
-            .filter(|record| self.matches_record(record)))
-    }
-}
-
-#[async_trait::async_trait]
-impl TriggerRepository for HostScopedTriggerRepository {
-    async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError> {
-        if !self.matches_record(&record) {
-            return Err(TriggerError::InvalidRecord {
-                reason: "trigger record is outside configured host trigger scope".to_string(),
-            });
-        }
-        self.inner.upsert_trigger(record).await
-    }
-
-    async fn get_trigger(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        self.scoped_record(tenant_id, trigger_id).await
-    }
-
-    async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-        if tenant_id != self.tenant_id {
-            return Ok(Vec::new());
-        }
-        let mut records = self.inner.list_triggers(tenant_id).await?;
-        records.retain(|record| self.matches_record(record));
-        Ok(records)
-    }
-
-    async fn list_scoped_triggers(
-        &self,
-        tenant_id: TenantId,
-        creator_user_id: UserId,
-        agent_id: Option<AgentId>,
-        project_id: Option<ProjectId>,
-        limit: usize,
-    ) -> Result<Vec<TriggerRecord>, TriggerError> {
-        if !self.matches_scope(&tenant_id, agent_id.as_ref(), project_id.as_ref()) {
-            return Ok(Vec::new());
-        }
-        self.inner
-            .list_scoped_triggers(tenant_id, creator_user_id, agent_id, project_id, limit)
-            .await
-    }
-
-    async fn remove_trigger(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        if self
-            .scoped_record(tenant_id.clone(), trigger_id)
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        self.inner.remove_trigger(tenant_id, trigger_id).await
-    }
-
-    async fn remove_scoped_trigger(
-        &self,
-        tenant_id: TenantId,
-        creator_user_id: UserId,
-        agent_id: Option<AgentId>,
-        project_id: Option<ProjectId>,
-        trigger_id: TriggerId,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        if !self.matches_scope(&tenant_id, agent_id.as_ref(), project_id.as_ref()) {
-            return Ok(None);
-        }
-        self.inner
-            .remove_scoped_trigger(tenant_id, creator_user_id, agent_id, project_id, trigger_id)
-            .await
-    }
-
-    async fn list_due_triggers(
-        &self,
-        now: ironclaw_host_api::Timestamp,
-        limit: usize,
-    ) -> Result<Vec<TriggerRecord>, TriggerError> {
-        self.inner
-            .list_due_triggers_for_scope(
-                self.tenant_id.clone(),
-                self.agent_id.clone(),
-                self.project_id.clone(),
-                now,
-                limit,
-            )
-            .await
-    }
-
-    async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
-        self.list_active_triggers_after(None, limit).await
-    }
-
-    async fn list_active_triggers_after(
-        &self,
-        after: Option<ActiveTriggerScanCursor>,
-        limit: usize,
-    ) -> Result<Vec<TriggerRecord>, TriggerError> {
-        self.inner
-            .list_active_triggers_after_for_scope(
-                self.tenant_id.clone(),
-                self.agent_id.clone(),
-                self.project_id.clone(),
-                after,
-                limit,
-            )
-            .await
-    }
-
-    async fn claim_due_fire(
-        &self,
-        request: ClaimDueFireRequest,
-    ) -> Result<ClaimDueFireOutcome, TriggerError> {
-        if self
-            .scoped_record(request.tenant_id.clone(), request.trigger_id)
-            .await?
-            .is_none()
-        {
-            return Ok(ClaimDueFireOutcome::NotFound);
-        }
-        self.inner.claim_due_fire(request).await
-    }
-
-    async fn mark_fire_accepted(
-        &self,
-        request: FireAcceptedRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        if self
-            .scoped_record(request.tenant_id.clone(), request.trigger_id)
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        self.inner.mark_fire_accepted(request).await
-    }
-
-    async fn mark_fire_replayed(
-        &self,
-        request: FireReplayedRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        if self
-            .scoped_record(request.tenant_id.clone(), request.trigger_id)
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        self.inner.mark_fire_replayed(request).await
-    }
-
-    async fn mark_fire_retryable_failed(
-        &self,
-        request: FireRetryableFailedRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        if self
-            .scoped_record(request.tenant_id.clone(), request.trigger_id)
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        self.inner.mark_fire_retryable_failed(request).await
-    }
-
-    async fn mark_fire_permanently_failed(
-        &self,
-        request: FirePermanentFailedRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        if self
-            .scoped_record(request.tenant_id.clone(), request.trigger_id)
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        self.inner.mark_fire_permanently_failed(request).await
-    }
-
-    async fn mark_fire_terminally_failed(
-        &self,
-        request: FireTerminalFailedRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        if self
-            .scoped_record(request.tenant_id.clone(), request.trigger_id)
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        self.inner.mark_fire_terminally_failed(request).await
-    }
-
-    async fn clear_active_fire(
-        &self,
-        request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        if self
-            .scoped_record(request.tenant_id.clone(), request.trigger_id)
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        self.inner.clear_active_fire(request).await
-    }
-
-    async fn find_trigger_run_by_thread_id(
-        &self,
-        tenant_id: TenantId,
-        thread_id: &ThreadId,
-    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
-        let Some((record, run)) = self
-            .inner
-            .find_trigger_run_by_thread_id(tenant_id, thread_id)
-            .await?
-        else {
-            return Ok(None);
-        };
-        if self.matches_record(&record) {
-            Ok(Some((record, run)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn list_trigger_run_history(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-        limit: usize,
-    ) -> Result<Vec<TriggerRunRecord>, TriggerError> {
-        if self
-            .scoped_record(tenant_id.clone(), trigger_id)
-            .await?
-            .is_none()
-        {
-            return Ok(Vec::new());
-        }
-        self.inner
-            .list_trigger_run_history(tenant_id, trigger_id, limit)
-            .await
-    }
-
-    async fn list_trigger_run_history_batch(
-        &self,
-        tenant_id: TenantId,
-        trigger_ids: &[TriggerId],
-        limit: usize,
-    ) -> Result<HashMap<TriggerId, Vec<TriggerRunRecord>>, TriggerError> {
-        if tenant_id != self.tenant_id || trigger_ids.is_empty() || limit == 0 {
-            return Ok(HashMap::new());
-        }
-        let mut scoped_trigger_ids = Vec::with_capacity(trigger_ids.len());
-        for trigger_id in trigger_ids {
-            if self
-                .scoped_record(tenant_id.clone(), *trigger_id)
-                .await?
-                .is_some()
-            {
-                scoped_trigger_ids.push(*trigger_id);
-            }
-        }
-        self.inner
-            .list_trigger_run_history_batch(tenant_id, &scoped_trigger_ids, limit)
-            .await
     }
 }
 
@@ -3224,24 +2611,7 @@ pub async fn build_reborn_runtime(
         durable_milestone_sink,
         live_projection_publisher,
     );
-    let mut model_route_resolver: Option<
-        Arc<dyn ironclaw_reborn::model_routes::ModelRouteResolver>,
-    > = None;
-    let mut cancellation_factory: Option<Arc<dyn RunCancellationFactory>> = None;
-    let mut input_queue: Option<Arc<dyn HostInputQueue>> = None;
-    let mut production_identity_context_source: Option<Arc<dyn HostIdentityContextSource>> = None;
-    let mut planned_model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>> = None;
-    let mut planned_model_budget_accountant = model_budget_accountant;
-    let mut planned_safety_context: Option<InstructionSafetyContext> = None;
-    let (
-        capability_factory,
-        capability_input_resolver,
-        capability_result_writer,
-        capability_surface_resolver,
-        model_gateway,
-        local_dev_capability_policy,
-        display_previews,
-    ) = if local_runtime.is_some() {
+    let profile_wiring = if local_runtime.is_some() {
         let local_dev_capability_policy =
             Arc::new(local_dev_capability_policy().map_err(|error| {
                 tracing::error!(%error, "local-dev capability policy is invalid");
@@ -3262,16 +2632,23 @@ pub async fn build_reborn_runtime(
             trajectory_observer,
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
-        (
-            local_dev_capabilities.capability_factory,
-            local_dev_capabilities.capability_input_resolver,
-            local_dev_capabilities.capability_result_writer,
-            Arc::new(AllowAllCapabilitySurfaceResolver)
+        PlannedRuntimeProfileWiring {
+            capability_factory: local_dev_capabilities.capability_factory,
+            capability_input_resolver: local_dev_capabilities.capability_input_resolver,
+            capability_result_writer: local_dev_capabilities.capability_result_writer,
+            capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver)
                 as Arc<dyn CapabilitySurfaceProfileResolver>,
-            local_dev_capabilities.model_gateway,
-            Some(local_dev_capability_policy),
-            Some(local_dev_capabilities.display_previews),
-        )
+            model_gateway: local_dev_capabilities.model_gateway,
+            local_dev_capability_policy: Some(local_dev_capability_policy),
+            display_previews: Some(local_dev_capabilities.display_previews),
+            model_route_resolver: None,
+            cancellation_factory: None,
+            input_queue: None,
+            identity_context_source: None,
+            model_policy_guard: None,
+            model_budget_accountant,
+            safety_context: None,
+        }
     } else {
         // The trajectory observer is wired only through the local-dev capability
         // path; non-local-dev runtimes have no capability/result hook to forward
@@ -3304,28 +2681,25 @@ pub async fn build_reborn_runtime(
                 production_runtime,
                 actor_user_id.clone(),
                 product_live_model_routes,
-                planned_model_budget_accountant.clone(),
+                model_budget_accountant.clone(),
                 milestone_sink.clone(),
             )?;
-            model_route_resolver = Some(Arc::clone(&production_capabilities.model_route_resolver));
-            cancellation_factory = Some(Arc::clone(&production_capabilities.cancellation_factory));
-            input_queue = Some(Arc::clone(&production_capabilities.input_queue));
-            production_identity_context_source =
-                Some(Arc::clone(&production_capabilities.identity_context_source));
-            planned_model_policy_guard =
-                Some(Arc::clone(&production_capabilities.model_policy_guard));
-            planned_model_budget_accountant =
-                Some(Arc::clone(&production_capabilities.model_budget_accountant));
-            planned_safety_context = Some(production_capabilities.safety_context.clone());
-            (
-                production_capabilities.capability_factory,
-                production_capabilities.capability_input_resolver,
-                production_capabilities.capability_result_writer,
-                production_capabilities.capability_surface_resolver,
+            PlannedRuntimeProfileWiring {
+                capability_factory: production_capabilities.capability_factory,
+                capability_input_resolver: production_capabilities.capability_input_resolver,
+                capability_result_writer: production_capabilities.capability_result_writer,
+                capability_surface_resolver: production_capabilities.capability_surface_resolver,
                 model_gateway,
-                None,
-                Some(production_capabilities.display_previews),
-            )
+                local_dev_capability_policy: None,
+                display_previews: Some(production_capabilities.display_previews),
+                model_route_resolver: Some(production_capabilities.model_route_resolver),
+                cancellation_factory: Some(production_capabilities.cancellation_factory),
+                input_queue: Some(production_capabilities.input_queue),
+                identity_context_source: Some(production_capabilities.identity_context_source),
+                model_policy_guard: Some(production_capabilities.model_policy_guard),
+                model_budget_accountant: Some(production_capabilities.model_budget_accountant),
+                safety_context: Some(production_capabilities.safety_context),
+            }
         }
     };
     // Hook framework activation (#3934 + third-party projection), gated behind
@@ -3431,20 +2805,20 @@ pub async fn build_reborn_runtime(
                 )),
             ) as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>
         }),
-        model_gateway: Arc::clone(&model_gateway),
+        model_gateway: Arc::clone(&profile_wiring.model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
             as Arc<dyn ironclaw_turns::CheckpointStateStore>,
         loop_checkpoint_store: Arc::clone(&loop_checkpoint_store)
             as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         milestone_sink,
-        capability_factory,
-        capability_surface_resolver,
-        capability_result_writer,
+        capability_factory: profile_wiring.capability_factory,
+        capability_surface_resolver: profile_wiring.capability_surface_resolver,
+        capability_result_writer: profile_wiring.capability_result_writer,
         subagent_goal_store,
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
-            capability_input_resolver,
+            profile_wiring.capability_input_resolver,
         )),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence,
@@ -3456,10 +2830,10 @@ pub async fn build_reborn_runtime(
             },
             ..DefaultPlannedRuntimeConfig::default()
         },
-        model_route_resolver,
-        cancellation_factory,
+        model_route_resolver: profile_wiring.model_route_resolver,
+        cancellation_factory: profile_wiring.cancellation_factory,
         skill_context_source,
-        input_queue,
+        input_queue: profile_wiring.input_queue,
         identity_context_source: match local_runtime {
             Some(local_runtime) => Arc::new(
                 // Local-dev seeding validates the prompt path first, so non-file prompt paths fail
@@ -3472,7 +2846,8 @@ pub async fn build_reborn_runtime(
                     reason: error.to_string(),
                 })?,
             ) as Arc<dyn HostIdentityContextSource>,
-            None => production_identity_context_source
+            None => profile_wiring
+                .identity_context_source
                 .unwrap_or_else(|| Arc::new(EmptyIdentityContextSource)),
         },
         // Resolve the per-user agent-context profile (timezone/locale/location) from
@@ -3495,9 +2870,9 @@ pub async fn build_reborn_runtime(
             )) as Arc<dyn HostUserProfileSource>,
             None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
         },
-        model_policy_guard: planned_model_policy_guard,
-        model_budget_accountant: planned_model_budget_accountant,
-        safety_context: planned_safety_context,
+        model_policy_guard: profile_wiring.model_policy_guard,
+        model_budget_accountant: profile_wiring.model_budget_accountant,
+        safety_context: profile_wiring.safety_context,
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
         turn_event_sink: Some(trace_capture_sink),
         hook_dispatcher_builder_factory,
@@ -3542,7 +2917,7 @@ pub async fn build_reborn_runtime(
         failure_explanation_thread_id,
     );
     let failure_explanation_profile = default_resolved_run_profile.clone();
-    let failure_explanation_model_gateway = Arc::clone(&model_gateway);
+    let failure_explanation_model_gateway = Arc::clone(&profile_wiring.model_gateway);
     let failure_explanation_inference = Arc::new(move || {
         Arc::new(ModelGatewayBackedSystemInferencePort::new(
             Arc::clone(&failure_explanation_model_gateway),
@@ -3558,7 +2933,7 @@ pub async fn build_reborn_runtime(
     let approval_audit_sink = Arc::new(InMemoryAuditSink::new());
     let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
         if let (Some(local_runtime), Some(local_dev_capability_policy)) =
-            (local_runtime, local_dev_capability_policy)
+            (local_runtime, profile_wiring.local_dev_capability_policy)
         {
             let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
                 &local_runtime.turn_state,
@@ -3608,7 +2983,7 @@ pub async fn build_reborn_runtime(
     let mut projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
         .with_model_failure_explainer_factory(failure_explanation_inference);
-    if let Some(display_previews) = display_previews {
+    if let Some(display_previews) = profile_wiring.display_previews {
         projection_services = projection_services.with_display_previews(display_previews);
     }
     // Wire auth-challenge enrichment when the product-auth bundle exposes a
@@ -3646,7 +3021,7 @@ pub async fn build_reborn_runtime(
                 reason: "trigger poller requires a trigger repository".to_string(),
             })?;
         let trigger_repository: Arc<dyn TriggerRepository> = if local_runtime.is_none() {
-            Arc::new(HostScopedTriggerRepository::new(
+            Arc::new(ironclaw_triggers::HostScopedTriggerRepository::new(
                 trigger_repository,
                 thread_scope.tenant_id.clone(),
                 Some(validated_identity.agent_id.clone()),
@@ -4243,10 +3618,6 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
-    use ironclaw_triggers::{
-        TriggerCompletionPolicy, TriggerId, TriggerRecord, TriggerRepository as _, TriggerSchedule,
-        TriggerSourceKind, TriggerState,
-    };
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
     /// [`RebornRuntimeInput`] must reach
@@ -4285,130 +3656,6 @@ mod tests {
             cfg.max_context_tokens, 6000,
             "local-dev Reborn skill activation should match the legacy 6000-token skill budget"
         );
-    }
-
-    #[tokio::test]
-    async fn host_scoped_trigger_repository_does_not_claim_out_of_scope_due_trigger() {
-        let inner = Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default());
-        let tenant_id = TenantId::new("scoped-trigger-tenant").expect("tenant");
-        let creator_user_id = UserId::new("scoped-trigger-sso-user").expect("user");
-        let agent_id = AgentId::new("scoped-trigger-agent").expect("agent");
-        let project_id = ProjectId::new("scoped-trigger-project").expect("project");
-        let other_agent_id = AgentId::new("scoped-trigger-other-agent").expect("agent");
-        let fire_slot = Utc::now();
-        let now = fire_slot + chrono::Duration::seconds(1);
-        let matching_trigger_id = TriggerId::new();
-        let other_trigger_id = TriggerId::new();
-        let matching_record = test_trigger_record(
-            tenant_id.clone(),
-            creator_user_id.clone(),
-            Some(agent_id.clone()),
-            Some(project_id.clone()),
-            matching_trigger_id,
-            fire_slot,
-        );
-        let other_record = test_trigger_record(
-            tenant_id.clone(),
-            creator_user_id,
-            Some(other_agent_id),
-            Some(project_id.clone()),
-            other_trigger_id,
-            fire_slot,
-        );
-        inner
-            .upsert_trigger(matching_record)
-            .await
-            .expect("insert matching trigger");
-        inner
-            .upsert_trigger(other_record)
-            .await
-            .expect("insert out-of-scope trigger");
-
-        let scoped = super::HostScopedTriggerRepository::new(
-            inner.clone(),
-            tenant_id.clone(),
-            Some(agent_id),
-            Some(project_id),
-        );
-        let due = scoped
-            .list_due_triggers(now, 10)
-            .await
-            .expect("list scoped due triggers");
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].trigger_id, matching_trigger_id);
-
-        let out_of_scope_claim = scoped
-            .claim_due_fire(ironclaw_triggers::ClaimDueFireRequest {
-                tenant_id: tenant_id.clone(),
-                trigger_id: other_trigger_id,
-                fire_slot,
-                now,
-            })
-            .await
-            .expect("claim out-of-scope trigger");
-        assert!(
-            matches!(
-                out_of_scope_claim,
-                ironclaw_triggers::ClaimDueFireOutcome::NotFound
-            ),
-            "out-of-scope trigger must be invisible to the host-scoped worker"
-        );
-        let other_after_claim = inner
-            .get_trigger(tenant_id.clone(), other_trigger_id)
-            .await
-            .expect("load out-of-scope trigger")
-            .expect("out-of-scope trigger exists");
-        assert!(
-            other_after_claim.active_fire_slot.is_none(),
-            "out-of-scope trigger must not be claimed"
-        );
-
-        let matching_claim = scoped
-            .claim_due_fire(ironclaw_triggers::ClaimDueFireRequest {
-                tenant_id,
-                trigger_id: matching_trigger_id,
-                fire_slot,
-                now,
-            })
-            .await
-            .expect("claim matching trigger");
-        assert!(
-            matches!(
-                matching_claim,
-                ironclaw_triggers::ClaimDueFireOutcome::Claimed(_)
-            ),
-            "matching trigger must remain claimable"
-        );
-    }
-
-    fn test_trigger_record(
-        tenant_id: TenantId,
-        creator_user_id: UserId,
-        agent_id: Option<AgentId>,
-        project_id: Option<ProjectId>,
-        trigger_id: TriggerId,
-        next_run_at: chrono::DateTime<Utc>,
-    ) -> TriggerRecord {
-        TriggerRecord {
-            trigger_id,
-            tenant_id,
-            creator_user_id,
-            agent_id,
-            project_id,
-            name: "daily summary".to_string(),
-            source: TriggerSourceKind::Schedule,
-            schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
-            completion_policy: TriggerCompletionPolicy::Recurring,
-            prompt: "summarize unread mail".to_string(),
-            state: TriggerState::Scheduled,
-            next_run_at,
-            last_run_at: None,
-            last_fired_slot: None,
-            last_status: None,
-            active_fire_slot: None,
-            active_run_ref: None,
-            created_at: next_run_at,
-        }
     }
 
     fn readiness_for_runtime_gate(
@@ -4503,7 +3750,7 @@ mod tests {
     use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{
         Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
-        CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal, ProjectId,
+        CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal,
         ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,

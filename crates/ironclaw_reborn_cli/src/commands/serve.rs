@@ -11,11 +11,9 @@ use ironclaw_reborn_composition::build_openai_compat_route_mount;
 use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, HostScopeTriggerFireAccessChecker, LocalTriggerAccessReconciliation,
-    LocalTriggerAccessRole, LocalTriggerAccessSource, RebornBuildInput, RebornCompositionProfile,
-    RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
-    WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime, open_local_trigger_access_store,
-    webui_v2_app_with_lifecycle,
+    GoogleOAuthRouteConfig, RebornBuildInput, RebornCompositionProfile, RebornReadiness,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator,
+    WebuiServeConfig, build_reborn_runtime, webui_v2_app_with_lifecycle,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
@@ -29,7 +27,12 @@ use ironclaw_reborn_webui_ingress::{
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
-use crate::runtime::{RuntimeInputOptions, resolve_google_oauth_config_from_env};
+#[cfg(test)]
+use crate::runtime::with_serve_local_trigger_fire_access_checker;
+use crate::runtime::{
+    RuntimeInputOptions, resolve_google_oauth_config_from_env,
+    with_serve_trigger_fire_access_checker,
+};
 
 const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
@@ -672,77 +675,6 @@ fn canonical_host_name(host: &str) -> &str {
     host.split_once(':').map(|(host, _)| host).unwrap_or(host)
 }
 
-async fn with_local_trigger_fire_access_checker(
-    runtime_input: RebornRuntimeInput,
-    user_store_path: &std::path::Path,
-    tenant_id: &TenantId,
-    user_id: &UserId,
-    default_agent_id: &AgentId,
-    default_project_id: Option<&ProjectId>,
-) -> anyhow::Result<RebornRuntimeInput> {
-    if !runtime_input.trigger_poller.enabled {
-        return Ok(runtime_input);
-    }
-
-    let access_store = open_local_trigger_access_store(user_store_path)
-        .await
-        .context("failed to initialize local trigger-fire access store")?;
-    let user_ids = [user_id.clone()];
-    access_store
-        .reconcile_local_access(LocalTriggerAccessReconciliation {
-            tenant_id,
-            user_ids: &user_ids,
-            agent_id: Some(default_agent_id),
-            project_id: default_project_id,
-            role: LocalTriggerAccessRole::Owner,
-            source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
-        })
-        .await
-        .context("failed to reconcile local trigger-fire access")?;
-    Ok(runtime_input.with_trigger_fire_access_checker(access_store))
-}
-
-async fn with_serve_trigger_fire_access_checker(
-    runtime_input: RebornRuntimeInput,
-    user_store_path: &std::path::Path,
-    tenant_id: &TenantId,
-    user_id: &UserId,
-    default_agent_id: &AgentId,
-    default_project_id: Option<&ProjectId>,
-) -> anyhow::Result<RebornRuntimeInput> {
-    if !runtime_input.trigger_poller.enabled {
-        return Ok(runtime_input);
-    }
-
-    match runtime_input
-        .services
-        .as_ref()
-        .map(|services| services.profile())
-    {
-        Some(RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo) => {
-            with_local_trigger_fire_access_checker(
-                runtime_input,
-                user_store_path,
-                tenant_id,
-                user_id,
-                default_agent_id,
-                default_project_id,
-            )
-            .await
-        }
-        Some(RebornCompositionProfile::Production) => Ok(runtime_input
-            .with_trigger_fire_access_checker(Arc::new(
-                HostScopeTriggerFireAccessChecker::for_default_agent(
-                    tenant_id.clone(),
-                    default_agent_id.clone(),
-                    default_project_id.cloned(),
-                ),
-            ))),
-        Some(RebornCompositionProfile::MigrationDryRun | RebornCompositionProfile::Disabled)
-        | None => Ok(runtime_input),
-    }
-}
-
 fn resolve_webui_default_agent(
     identity_section: Option<&IdentitySection>,
     runtime_identity: &RebornRuntimeIdentity,
@@ -813,6 +745,7 @@ fn print_serve_banner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
 
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
     #[cfg(feature = "postgres")]
@@ -937,7 +870,7 @@ mod tests {
         ));
         let missing_store_path = dir.path().join("missing").join("reborn-local-dev.db");
 
-        let runtime_input = with_local_trigger_fire_access_checker(
+        let runtime_input = with_serve_local_trigger_fire_access_checker(
             runtime_input,
             &missing_store_path,
             &tenant_id,
@@ -991,7 +924,7 @@ mod tests {
                 ironclaw_reborn_composition::TriggerPollerSettings::enabled(),
             );
 
-        let runtime_input = with_local_trigger_fire_access_checker(
+        let runtime_input = with_serve_local_trigger_fire_access_checker(
             runtime_input,
             &user_store_path,
             &tenant_id,
@@ -1113,7 +1046,7 @@ mod tests {
                 ironclaw_reborn_composition::TriggerPollerSettings::enabled(),
             );
 
-        let runtime_input = with_local_trigger_fire_access_checker(
+        let runtime_input = with_serve_local_trigger_fire_access_checker(
             runtime_input,
             &user_store_path,
             &tenant_id,

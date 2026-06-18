@@ -31,6 +31,9 @@ mod test_env;
 mod trigger_poller;
 
 use trigger_poller::trigger_poller_settings;
+#[cfg(test)]
+pub(crate) use trigger_poller::with_serve_local_trigger_fire_access_checker;
+pub(crate) use trigger_poller::with_serve_trigger_fire_access_checker;
 
 pub(crate) fn init_tracing() {
     use tracing_subscriber::EnvFilter;
