@@ -43,8 +43,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation,
-    RecordVersion, RootFilesystem, ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
+    Page, RecordVersion, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{HostApiError, InvocationId, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
@@ -343,37 +343,37 @@ where
         thread_id: &ThreadId,
     ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
         let root = messages_root(scope, thread_id)?;
-        let entries = match self
-            .filesystem
-            .list_dir(&scope.to_resource_scope(), &root)
-            .await
-        {
-            Ok(entries) => entries,
-            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
-        };
         let mut messages = Vec::new();
-        for entry in entries {
-            if !entry.name.ends_with(".json") {
-                continue;
-            }
-            // `list_dir` returns post-resolution `VirtualPath`s; reconstruct
-            // the alias-relative `ScopedPath` so the follow-up `get` still
-            // runs through the per-op ACL (mirrors the run-state /
-            // processes store `join_scoped` shape).
-            let child = join_scoped(&root, &entry.name)?;
-            let Some(versioned) = self
+        let mut offset = 0_u64;
+
+        loop {
+            let entries = self
                 .filesystem
-                .get(&scope.to_resource_scope(), &child)
-                .await?
-            else {
-                continue;
-            };
-            let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
-            if &record.thread_id == thread_id {
-                messages.push(record);
+                .query(
+                    &scope.to_resource_scope(),
+                    &root,
+                    &Filter::All,
+                    Page::new(offset, Page::MAX_LIMIT),
+                )
+                .await?;
+            let entry_count = entries.len();
+
+            for versioned in entries {
+                if !versioned.path.as_str().ends_with(".json") {
+                    continue;
+                }
+                let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
+                if &record.thread_id == thread_id {
+                    messages.push(record);
+                }
             }
+
+            if entry_count < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset.saturating_add(entry_count as u64);
         }
+
         messages.sort_by_key(|message| message.sequence);
         Ok(messages)
     }
