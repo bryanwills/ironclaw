@@ -31,10 +31,11 @@ impl FilesystemExtensionInstallationStore {
                 state.load_into(&inner).await?;
             }
             Err(FilesystemError::NotFound { .. }) => {}
-            Err(_) => {
-                return Err(invalid_installation_error(
-                    "failed to load extension installation state",
-                ));
+            Err(error) => {
+                return Err(invalid_installation_error(format!(
+                    "failed to load extension installation state at {}: {error}",
+                    state_path.as_str()
+                )));
             }
         }
         Ok(Self {

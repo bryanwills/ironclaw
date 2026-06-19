@@ -658,7 +658,7 @@ pub async fn build_reborn_services(
         RebornCompositionProfile::Disabled => Ok(RebornServices::disabled()),
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => build_local_dev(input).await,
+        | RebornCompositionProfile::HostedSingleTenant => build_local_runtime(input).await,
         RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
             build_production_shaped(input).await
         }
@@ -710,7 +710,11 @@ fn production_config(
     config.require_credential_broker()
 }
 
-async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
+/// Build the safe single-tenant runtime surface used by local-dev and
+/// hosted-single-tenant. Hosted single-tenant supplies a durable Postgres
+/// backend through `RebornStorageInput::HostedSingleTenantPostgres`; local-dev
+/// keeps its historical local filesystem/libSQL default.
+async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
     let host_runtime_http_egress_for_test = input.host_runtime_http_egress_for_test.clone();
     let RebornBuildInput {
