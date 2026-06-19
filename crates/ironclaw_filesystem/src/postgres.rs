@@ -699,6 +699,8 @@ impl RootFilesystem for PostgresRootFilesystem {
                 "tail cursor exceeds i64",
             )
         })?;
+        // silent-ok: callers can request an unbounded tail; saturating keeps the
+        // SQL LIMIT representable without changing the public trait contract.
         let limit_raw = i64::try_from(max_records).unwrap_or(i64::MAX);
         let rows = client
             .query(

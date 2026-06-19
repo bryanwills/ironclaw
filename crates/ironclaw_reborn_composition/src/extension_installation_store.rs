@@ -30,7 +30,7 @@ impl FilesystemExtensionInstallationStore {
                     serde_json::from_slice(&bytes).map_err(invalid_installation_error)?;
                 state.load_into(&inner).await?;
             }
-            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => {}
+            Err(FilesystemError::NotFound { .. }) => {}
             Err(error) => return Err(invalid_installation_error(error)),
         }
         Ok(Self {

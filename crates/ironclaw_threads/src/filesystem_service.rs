@@ -290,7 +290,7 @@ where
         let mut offset = 0_u64;
 
         loop {
-            let entries = self
+            let entries = match self
                 .filesystem
                 .query(
                     &scope.to_resource_scope(),
@@ -298,7 +298,19 @@ where
                     &Filter::All,
                     Page::new(offset, Page::MAX_LIMIT),
                 )
-                .await?;
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::Unsupported {
+                    operation: FilesystemOperation::Query,
+                    ..
+                }) => {
+                    return self
+                        .list_thread_messages_by_directory(scope, thread_id)
+                        .await;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let entry_count = entries.len();
 
             for versioned in entries {
@@ -317,6 +329,43 @@ where
             offset = offset.saturating_add(entry_count as u64);
         }
 
+        messages.sort_by_key(|message| message.sequence);
+        Ok(messages)
+    }
+
+    async fn list_thread_messages_by_directory(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+        let root = messages_root(scope, thread_id)?;
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut messages = Vec::new();
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            let child = join_scoped(&root, &entry.name)?;
+            let Some(versioned) = self
+                .filesystem
+                .get(&scope.to_resource_scope(), &child)
+                .await?
+            else {
+                continue;
+            };
+            let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
+            if &record.thread_id == thread_id {
+                messages.push(record);
+            }
+        }
         messages.sort_by_key(|message| message.sequence);
         Ok(messages)
     }
@@ -376,6 +425,7 @@ where
             .list_thread_messages(scope, thread_id)
             .await?
             .into_iter()
+            .rev()
             .find(|message| matches_tool_result_reference(message, turn_run_id, result_ref));
         if let Some(message) = found.as_ref() {
             self.write_message_lookup_indexes(scope, thread_id, message)
