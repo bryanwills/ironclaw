@@ -36,6 +36,26 @@ use ironclaw_turns::run_profile::ModelProfileId;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+async fn wait_for_pending_gate_count(
+    store: &dyn ironclaw_resources::BudgetGateStore,
+    expected: usize,
+    context: &str,
+) -> Vec<ironclaw_resources::BudgetApprovalGate> {
+    let scope = ironclaw_host_api::ResourceScope::system();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+
+    let pending = loop {
+        let pending = store.list_pending(&scope).expect("list pending");
+        if pending.len() == expected || tokio::time::Instant::now() >= deadline {
+            break pending;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    assert_eq!(pending.len(), expected, "{context}; got {pending:?}");
+    pending
+}
+
 fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
@@ -136,14 +156,12 @@ async fn pump_until_pending_gate(
     );
 
     let store = runtime.budget_gate_store().expect("gate store");
-    let pending = store
-        .list_pending(&ironclaw_host_api::ResourceScope::system())
-        .expect("list pending");
-    assert_eq!(
-        pending.len(),
+    let pending = wait_for_pending_gate_count(
+        store.as_ref(),
         1,
-        "exactly one pending gate expected after pause; got {pending:?}"
-    );
+        "exactly one pending gate expected after pause",
+    )
+    .await;
     pending[0].id
 }
 
@@ -326,10 +344,9 @@ async fn gate_opened_event_carries_id_that_matches_persisted_gate() {
 
     // The pending gate's id (from the store).
     let store = runtime.budget_gate_store().expect("gate store");
-    let pending = store
-        .list_pending(&ironclaw_host_api::ResourceScope::system())
-        .expect("list pending");
-    assert_eq!(pending.len(), 1, "exactly one pending gate after pause");
+    let pending =
+        wait_for_pending_gate_count(store.as_ref(), 1, "exactly one pending gate after pause")
+            .await;
     let persisted_id = pending[0].id;
 
     // Drain the broadcast and find the GateOpened event.
@@ -380,14 +397,13 @@ async fn pause_in_distinct_runs_produces_distinct_pending_gates() {
     .expect("send finishes");
 
     let store = runtime.budget_gate_store().expect("gate store");
-    let pending = store
-        .list_pending(&ironclaw_host_api::ResourceScope::system())
-        .expect("list pending");
-    assert_eq!(
-        pending.len(),
+    let pending = wait_for_pending_gate_count(
+        store.as_ref(),
         2,
-        "two distinct paused runs must produce two pending gates"
-    );
+        "two distinct paused runs must produce two pending gates",
+    )
+    .await;
+    assert_eq!(pending.len(), 2);
     let _ = Decimal::ZERO; // keep the rust_decimal import live across compile shapes
 
     runtime.shutdown().await.expect("shutdown");
