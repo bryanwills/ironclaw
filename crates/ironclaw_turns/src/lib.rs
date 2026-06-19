@@ -53,7 +53,7 @@ pub use events::{
 };
 pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
-    InMemoryExternalToolCatalog,
+    InMemoryExternalToolCatalog, PendingExternalCall,
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
