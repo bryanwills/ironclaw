@@ -256,7 +256,7 @@ fn enforce_runtime_cutover_gate(
             if readiness.state != RebornReadinessState::HostedSingleTenantValidated {
                 return Err(RebornRuntimeError::InvalidArgument {
                     reason: format!(
-                        "profile=hosted-single-tenant cannot start Reborn runtime before hosted single-tenant readiness is validated; state={:?}",
+                        "profile=hosted-single-tenant cannot start Reborn runtime before hosted single-tenant readiness is validated; required_state=HostedSingleTenantValidated, state={:?}",
                         readiness.state
                     ),
                 });
