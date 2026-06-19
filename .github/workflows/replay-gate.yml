@@ -27,6 +27,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+
 jobs:
   replay-snapshots:
     name: Replay snapshot gate
@@ -41,6 +44,25 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: sudo apt-get update && sudo apt-get install -y clang mold
+
+      - name: Verify mold linker is active
+        run: |
+          clang_output="$(
+            printf 'int main(void) { return 0; }\n' \
+              | clang --ld-path=/usr/bin/mold -Wl,--version -x c - -o /tmp/clang-mold-check 2>&1
+          )"
+          printf '%s\n' "$clang_output"
+          grep -qi mold <<< "$clang_output"
+
+          printf 'fn main() { println!("mold-link-ok"); }\n' > /tmp/mold-link-check.rs
+          rustc /tmp/mold-link-check.rs \
+            -C linker=clang \
+            -C link-arg=--ld-path=/usr/bin/mold \
+            -o /tmp/mold-link-check
+          test "$(/tmp/mold-link-check)" = "mold-link-ok"
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
