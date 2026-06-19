@@ -407,6 +407,10 @@ async fn blocked_prompt_payload(
         TurnStatus::Queued
         | TurnStatus::Running
         | TurnStatus::BlockedDependentRun
+        // External-tool gates are not user-clickable prompts; the OpenAI
+        // Responses surface reads them via its own projection path. No generic
+        // gate-prompt payload here.
+        | TurnStatus::BlockedExternalTool
         | TurnStatus::RecoveryRequired
         | TurnStatus::CancelRequested
         | TurnStatus::Completed
@@ -843,6 +847,7 @@ fn turn_status_wire(status: TurnStatus) -> &'static str {
         TurnStatus::BlockedAuth => "blocked_auth",
         TurnStatus::BlockedResource => "blocked_resource",
         TurnStatus::BlockedDependentRun => "blocked_dependent_run",
+        TurnStatus::BlockedExternalTool => "blocked_external_tool",
         TurnStatus::RecoveryRequired => "recovery_required",
         TurnStatus::CancelRequested => "cancel_requested",
         TurnStatus::Completed => "completed",

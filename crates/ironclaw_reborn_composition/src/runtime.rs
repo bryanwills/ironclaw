@@ -1818,6 +1818,10 @@ impl RebornRuntime {
             let blocked_on_gate = match state.status {
                 TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
+                // External-tool gates are resolved by the API client submitting
+                // tool output, not by the runtime — short-circuit the wait and
+                // return the parked state instead of polling forever.
+                | TurnStatus::BlockedExternalTool
                 | TurnStatus::BlockedResource => true,
                 TurnStatus::BlockedDependentRun
                 | TurnStatus::Queued

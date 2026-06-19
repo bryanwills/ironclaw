@@ -64,6 +64,7 @@ pub(crate) enum GateKind {
     Auth,
     Resource,
     AwaitDependentRun,
+    ExternalTool,
 }
 
 /// Strategy decision for a gate, plus the new `gate_state` slot value.

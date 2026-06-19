@@ -737,6 +737,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
         LoopBlockedKind::Auth,
         LoopBlockedKind::Resource,
         LoopBlockedKind::AwaitDependentRun,
+        LoopBlockedKind::ExternalTool,
     ] {
         let checkpoint_id = TurnCheckpointId::new();
         let lg = loop_gate_ref("gate:test-gate");
@@ -764,6 +765,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             },
             LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
             LoopBlockedKind::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
+            LoopBlockedKind::ExternalTool => BlockedReason::ExternalTool { gate_ref },
         };
 
         assert_eq!(decision.violation, None);
@@ -873,6 +875,7 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
         TurnStatus::BlockedAuth,
         TurnStatus::BlockedResource,
         TurnStatus::BlockedDependentRun,
+        TurnStatus::BlockedExternalTool,
         TurnStatus::CancelRequested,
         TurnStatus::Cancelled,
         TurnStatus::Completed,
@@ -886,6 +889,7 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
             TurnStatus::BlockedAuth => (false, true),
             TurnStatus::BlockedResource => (false, true),
             TurnStatus::BlockedDependentRun => (false, true),
+            TurnStatus::BlockedExternalTool => (false, true),
             TurnStatus::CancelRequested => (false, true),
             TurnStatus::Cancelled => (true, false),
             TurnStatus::Completed => (true, false),

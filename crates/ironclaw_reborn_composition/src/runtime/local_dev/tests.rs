@@ -1080,6 +1080,9 @@ mod tests {
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -1284,6 +1287,9 @@ mod tests {
             outbound_delivery_target_set_requires_approval: true,
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
 
         let owner_user_id = UserId::new("outbound-delivery-owner").expect("user id");
@@ -1744,6 +1750,9 @@ mod tests {
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("outbound-delivery-hidden")
             .await
@@ -1841,6 +1850,9 @@ mod tests {
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("host-mount-read").await;
         let port = factory
@@ -2068,6 +2080,9 @@ mod tests {
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("skill-install-write").await;
         let port = factory
@@ -2165,6 +2180,9 @@ mod tests {
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("no-host-disclosure").await;
         let port = factory

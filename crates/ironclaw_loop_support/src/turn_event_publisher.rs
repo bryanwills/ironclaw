@@ -64,7 +64,8 @@ impl EventPublishingTurnRunTransitionPort {
             TurnStatus::BlockedApproval
             | TurnStatus::BlockedAuth
             | TurnStatus::BlockedResource
-            | TurnStatus::BlockedDependentRun => TurnEventKind::Blocked,
+            | TurnStatus::BlockedDependentRun
+            | TurnStatus::BlockedExternalTool => TurnEventKind::Blocked,
             TurnStatus::Completed => TurnEventKind::Completed,
             TurnStatus::Cancelled => TurnEventKind::Cancelled,
             TurnStatus::Failed => TurnEventKind::Failed,

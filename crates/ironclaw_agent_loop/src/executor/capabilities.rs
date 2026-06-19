@@ -652,6 +652,25 @@ impl CapabilityStage {
                     )
                     .await
             }
+            CapabilityOutcome::ExternalToolPending { gate_ref, .. } => {
+                // The model called a client-supplied tool: park the run and
+                // return control to the API client. No resume payload here —
+                // the client submits the tool output on resume.
+                GateStage
+                    .process(
+                        ctx,
+                        GateInput {
+                            state,
+                            call,
+                            kind: GateKind::ExternalTool,
+                            gate_ref,
+                            credential_requirements: Vec::new(),
+                            approval_resume: None,
+                            auth_resume: None,
+                        },
+                    )
+                    .await
+            }
             CapabilityOutcome::AwaitDependentRun {
                 gate_ref,
                 result_ref,

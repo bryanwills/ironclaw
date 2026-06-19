@@ -102,6 +102,9 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         outbound_delivery_target_set_requires_approval: false,
         approval_requests: local_runtime.approval_requests.clone(),
         capability_leases: local_runtime.capability_leases.clone(),
+        external_tool_catalog: std::sync::Arc::new(
+            ironclaw_turns::InMemoryExternalToolCatalog::new(),
+        ),
     };
     let run_context = run_context("shell-workdir").await;
     let port = factory

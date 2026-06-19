@@ -10,6 +10,7 @@ mod admission;
 mod checkpoint_state;
 mod coordinator;
 pub mod events;
+mod external_tool_catalog;
 mod filesystem_store;
 mod ids;
 mod lifecycle;
@@ -49,6 +50,10 @@ pub use events::{
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
     TurnEventSink, TurnLifecycleEvent,
+};
+pub use external_tool_catalog::{
+    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
+    InMemoryExternalToolCatalog,
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{

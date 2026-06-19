@@ -30,7 +30,7 @@ use ironclaw_threads::{
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    LoopResultRef,
+    ExternalToolCatalog, LoopResultRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
         LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, sanitize_model_visible_text,
@@ -47,6 +47,7 @@ use crate::{
 };
 
 pub(super) mod extension_surface;
+mod external_tool_capability;
 mod outbound_delivery;
 mod refreshing_capability_port;
 #[cfg(test)]
@@ -111,6 +112,8 @@ pub(super) fn capability_wiring(
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+    let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
+        Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new());
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(LocalDevLoopCapabilityPortFactory {
             runtime,
@@ -128,6 +131,7 @@ pub(super) fn capability_wiring(
             outbound_delivery_target_set_requires_approval,
             approval_requests,
             capability_leases,
+            external_tool_catalog,
         });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -159,6 +163,10 @@ struct LocalDevLoopCapabilityPortFactory {
     outbound_delivery_target_set_requires_approval: bool,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    /// Per-runtime catalog of client-supplied ("external") tools. Shared across
+    /// all runs in this runtime so a parked external-tool call and its later
+    /// client-submitted output (across a pause/resume) hit the same store.
+    external_tool_catalog: Arc<dyn ExternalToolCatalog>,
 }
 
 #[async_trait::async_trait]
@@ -194,6 +202,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
                 .outbound_delivery_target_set_requires_approval,
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
+            external_tool_catalog: Arc::clone(&self.external_tool_catalog),
         })
         .await
     }
