@@ -180,7 +180,7 @@ fn is_documentation_v6(ip: std::net::Ipv6Addr) -> bool {
     segments[0] == 0x2001 && segments[1] == 0x0db8
 }
 
-pub(crate) async fn bootstrap_local_dev_nearai_mcp(
+pub(crate) async fn bootstrap_nearai_mcp(
     config: Option<NearAiMcpBootstrapConfig>,
     product_auth: &Arc<RebornProductAuthServices>,
     extension_management: &Arc<RebornLocalExtensionManagementPort>,
@@ -347,6 +347,24 @@ pub(crate) enum NearAiMcpBootstrapOutcome {
     ReusedCredential,
     SubmittedCredential,
     Activated,
+}
+
+impl NearAiMcpBootstrapOutcome {
+    pub(crate) fn log_completion(self) {
+        match self {
+            Self::NotConfigured => tracing::debug!("NEAR AI MCP bootstrap is not configured"),
+            Self::SkippedDisabled
+            | Self::SkippedUnavailable
+            | Self::SkippedPreservedRemoved
+            | Self::SkippedNonActivatable => tracing::info!(
+                outcome = ?self,
+                "NEAR AI MCP bootstrap skipped; extension will not be auto-activated"
+            ),
+            Self::ReusedCredential | Self::SubmittedCredential | Self::Activated => {
+                tracing::debug!(outcome = ?self, "NEAR AI MCP bootstrap completed")
+            }
+        }
+    }
 }
 
 fn nearai_mcp_bootstrap_account_is_usable(

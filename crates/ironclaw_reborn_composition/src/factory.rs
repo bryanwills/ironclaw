@@ -1110,14 +1110,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         extension_lifecycle_service,
         active_extensions,
     ));
-    let nearai_mcp_bootstrap_outcome = crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+    let nearai_mcp_bootstrap_outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
         &extension_management,
         &owner_user_id_for_nearai_mcp,
     )
     .await?;
-    log_nearai_mcp_bootstrap_outcome(nearai_mcp_bootstrap_outcome);
+    nearai_mcp_bootstrap_outcome.log_completion();
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
@@ -1180,28 +1180,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         #[cfg(feature = "root-llm-provider")]
         secret_store,
     })
-}
-
-fn log_nearai_mcp_bootstrap_outcome(outcome: crate::nearai_mcp::NearAiMcpBootstrapOutcome) {
-    match outcome {
-        crate::nearai_mcp::NearAiMcpBootstrapOutcome::NotConfigured => {
-            tracing::debug!("NEAR AI MCP bootstrap is not configured")
-        }
-        crate::nearai_mcp::NearAiMcpBootstrapOutcome::SkippedDisabled
-        | crate::nearai_mcp::NearAiMcpBootstrapOutcome::SkippedUnavailable
-        | crate::nearai_mcp::NearAiMcpBootstrapOutcome::SkippedPreservedRemoved
-        | crate::nearai_mcp::NearAiMcpBootstrapOutcome::SkippedNonActivatable => {
-            tracing::info!(
-                ?outcome,
-                "NEAR AI MCP bootstrap skipped; extension will not be auto-activated"
-            )
-        }
-        crate::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
-        | crate::nearai_mcp::NearAiMcpBootstrapOutcome::SubmittedCredential
-        | crate::nearai_mcp::NearAiMcpBootstrapOutcome::Activated => {
-            tracing::debug!(?outcome, "NEAR AI MCP bootstrap completed")
-        }
-    }
 }
 
 fn backfill_local_dev_legacy_user_skills(
@@ -4758,7 +4736,7 @@ mod tests {
             .extension_management
             .as_ref()
             .expect("extension management");
-        let outcome = crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+        let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
             Some(
                 crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
                     "https://private.near.ai",
@@ -4827,7 +4805,7 @@ mod tests {
             .remove(nearai_ref.clone())
             .await
             .expect("disable NEAR AI MCP extension");
-        let outcome = crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+        let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
             Some(
                 crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
                     "https://private.near.ai",
