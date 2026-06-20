@@ -197,6 +197,21 @@ const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MAX_DEPTH: usize = 64;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+struct TestNetworkHttpEgress(Arc<dyn ironclaw_network::NetworkHttpEgress>);
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait::async_trait]
+impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
+    async fn execute(
+        &self,
+        request: ironclaw_network::NetworkHttpRequest,
+    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
+        self.0.execute(request).await
+    }
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -384,7 +399,7 @@ pub struct RebornServices {
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
-    #[cfg(feature = "root-llm-provider")]
+    #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
     pub(crate) secret_store: Arc<dyn SecretStore>,
 }
 
@@ -392,6 +407,13 @@ impl RebornServices {
     /// The shared scoped secret store backing this composition.
     #[cfg(feature = "root-llm-provider")]
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
+        Arc::clone(&self.secret_store)
+    }
+
+    /// Test-support access to the shared scoped secret store backing the
+    /// composed runtime.
+    #[cfg(feature = "test-support")]
+    pub fn secret_store_for_test(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
     }
 
@@ -640,7 +662,7 @@ impl RebornServices {
             local_runtime: None,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_runtime: None,
-            #[cfg(feature = "root-llm-provider")]
+            #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
         }
     }
@@ -717,6 +739,8 @@ fn production_config(
 async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
     let host_runtime_http_egress_for_test = input.host_runtime_http_egress_for_test.clone();
+    #[cfg(any(test, feature = "test-support"))]
+    let network_http_egress_for_test = input.network_http_egress_for_test.clone();
     let RebornBuildInput {
         profile,
         storage,
@@ -953,7 +977,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         runtime_policy.as_ref(),
         Arc::clone(&store_graph.local_runtime.capability_policy),
     );
-    let mut services = HostRuntimeServices::new(
+    let services = HostRuntimeServices::new(
         Arc::clone(&extension_registry),
         Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
@@ -962,18 +986,34 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_trust_policy(Arc::clone(&local_dev_trust_policy))
-    .with_secret_store_dyn(Arc::clone(&secret_store))
-    .try_with_host_http_egress_with_body_store(
+    .with_secret_store_dyn(Arc::clone(&secret_store));
+    #[cfg(any(test, feature = "test-support"))]
+    let services = if let Some(network_http_egress) = network_http_egress_for_test {
+        services.try_with_host_http_egress_with_body_store(
+            TestNetworkHttpEgress(network_http_egress),
+            http_body_filesystem,
+        )?
+    } else {
+        services.try_with_host_http_egress_with_body_store(
+            ironclaw_network::PolicyNetworkHttpEgress::new(
+                ironclaw_network::ReqwestNetworkTransport::default(),
+            ),
+            http_body_filesystem,
+        )?
+    };
+    #[cfg(not(any(test, feature = "test-support")))]
+    let services = services.try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
             ironclaw_network::ReqwestNetworkTransport::default(),
         ),
         http_body_filesystem,
-    )?
-    .with_run_state(Arc::clone(&store_graph.run_state))
-    .with_approval_requests(Arc::clone(&store_graph.approval_requests))
-    .with_capability_leases(Arc::clone(&store_graph.capability_leases))
-    .with_persistent_approval_policies(Arc::clone(&store_graph.persistent_approval_policies))
-    .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
+    )?;
+    let mut services = services
+        .with_run_state(Arc::clone(&store_graph.run_state))
+        .with_approval_requests(Arc::clone(&store_graph.approval_requests))
+        .with_capability_leases(Arc::clone(&store_graph.capability_leases))
+        .with_persistent_approval_policies(Arc::clone(&store_graph.persistent_approval_policies))
+        .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
     let local_dev_process_port = local_dev_process_port_for_policy(
         &runtime_policy,
         &workspace_root,
@@ -1185,7 +1225,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         local_runtime: Some(store_graph.local_runtime),
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: None,
-        #[cfg(feature = "root-llm-provider")]
+        #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
     })
 }
@@ -2889,6 +2929,8 @@ async fn build_production_shaped(
         require_wasm_credentials,
         #[cfg(all(test, feature = "slack-v2-host-beta"))]
             host_runtime_http_egress_for_test: _,
+        #[cfg(any(test, feature = "test-support"))]
+            network_http_egress_for_test: _,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
@@ -3517,7 +3559,7 @@ where
         local_runtime: None,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: Some(production_runtime),
-        #[cfg(feature = "root-llm-provider")]
+        #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
     })
 }
