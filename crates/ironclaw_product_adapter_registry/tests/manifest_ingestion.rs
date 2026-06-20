@@ -259,11 +259,15 @@ impl HostApiManifestContract for FakeHostIngressContract {
         _host_api: &HostApiRefV2,
         section: &toml::Value,
     ) -> Result<(), String> {
+        // Post-transport-discriminator shape: route_id lives under
+        // [host_ingress.*.transport], not at the section top level.
         section
             .as_table()
-            .and_then(|table| table.get("route_id"))
+            .and_then(|table| table.get("transport"))
+            .and_then(toml::Value::as_table)
+            .and_then(|transport| transport.get("route_id"))
             .and_then(toml::Value::as_str)
-            .ok_or_else(|| "host_ingress route_id is required".to_string())?;
+            .ok_or_else(|| "host_ingress transport.route_id is required".to_string())?;
         Ok(())
     }
 }
