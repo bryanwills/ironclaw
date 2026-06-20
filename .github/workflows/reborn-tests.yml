@@ -34,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: reborn-tests-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  group: reborn-tests-${{ github.event_name }}-${{ inputs.full_closure }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
