@@ -214,9 +214,21 @@ pub fn is_read_only_tool(tool: &str) -> bool {
 /// (see [`ConnectorWriteKind`]). Everything else is `Forbidden`.
 pub const DRAFT_WRITE_TOOLS: &[&str] = &["GMAIL_CREATE_EMAIL_DRAFT"];
 pub const SEND_WRITE_TOOLS: &[&str] = &[
+    // Gmail
     "GMAIL_SEND_EMAIL",
     "GMAIL_SEND_DRAFT",
     "GMAIL_REPLY_TO_THREAD",
+    // Slack — post to a channel/DM (verified Composio slug; NOT the verbose alias)
+    "SLACK_CHAT_POST_MESSAGE",
+    // Google Calendar — create/update events (delete stays Forbidden)
+    "GOOGLECALENDAR_CREATE_EVENT",
+    "GOOGLECALENDAR_QUICK_ADD",
+    "GOOGLECALENDAR_UPDATE_EVENT",
+    // Notion — create/append/update pages + rows (delete stays Forbidden)
+    "NOTION_CREATE_NOTION_PAGE",
+    "NOTION_ADD_PAGE_CONTENT",
+    "NOTION_UPDATE_PAGE",
+    "NOTION_INSERT_ROW_DATABASE",
 ];
 
 /// Classification of a connector write tool against the explicit allowlist.
@@ -266,17 +278,33 @@ mod tests {
             classify_connector_write("GMAIL_SEND_EMAIL"),
             ConnectorWriteKind::Send
         );
-        assert_eq!(
-            classify_connector_write("GMAIL_REPLY_TO_THREAD"),
-            ConnectorWriteKind::Send
-        );
-        // Not on the allowlist — including destructive and near-miss slugs.
+        // Cross-tool sends/creates/updates are gated Send (delivered only when
+        // the send capability is enabled), not Forbidden.
+        for send in [
+            "GMAIL_REPLY_TO_THREAD",
+            "SLACK_CHAT_POST_MESSAGE",
+            "GOOGLECALENDAR_CREATE_EVENT",
+            "GOOGLECALENDAR_UPDATE_EVENT",
+            "NOTION_CREATE_NOTION_PAGE",
+            "NOTION_UPDATE_PAGE",
+            "NOTION_INSERT_ROW_DATABASE",
+        ] {
+            assert_eq!(
+                classify_connector_write(send),
+                ConnectorWriteKind::Send,
+                "{send} must be a gated send"
+            );
+        }
+        // Not on the allowlist — destructive, near-miss, and read slugs stay
+        // Forbidden even with the send capability enabled.
         for forbidden in [
             "",
             "GMAIL_DELETE_MESSAGE",
             "GMAIL_TRASH_MESSAGE",
             "GMAIL_SEND_EMAILS",
-            "NOTION_UPDATE_PAGE",
+            "GOOGLECALENDAR_DELETE_EVENT",
+            "NOTION_DELETE_BLOCK",
+            "SLACK_DELETE_A_FILE_BY_ID",
             "GMAIL_FETCH_EMAILS",
         ] {
             assert_eq!(
