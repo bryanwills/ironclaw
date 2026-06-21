@@ -179,6 +179,31 @@ const WRITE_VERBS: &[&str] = &[
     "RENAME",
     "FORMAT",
     "DUPLICATE",
+    // Defense-in-depth: additional mutating verbs so a read slug can never also
+    // carry an un-denied mutation (the write denylist is authoritative).
+    "POST",
+    "PUT",
+    "EXECUTE",
+    "RUN",
+    "INVITE",
+    "SHARE",
+    "GRANT",
+    "REVOKE",
+    "PUBLISH",
+    "UPLOAD",
+    "ACCEPT",
+    "ASSIGN",
+    "MERGE",
+    "STAR",
+    "EDIT",
+    "REPLACE",
+    "APPROVE",
+    "CANCEL",
+    "CLOSE",
+    "COMPLETE",
+    "RESOLVE",
+    "PIN",
+    "REACT",
 ];
 
 pub fn is_read_only_tool(tool: &str) -> bool {
@@ -337,6 +362,21 @@ mod tests {
         assert!(is_read_only_tool("GOOGLECALENDAR_GET_CURRENT_DATE_TIME"));
         assert!(is_read_only_tool("GMAIL_LIST_THREADS"));
         assert!(is_read_only_tool("GOOGLECALENDAR_LIST_CALENDARS"));
+        // Defense-in-depth: a read verb does NOT rescue a slug that also carries
+        // a mutating verb — the write denylist is authoritative even for the
+        // newly-added verbs.
+        for mutating in [
+            "GITHUB_LIST_AND_MERGE_PULL_REQUEST",
+            "GMAIL_GET_AND_POST_MESSAGE",
+            "SLACK_SEARCH_AND_PIN_MESSAGE",
+            "GOOGLECALENDAR_FIND_AND_SHARE_EVENT",
+            "NOTION_GET_AND_PUBLISH_PAGE",
+        ] {
+            assert!(
+                !is_read_only_tool(mutating),
+                "{mutating} must not be read-only"
+            );
+        }
     }
 
     #[test]
