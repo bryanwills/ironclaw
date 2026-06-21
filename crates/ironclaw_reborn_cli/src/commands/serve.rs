@@ -150,6 +150,18 @@ impl ServeCommand {
         // identity source) and every turn fails with `UnknownThread`.
         let runtime_owner = resolve_webui_runtime_owner(identity_section, &user_id_raw)?;
         let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
+        // IronClaw-native scheduled automations: enable the trigger poller
+        // (scans due triggers + fires trusted turns) while the app is open.
+        // OFF by default and opt-in via IRONCLAW_TRIGGER_POLLER_ENABLED — a
+        // not-always-on desktop client must not silently run background turns.
+        if env::var("IRONCLAW_TRIGGER_POLLER_ENABLED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            runtime_input = runtime_input.with_trigger_poller_settings(
+                ironclaw_reborn_composition::TriggerPollerSettings::enabled(),
+            );
+        }
         // Carry the boot config so the WebUI facade can compose the operator
         // LLM-config settings service over `providers.json` / `config.toml`.
         #[cfg(feature = "root-llm-provider")]
