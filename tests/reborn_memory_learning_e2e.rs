@@ -5,6 +5,7 @@ mod support;
 
 use std::{sync::LazyLock, time::Duration};
 
+use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
@@ -117,6 +118,11 @@ async fn reborn_trace_memory_learning_keyed_write_search_read_e2e() {
     let memory_search = capability_id(MEMORY_SEARCH_CAPABILITY_ID);
     let learning_key = "editor preference";
     let learning_category = "preference";
+    let now = Utc::now();
+    let learning_created_at_old =
+        (now - ChronoDuration::minutes(2)).to_rfc3339_opts(SecondsFormat::Secs, true);
+    let learning_created_at_new =
+        (now - ChronoDuration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
     let expected_path = stable_learning_document_relative_path(learning_category, learning_key)
         .expect("stable learning path");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
@@ -128,7 +134,7 @@ async fn reborn_trace_memory_learning_keyed_write_search_read_e2e() {
                     "key": learning_key,
                     "category": learning_category,
                     "confidence": 2,
-                    "created_at": "2026-06-14T00:00:00Z",
+                    "created_at": learning_created_at_old,
                     "source": "reborn-e2e",
                     "content": "learning e2e old_marker prefers nano"
                 }),
@@ -143,7 +149,7 @@ async fn reborn_trace_memory_learning_keyed_write_search_read_e2e() {
                     "key": learning_key,
                     "category": learning_category,
                     "confidence": 9,
-                    "created_at": "2026-06-14T00:01:00Z",
+                    "created_at": learning_created_at_new,
                     "source": "reborn-e2e",
                     "content": "learning e2e new_marker prefers helix region=us-east-1"
                 }),
@@ -227,7 +233,7 @@ async fn reborn_trace_memory_learning_keyed_write_search_read_e2e() {
     assert_eq!(search_result["source"], serde_json::json!("reborn-e2e"));
     assert_eq!(
         search_result["created_at"],
-        serde_json::json!("2026-06-14T00:01:00Z")
+        serde_json::json!(learning_created_at_new)
     );
     assert_output_contains_new_learning_only(
         results[4].output["content"]

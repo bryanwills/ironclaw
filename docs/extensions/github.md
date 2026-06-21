@@ -75,18 +75,19 @@ Here are some of the actions your agent can perform with the GitHub extension:
 - `list_pull_requests`: List pull requests  
 - `create_pull_request`: Create a new pull request  
 - `get_pull_request`: Get details of a specific pull request  
-- `get_pull_request_files`: Get the list of files in a pull request  
-- `create_pr_review`: Submit a pull request review  
-- `list_pull_request_comments`: List review comments on a pull request  
-- `reply_pull_request_comment`: Reply to a pull request review comment  
-- `get_pull_request_reviews`: Get reviews for a pull request  
-- `get_combined_status`: Get the combined status for a ref  
-- `merge_pull_request`: Merge a pull request  
-- `list_repos`: List repositories (user/org)  
-- `get_file_content`: Retrieve the content of a file in the repo  
-- `trigger_workflow`: Manually trigger a GitHub Actions workflow  
-- `get_workflow_runs`: List recent workflow runs  
-- `handle_webhook`: Handle a GitHub webhook payload  
+- `get_pull_request_files`: Get the list of files in a pull request
+- `create_pr_review`: Submit a pull request review
+- `list_pull_request_comments`: List review comments on a pull request
+- `reply_pull_request_comment`: Reply to a pull request review comment
+- `get_pull_request_reviews`: Get reviews for a pull request
+- `get_combined_status`: Get the combined status for a ref
+- `merge_pull_request`: Merge a pull request
+- `get_authenticated_user`: Get the authenticated GitHub user
+- `list_repos`: List repositories (user/org)
+- `get_file_content`: Retrieve the content of a file in the repo
+- `trigger_workflow`: Manually trigger a GitHub Actions workflow
+- `get_workflow_runs`: List recent workflow runs
+- `handle_webhook`: Handle a GitHub webhook payload
 
 ---
 

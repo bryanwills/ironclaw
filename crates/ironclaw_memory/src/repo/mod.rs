@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use futures::{StreamExt as _, stream};
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::VirtualPath;
 
@@ -15,6 +16,8 @@ use crate::search::{MemorySearchRequest, MemorySearchResult, apply_learning_deca
 
 mod filesystem;
 mod in_memory;
+
+const LEARNING_METADATA_READ_CONCURRENCY: usize = 8;
 
 pub use filesystem::FilesystemMemoryDocumentRepository;
 pub use in_memory::InMemoryMemoryDocumentRepository;
@@ -275,18 +278,24 @@ where
         return Ok(results);
     }
 
-    let mut with_metadata = Vec::with_capacity(results.len());
-    for result in results {
-        let metadata = if is_stable_learning_document_relative_path(result.path.relative_path()) {
-            repository
-                .read_document_metadata(&result.path)
-                .await?
-                .map(|value| crate::metadata::DocumentMetadata::from_value(&value))
-                .unwrap_or_default()
-        } else {
-            crate::metadata::DocumentMetadata::default()
-        };
-        with_metadata.push((result, metadata));
-    }
+    let with_metadata = stream::iter(results)
+        .map(|result| async move {
+            let metadata = if is_stable_learning_document_relative_path(result.path.relative_path())
+            {
+                repository
+                    .read_document_metadata(&result.path)
+                    .await?
+                    .map(|value| crate::metadata::DocumentMetadata::from_value(&value))
+                    .unwrap_or_default()
+            } else {
+                crate::metadata::DocumentMetadata::default()
+            };
+            Ok::<_, FilesystemError>((result, metadata))
+        })
+        .buffer_unordered(LEARNING_METADATA_READ_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(apply_learning_decay_to_results(with_metadata, request))
 }

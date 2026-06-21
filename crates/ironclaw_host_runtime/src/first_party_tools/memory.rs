@@ -34,7 +34,7 @@ pub const MEMORY_TREE_CAPABILITY_ID: &str = "builtin.memory_tree";
 const MEMORY_PATH: &str = "MEMORY.md";
 const HEARTBEAT_PATH: &str = "HEARTBEAT.md";
 const BOOTSTRAP_PATH: &str = "BOOTSTRAP.md";
-const MAX_MEMORY_PATCH_RETRIES: usize = 8;
+pub(super) const MAX_MEMORY_PATCH_RETRIES: usize = 8;
 const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
 
 struct MemoryServices {
@@ -163,7 +163,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             MEMORY_WRITE_CAPABILITY_ID,
-            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope",
+            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Allow,
             resource_profile(),
@@ -236,7 +236,7 @@ fn memory_services(
 }
 
 impl MemoryCapabilityState {
-    fn backend_for(
+    pub(super) fn backend_for(
         &self,
         request: &FirstPartyCapabilityRequest,
     ) -> Result<Arc<dyn MemoryBackend>, FirstPartyCapabilityError> {
@@ -300,7 +300,7 @@ fn build_backend(
     Arc::new(backend)
 }
 
-fn ensure_memory_mount(
+pub(super) fn ensure_memory_mount(
     request: &FirstPartyCapabilityRequest,
     write: bool,
 ) -> Result<(), FirstPartyCapabilityError> {
@@ -459,17 +459,19 @@ fn parse_write_command(
     scope: &MemoryDocumentScope,
     input: &Value,
 ) -> Result<MemoryWriteCommand, FirstPartyCapabilityError> {
-    if !learning_enabled() && has_top_level_learning_field(input) {
+    let metadata_overlay = metadata_overlay(input)?;
+    if !learning_enabled()
+        && (has_top_level_learning_field(input)
+            || metadata_overlay
+                .as_ref()
+                .is_some_and(has_learning_metadata_fields))
+    {
         return Err(input_error());
     }
-    let metadata_overlay = metadata_overlay(input)?;
     if let Some(key) = metadata_overlay
         .as_ref()
         .and_then(|metadata| metadata.key.as_deref())
     {
-        if !learning_enabled() {
-            return Err(input_error());
-        }
         let category = metadata_overlay
             .as_ref()
             .and_then(|metadata| metadata.category.as_deref())
@@ -543,6 +545,14 @@ fn has_top_level_learning_field(input: &Value) -> bool {
     LEARNING_FIELD_NAMES
         .into_iter()
         .any(|key| input.get(key).is_some())
+}
+
+fn has_learning_metadata_fields(metadata: &DocumentMetadata) -> bool {
+    metadata.key.is_some()
+        || metadata.category.is_some()
+        || metadata.confidence.is_some()
+        || metadata.created_at.is_some()
+        || metadata.source.is_some()
 }
 
 fn metadata_overlay(input: &Value) -> Result<Option<DocumentMetadata>, FirstPartyCapabilityError> {
@@ -717,7 +727,9 @@ async fn append_document(
         .map_err(|_| operation_error())
 }
 
-fn write_options(metadata_overlay: Option<&DocumentMetadata>) -> MemoryBackendWriteOptions {
+pub(super) fn write_options(
+    metadata_overlay: Option<&DocumentMetadata>,
+) -> MemoryBackendWriteOptions {
     MemoryBackendWriteOptions {
         metadata_overlay: metadata_overlay.cloned(),
     }

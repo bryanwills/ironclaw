@@ -9,6 +9,7 @@
 //! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 #![warn(unreachable_pub)]
 
+mod attachment_context;
 mod capability_display_preview;
 mod contract;
 mod error;
@@ -34,7 +35,7 @@ pub use capability_display_preview::{
 pub use contract::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, AttachmentRef, ContextMessage, ContextMessages,
+    AppendToolResultReferenceRequest, ContextImageAttachment, ContextMessage, ContextMessages,
     ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FinalizedAssistantMessageByRunRequest, GOAL_STATEMENT_MAX_CHARS, GoalStatement,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
@@ -46,11 +47,13 @@ pub use contract::{
     UpdateToolResultReferenceRequest,
 };
 pub use error::SessionThreadError;
-// Re-exposed so transcript-contract consumers (`AttachmentRef`) don't need a
-// direct dependency on `ironclaw_common` for the attachment kind vocabulary.
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
-pub use ironclaw_common::AttachmentKind;
+// The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
+// and `IncomingAttachment`); re-exposed here so transcript-contract consumers
+// reach `AttachmentRef` through this crate without a direct `ironclaw_common`
+// dependency.
+pub use ironclaw_common::{AttachmentKind, AttachmentRef};
 pub use service::SessionThreadService;
 pub use tool_result_reference::{
     ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,

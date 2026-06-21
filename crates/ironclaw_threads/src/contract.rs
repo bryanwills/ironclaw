@@ -1,4 +1,5 @@
-use ironclaw_common::AttachmentKind;
+use chrono::{DateTime, Utc};
+use ironclaw_common::AttachmentRef;
 use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
@@ -41,40 +42,6 @@ impl ThreadScope {
             invocation_id: ironclaw_host_api::InvocationId::new(),
         }
     }
-}
-
-/// A reference to a single attachment carried alongside a transcript message.
-///
-/// This is a *reference*, never the bytes. Per the crate guardrails the
-/// transcript must not hold raw runtime payloads, host paths, or secrets, so an
-/// `AttachmentRef` carries only metadata plus an opaque `storage_key` (a
-/// rendered scoped path into host-side storage, not a raw host path) and the
-/// extracted/transcribed text once an extractor has run. The bytes live behind
-/// the filesystem authority that owns `storage_key`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttachmentRef {
-    /// Stable identifier for this attachment within its message.
-    pub id: String,
-    /// Image / Audio / Document.
-    pub kind: AttachmentKind,
-    /// MIME type as received at the ingress boundary. Validated upstream
-    /// against the attachment format registry; stored verbatim here.
-    pub mime_type: String,
-    /// Original filename, when the source provided one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filename: Option<String>,
-    /// File size in bytes, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
-    /// Opaque storage reference for the bytes (a rendered scoped path into
-    /// host-side storage, never a raw host path). `None` until the attachment
-    /// has been landed in storage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_key: Option<String>,
-    /// Extracted document text or audio transcript, once an extractor has run.
-    /// Sanitized external data; never raw bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extracted_text: Option<String>,
 }
 
 /// Safe transcript content accepted by this boundary.
@@ -193,6 +160,11 @@ pub enum MessageKind {
 pub enum MessageStatus {
     Accepted,
     Submitted,
+    /// Message arrived while the thread was busy; it will NOT be auto-resubmitted.
+    /// The user must resend the message once the current task finishes.
+    RejectedBusy,
+    /// Legacy status — no longer written by new code; kept for deserializing
+    /// existing rows in storage.
     DeferredBusy,
     Draft,
     Finalized,
@@ -212,6 +184,15 @@ pub struct SessionThreadRecord {
     pub metadata_json: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<ThreadGoal>,
+    /// When the thread was created. `None` for legacy records persisted
+    /// before activity timestamps existed; such records sort oldest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// Last time the thread saw activity (a message was appended). Drives
+    /// the sidebar "Recent" ordering — newest activity first. Bumped on
+    /// every append; `None` for legacy records (sorts oldest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Transcript message snapshot for UI/projection reads.
@@ -491,6 +472,22 @@ pub struct LoadContextMessagesRequest {
     pub message_ids: Vec<ThreadMessageId>,
 }
 
+/// An image attachment a model-visible message carries, in a form the turn
+/// layer can turn into a multimodal content part for a vision-capable model.
+///
+/// This is a *reference*, never bytes: `storage_key` is the landed scoped path
+/// (e.g. `/workspace/attachments/...`); the turn layer reads the bytes back
+/// through the project filesystem authority and hands them to the model
+/// gateway, which attaches them as image content only for a vision-capable
+/// model (the capability gate lives in the gateway, not at read time). The
+/// textual `<attachments>` pointer in [`ContextMessage::content`] remains the
+/// fallback for text-only models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextImageAttachment {
+    pub mime_type: String,
+    pub storage_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextMessage {
     pub message_id: Option<ThreadMessageId>,
@@ -499,6 +496,35 @@ pub struct ContextMessage {
     pub kind: MessageKind,
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub content: String,
+    /// Image attachments on this message, for the multimodal path. Empty for
+    /// summaries, tool results, and messages without landed images.
+    pub image_attachments: Vec<ContextImageAttachment>,
+}
+
+impl ContextMessage {
+    /// Project a model-visible transcript message into a [`ContextMessage`],
+    /// given its already-resolved `content`. This is the single place attachment
+    /// projection happens — the `<attachments>` text pointer is folded into
+    /// `content` and image references into `image_attachments` — so the two
+    /// backing stores (in-memory and filesystem) cannot drift on how a stored
+    /// message becomes model context. Callers own the `content` `Option` unwrap
+    /// because the two read paths handle absent content differently.
+    pub(crate) fn from_transcript_message(message: &ThreadMessageRecord, content: String) -> Self {
+        Self {
+            message_id: Some(message.message_id),
+            summary_id: None,
+            sequence: message.sequence,
+            kind: message.kind,
+            tool_result_provider_call: message.tool_result_provider_call.clone(),
+            content: crate::attachment_context::augment_model_content(
+                content,
+                &message.attachments,
+            ),
+            image_attachments: crate::attachment_context::model_image_attachments(
+                &message.attachments,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,6 +561,7 @@ pub struct UpdateThreadGoalRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_common::AttachmentKind;
 
     fn sample_ref() -> AttachmentRef {
         AttachmentRef {
