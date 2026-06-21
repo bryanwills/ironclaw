@@ -41,9 +41,10 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ProductWorkflowError, ResolveApprovalInteractionRequest,
+    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
+    LifecyclePackageRef, LifecycleProductFacade, ListPendingApprovalsRequest,
+    PendingApprovalInteractionView, ProductWorkflowError, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
@@ -114,9 +115,10 @@ pub use types::{
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornGetRunStateResponse, RebornListApprovalsRequest, RebornListApprovalsResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogEntry, RebornLogLevel,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
@@ -131,13 +133,13 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornPendingApprovalView, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -152,6 +154,9 @@ const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
 const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
 const OPERATOR_LOGS_CONTEXT_MAX_BYTES: usize = 256;
 const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
+
+/// Constant status pill the pending-approvals feed shows on every row.
+const PENDING_APPROVAL_BADGE: &str = "Needs approval";
 
 const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
 const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
@@ -997,6 +1002,24 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError>;
+
+    /// Read-only feed of the caller's PENDING approval gates.
+    ///
+    /// Sibling read of [`resolve_gate`](Self::resolve_gate): both reach the same
+    /// [`ApprovalInteractionService`], but this one never resolves anything. The
+    /// default returns an empty feed so minimal/fake compositions (which wire no
+    /// approval service) compile and render an empty state rather than erroring;
+    /// the default `RebornServices` overrides it.
+    async fn list_pending_approvals(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListApprovalsRequest,
+    ) -> Result<RebornListApprovalsResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Ok(RebornListApprovalsResponse {
+            approvals: Vec::new(),
+        })
+    }
 
     async fn get_run_state(
         &self,
@@ -2793,6 +2816,64 @@ impl RebornServicesApi for RebornServices {
                 .await
             }
         }
+    }
+
+    async fn list_pending_approvals(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListApprovalsRequest,
+    ) -> Result<RebornListApprovalsResponse, RebornServicesError> {
+        // Granularity: `ApprovalInteractionService::list_pending` is per-thread
+        // scoped — it builds an `ApprovalInteractionScope` (which carries a
+        // concrete `thread_id`) from the request `TurnScope` and only returns
+        // gates whose owner scope (thread_id included) matches. The
+        // `WebUiAuthenticatedCaller` has no thread_id, so a caller-only request
+        // has no thread to enumerate against. We therefore require a
+        // `?thread_id=` to scope the feed to one thread, mirroring
+        // `resolve_gate`/`get_run_state` scope+actor construction and the same
+        // ownership probe so authorization and tenancy match exactly. Without a
+        // thread_id we return an empty feed rather than fabricating cross-thread
+        // data; the browser shows an empty state.
+        let Some(thread_id) = request.thread_id else {
+            return Ok(RebornListApprovalsResponse {
+                approvals: Vec::new(),
+            });
+        };
+        let thread_id = parse_thread_id_field("thread_id", thread_id)?;
+        let scope = caller.turn_scope(thread_id);
+        let actor = caller.actor();
+        // Ownership probe with automation-trigger fallback, identical to the
+        // resolve_gate / get_run_state reads: a caller sharing
+        // (tenant, agent, project) must not enumerate another user's gates by
+        // guessing a thread_id.
+        let access = self
+            .resolve_thread_access_for_caller(caller, scope, &actor)
+            .await?;
+        let pending = self
+            .approval_interactions
+            .list_pending(ListPendingApprovalsRequest {
+                scope: access.scope,
+                actor: access.run_actor,
+            })
+            .await
+            .map_err(|error| map_adapter_error(error.into()))?;
+        let approvals = pending
+            .approvals
+            .into_iter()
+            .map(|view| {
+                let gate_ref = view.gate_ref.as_str().to_string();
+                RebornPendingApprovalView {
+                    id: gate_ref.clone(),
+                    thread_id: view.scope.thread_id.as_str().to_string(),
+                    title: pending_approval_title(&view),
+                    detail: view.summary,
+                    run_id: view.run_id,
+                    gate_ref: view.gate_ref,
+                    badge: PENDING_APPROVAL_BADGE.to_string(),
+                }
+            })
+            .collect();
+        Ok(RebornListApprovalsResponse { approvals })
     }
 
     async fn get_run_state(
@@ -4805,6 +4886,21 @@ fn map_turn_error(error: TurnError) -> RebornServicesError {
         ),
     };
     RebornServicesError::from_status_kind(code, kind, status_code, retryable)
+}
+
+/// Short label for a pending-approval feed row. Derives a capability-specific
+/// title from the redacted action view when available, otherwise falls back to
+/// the gate's summary.
+fn pending_approval_title(view: &PendingApprovalInteractionView) -> String {
+    match &view.action {
+        ApprovalInteractionActionView::Dispatch { capability_id } => {
+            format!("Run {}", capability_id.as_str())
+        }
+        ApprovalInteractionActionView::SpawnCapability { capability_id } => {
+            format!("Spawn {}", capability_id.as_str())
+        }
+        ApprovalInteractionActionView::Other => view.summary.clone(),
+    }
 }
 
 fn map_adapter_error(error: ProductAdapterError) -> RebornServicesError {

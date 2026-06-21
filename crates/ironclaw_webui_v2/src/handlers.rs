@@ -34,28 +34,28 @@ use ironclaw_product_workflow::{
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
     RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornListAutomationsResponse,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    webui_attachment_capabilities,
+    RebornFsStatResponse, RebornGetProjectRequest, RebornListApprovalsRequest,
+    RebornListApprovalsResponse, RebornListAutomationsResponse, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornListThreadsResponse, RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
+    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -865,6 +865,35 @@ pub struct ResolveGatePath {
     pub thread_id: String,
     pub run_id: String,
     pub gate_ref: String,
+}
+
+/// `GET /api/webchat/v2/approvals`
+///
+/// Read-only feed of the caller's PENDING approval gates — the read sibling of
+/// [`resolve_gate`]. Never resolves, approves, or denies anything. The optional
+/// `?thread_id=` query narrows the feed to one thread; the underlying approval
+/// service is per-thread scoped, so without it the facade returns an empty feed
+/// rather than fabricating cross-thread data. The scope is derived from the
+/// authenticated caller, never trusted from the request.
+pub async fn list_approvals(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<ListApprovalsQuery>,
+) -> Result<Json<RebornListApprovalsResponse>, WebUiV2HttpError> {
+    let request = RebornListApprovalsRequest {
+        thread_id: query.thread_id,
+    };
+    let response = state
+        .services()
+        .list_pending_approvals(caller, request)
+        .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListApprovalsQuery {
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
 
 /// `GET /api/webchat/v2/threads`

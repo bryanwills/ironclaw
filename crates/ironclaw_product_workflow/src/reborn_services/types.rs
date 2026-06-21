@@ -354,6 +354,45 @@ pub enum RebornResolveGateResponse {
     Cancelled(RebornCancelRunResponse),
 }
 
+/// Browser query for the read-only pending-approvals feed.
+///
+/// Pure read — the caller authority is supplied separately by
+/// [`crate::WebUiAuthenticatedCaller`]. The optional `thread_id` narrows the
+/// feed to one thread; the underlying approval service
+/// ([`crate::ApprovalInteractionService::list_pending`]) is per-thread scoped
+/// (it filters gates by an [`crate::ApprovalInteractionScope`] that carries a
+/// concrete `thread_id`), so without a `thread_id` there is no thread context to
+/// enumerate against and the facade returns an empty feed rather than
+/// fabricating cross-thread data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornListApprovalsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// One pending approval gate, projected to the fields the Workbench feed
+/// renders. The shape matches the browser's `normalizeApprovalsFeed` contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornPendingApprovalView {
+    /// Stable identifier for the row (the gate ref).
+    pub id: String,
+    pub thread_id: String,
+    /// Short label for the row.
+    pub title: String,
+    /// Longer human-readable summary.
+    pub detail: String,
+    pub run_id: TurnRunId,
+    pub gate_ref: GateRef,
+    /// Constant status pill the feed shows on each pending row.
+    pub badge: String,
+}
+
+/// Response body for `GET /api/webchat/v2/approvals`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornListApprovalsResponse {
+    pub approvals: Vec<RebornPendingApprovalView>,
+}
+
 /// Browser body for the WebUI run-state read.
 ///
 /// Pure read — no idempotency key. Caller authority is supplied separately by

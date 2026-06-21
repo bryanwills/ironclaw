@@ -24,6 +24,7 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
 pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
+pub const WEBUI_V2_ROUTE_LIST_APPROVALS: &str = "webui.v2.list_approvals";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
@@ -99,6 +100,7 @@ pub const WEBUI_V2_PATTERN_CANCEL_RUN: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel";
 pub const WEBUI_V2_PATTERN_RESOLVE_GATE: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve";
+pub const WEBUI_V2_PATTERN_LIST_APPROVALS: &str = "/api/webchat/v2/approvals";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
@@ -175,6 +177,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         stream_events_ws_descriptor(),
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
+        list_approvals_descriptor(),
         list_automations_descriptor(),
         trace_credits_descriptor(),
         authorize_trace_hold_descriptor(),
@@ -630,6 +633,20 @@ fn resolve_gate_descriptor() -> IngressRouteDescriptor {
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::TurnCoordinator,
+        ),
+    )
+}
+
+fn list_approvals_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_APPROVALS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_APPROVALS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
         ),
     )
 }
