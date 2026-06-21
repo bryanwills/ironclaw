@@ -1291,7 +1291,7 @@ mod postgres_tests {
     use ironclaw_filesystem::{
         Capability, CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey,
         IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem, RecordKind,
-        SeqNo,
+        SeqNo, TxnCapability,
     };
     use ironclaw_host_api::VirtualPath;
 
@@ -1417,6 +1417,48 @@ mod postgres_tests {
         let got = fs.get(&path).await.unwrap().unwrap();
         assert_eq!(got.version, v2);
         assert_eq!(got.entry.body, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn postgres_transaction_rollback_discards_prior_put_after_later_cas_conflict() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        assert_eq!(fs.capabilities().txn(), TxnCapability::MultiKey);
+
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let pending = vpath(&prefix, "txn_pending");
+        let existing = vpath(&prefix, "txn_existing");
+        fs.put(
+            &existing,
+            Entry::bytes(b"already committed".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+        let mut txn = fs.begin(&prefix_path).await.unwrap();
+        txn.put(
+            &pending,
+            Entry::bytes(b"must roll back".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+        let err = txn
+            .put(
+                &existing,
+                Entry::bytes(b"conflicting rewrite".to_vec()),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+        txn.rollback().await;
+
+        assert!(fs.get(&pending).await.unwrap().is_none());
+        let got = fs.get(&existing).await.unwrap().unwrap();
+        assert_eq!(got.entry.body, b"already committed");
     }
 
     #[tokio::test]

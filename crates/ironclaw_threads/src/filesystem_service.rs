@@ -70,7 +70,7 @@ use crate::{
     UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
-use message_sequence_index::MessageSequenceIndexStore;
+use message_sequence_index::{MessageSequenceIndexStore, message_sequence_index_entry_for_message};
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
 /// store budgets — enough to absorb routine cross-process contention,
@@ -312,6 +312,69 @@ where
             ))),
             Err(PutError::Other(error)) => Err(error),
         }
+    }
+
+    async fn try_write_new_message_transactionally(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+        idempotency_record: Option<(&ScopedPath, &Entry)>,
+    ) -> Result<bool, SessionThreadError> {
+        let resource_scope = scope.to_resource_scope();
+        let txn_prefix = scoped_path(THREADS_PREFIX)?;
+        let mut txn = match self.filesystem.begin(&resource_scope, &txn_prefix).await {
+            Ok(txn) => txn,
+            Err(FilesystemError::Unsupported {
+                operation: FilesystemOperation::BeginTxn,
+                ..
+            }) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+
+        let message_path = message_record_path(scope, thread_id, message.message_id)?;
+        let message_entry = Self::message_entry(message)?;
+        let message_virtual_path = self.filesystem.resolve(&resource_scope, &message_path)?;
+        if let Err(error) = txn
+            .put(&message_virtual_path, message_entry, CasExpectation::Absent)
+            .await
+        {
+            txn.rollback().await;
+            return Err(absent_put_error(error, "message", &message_path));
+        }
+
+        let (sequence_path, sequence_entry) =
+            message_sequence_index_entry_for_message(scope, thread_id, message)?;
+        let sequence_virtual_path = self.filesystem.resolve(&resource_scope, &sequence_path)?;
+        if let Err(error) = txn
+            .put(
+                &sequence_virtual_path,
+                sequence_entry,
+                CasExpectation::Absent,
+            )
+            .await
+        {
+            txn.rollback().await;
+            return Err(absent_put_error(
+                error,
+                "message sequence index",
+                &sequence_path,
+            ));
+        }
+
+        if let Some((path, entry)) = idempotency_record {
+            let virtual_path = self.filesystem.resolve(&resource_scope, path)?;
+            if let Err(error) = txn
+                .put(&virtual_path, entry.clone(), CasExpectation::Any)
+                .await
+            {
+                txn.rollback().await;
+                return Err(error.into());
+            }
+        }
+
+        txn.commit().await?;
+        Ok(true)
     }
 
     async fn list_thread_messages(
@@ -1020,10 +1083,7 @@ where
             attachments,
             redaction_ref: None,
         };
-        self.write_new_message(&request.scope, &request.thread_id, &message, "message")
-            .await?;
-
-        if let Some(idempotency_key) = idempotency_key {
+        let idempotency_write = if let Some(idempotency_key) = &idempotency_key {
             let idem_record = InboundIdempotencyRecord {
                 scope: idempotency_key.scope.clone(),
                 source_binding_id: idempotency_key.source_binding_id.clone(),
@@ -1031,21 +1091,43 @@ where
                 thread_id: request.thread_id.clone(),
                 message_id,
             };
-            let record_key = idempotency_record_key(&idempotency_key)?;
+            let record_key = idempotency_record_key(idempotency_key)?;
             let path = idempotency_record_path(&record_key)?;
             let entry = Self::idempotency_entry(&idem_record)?;
+            Some((path, entry))
+        } else {
+            None
+        };
+
+        let wrote_transactionally = self
+            .try_write_new_message_transactionally(
+                &request.scope,
+                &request.thread_id,
+                &message,
+                idempotency_write
+                    .as_ref()
+                    .map(|(path, entry)| (path, entry)),
+            )
+            .await?;
+
+        if !wrote_transactionally {
+            self.write_new_message(&request.scope, &request.thread_id, &message, "message")
+                .await?;
+
             // `Any` here: the SHA-256 key already encodes the full tuple,
             // so a duplicate write simply overwrites with the same
             // (binding, event, thread, message) — equivalent to the
             // legacy in-memory HashMap upsert.
-            self.filesystem
-                .put(
-                    &request.scope.to_resource_scope(),
-                    &path,
-                    entry,
-                    CasExpectation::Any,
-                )
-                .await?;
+            if let Some((path, entry)) = idempotency_write {
+                self.filesystem
+                    .put(
+                        &request.scope.to_resource_scope(),
+                        &path,
+                        entry,
+                        CasExpectation::Any,
+                    )
+                    .await?;
+            }
         }
 
         Ok(AcceptedInboundMessage {
@@ -2423,6 +2505,20 @@ enum PutError {
     VersionMismatch,
     /// Any other backend or serialization failure; surface to caller.
     Other(SessionThreadError),
+}
+
+fn absent_put_error(
+    error: FilesystemError,
+    description: &'static str,
+    path: &ScopedPath,
+) -> SessionThreadError {
+    match error {
+        FilesystemError::VersionMismatch { .. } => SessionThreadError::Backend(format!(
+            "filesystem CAS Absent rejected new {description} at {}",
+            path.as_str()
+        )),
+        error => error.into(),
+    }
 }
 
 async fn put_with_cas<F>(
