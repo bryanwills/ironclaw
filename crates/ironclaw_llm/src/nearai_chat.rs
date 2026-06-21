@@ -269,6 +269,22 @@ impl NearAiChatProvider {
     /// The env var fallback (#3) only triggers after `ensure_authenticated()`
     /// runs, because `api_key_login()` sets the env var but not a session token.
     async fn resolve_bearer_token(&self) -> Result<String, LlmError> {
+        // Egress guard: the NEAR AI credential must only ever be Bearer-sent to a
+        // NEAR AI host. The persisted provider base_url is operator-mutable and
+        // the syntactic base_url validator deliberately permits arbitrary public
+        // DNS (for self-hosted OpenAI-compatible providers), so without this an
+        // operator who repoints the `nearai` provider could exfiltrate the NEAR
+        // AI key/session token. Refuse before any request leaves (protects both
+        // the credential and the prompt). See `nearai_credential_host_allowed`.
+        if !nearai_credential_host_allowed(&self.config.base_url) {
+            return Err(LlmError::RequestFailed {
+                provider: "nearai".to_string(),
+                reason: "refusing to send the NEAR AI credential to a non-NEAR AI host; \
+                         the nearai provider base_url must be cloud-api.near.ai, \
+                         private.near.ai, or an explicit NEARAI_BASE_URL"
+                    .to_string(),
+            });
+        }
         // 1. Config-level API key takes priority
         if let Some(ref api_key) = self.config.api_key {
             return Ok(api_key.expose_secret().to_string());
@@ -888,6 +904,48 @@ fn model_cost_to_decimal(mc: &ModelCost) -> Option<Decimal> {
     base.checked_mul(factor)
 }
 
+/// Egress allowlist for the NEAR AI credential. The NEAR AI API key / session
+/// token may only be Bearer-sent to a NEAR AI host: the two NEAR AI Cloud hosts,
+/// or a host the operator deliberately set via the `NEARAI_BASE_URL` env (a
+/// self-host choice, NOT a persisted-config overwrite). Returns false for any
+/// other host so a repointed `nearai` provider can't exfiltrate the credential.
+fn nearai_credential_host_allowed(base_url: &str) -> bool {
+    fn host_of(raw: &str) -> Option<String> {
+        url::Url::parse(raw.trim())
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(|host| host.to_ascii_lowercase()))
+    }
+    fn is_loopback(host: &str) -> bool {
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        bare == "localhost"
+            || bare
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+    }
+    let Some(host) = host_of(base_url) else {
+        return false;
+    };
+    if host == "cloud-api.near.ai" || host == "private.near.ai" {
+        return true;
+    }
+    // Loopback / localhost is the operator's own machine (a self-hosted NEAR AI
+    // endpoint or a local proxy/test server). It cannot exfiltrate the credential
+    // off-box, and it matches the base_url validator's self-host posture — so the
+    // finding (credential sent to a *remote* operator-redirected host) stays
+    // closed while local development and self-hosting keep working.
+    if is_loopback(&host) {
+        return true;
+    }
+    if let Ok(env_base) = std::env::var("NEARAI_BASE_URL")
+        && let Some(env_host) = host_of(&env_base)
+        && !env_host.is_empty()
+    {
+        return host == env_host;
+    }
+    false
+}
+
 /// Fetch pricing from the NEAR AI `/v1/model/list` endpoint.
 ///
 /// Returns a map of model_id → (input_cost_per_token, output_cost_per_token).
@@ -898,6 +956,11 @@ async fn fetch_pricing(
     api_key: Option<&secrecy::SecretString>,
     session: &SessionManager,
 ) -> Result<HashMap<String, (Decimal, Decimal)>, LlmError> {
+    // Egress guard (see resolve_bearer_token): never send the credential to a
+    // non-NEAR host. Pricing is best-effort, so skip silently rather than error.
+    if !nearai_credential_host_allowed(base_url) {
+        return Ok(HashMap::new());
+    }
     let base = base_url.trim_end_matches('/');
     let url = if base.ends_with("/v1") {
         format!("{}/model/list", base)
@@ -1182,6 +1245,32 @@ mod tests {
     use super::*;
     use crate::session::SessionConfig;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn nearai_credential_host_allows_only_near_ai_cloud_hosts() {
+        // The two NEAR AI Cloud hosts are allowed (api-key -> cloud-api,
+        // session-token -> private), with or without scheme paths.
+        assert!(nearai_credential_host_allowed("https://cloud-api.near.ai"));
+        assert!(nearai_credential_host_allowed("https://cloud-api.near.ai/v1"));
+        assert!(nearai_credential_host_allowed("https://private.near.ai"));
+        assert!(nearai_credential_host_allowed("https://PRIVATE.NEAR.AI/v1/")); // case-insensitive
+        // Loopback / localhost is the operator's own machine (self-hosted NEAR AI
+        // or a local proxy/test server) — allowed; it cannot exfiltrate off-box.
+        assert!(nearai_credential_host_allowed("http://127.0.0.1:8318"));
+        assert!(nearai_credential_host_allowed("http://localhost:8318/v1"));
+        assert!(nearai_credential_host_allowed("http://[::1]:8318"));
+    }
+
+    #[test]
+    fn nearai_credential_host_rejects_redirected_hosts() {
+        // The exfiltration vector: an operator repoints the persisted nearai
+        // base_url at an arbitrary host. The credential must NOT follow.
+        assert!(!nearai_credential_host_allowed("https://evil.example.com"));
+        assert!(!nearai_credential_host_allowed("https://cloud-api.near.ai.evil.com")); // suffix trick
+        assert!(!nearai_credential_host_allowed("http://169.254.169.254")); // cloud metadata
+        assert!(!nearai_credential_host_allowed("not a url"));
+        assert!(!nearai_credential_host_allowed(""));
+    }
 
     #[test]
     fn parse_models_prefers_id_over_display_name() {
