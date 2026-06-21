@@ -401,6 +401,37 @@ pub struct RebornServices {
     /// rather than standing up a second authority.
     #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
     pub(crate) secret_store: Arc<dyn SecretStore>,
+    /// Readiness of the background credential keepalive worker (B1). Carries the
+    /// worker's dependencies together so "both deps present or neither" is a type
+    /// invariant rather than a runtime check. MUST stay private — the worker is
+    /// the only consumer; this field must never leak through any public facade.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) credential_refresh_worker: CredentialRefreshWorkerReady,
+}
+
+/// Whether the background credential keepalive worker can be started, with its
+/// dependencies bundled so they cannot be partially wired.
+///
+/// The dependencies (cross-owner candidate enumeration + deployment-wide leader
+/// lock + refresh port) are only ever produced together on the durable
+/// production path. Bundling them into one `Ready` variant makes the
+/// half-configured state — which would silently disable proactive refresh —
+/// unrepresentable, so the runtime spawn site is a clean two-arm match with no
+/// "enabled but deps missing" branch to forget about.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) enum CredentialRefreshWorkerReady {
+    /// Deps fully wired (durable production path). The only state that can start
+    /// the worker; the `enabled` policy flag still gates the actual spawn.
+    Ready {
+        candidate_source:
+            Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+        refresh_port: Arc<RebornProductAuthServices>,
+    },
+    /// Deps intentionally absent: local-dev (single-user, no cross-owner
+    /// enumeration), `disabled()`, or a caller-supplied `product_auth_ports`
+    /// override/test path. The worker never starts.
+    Absent,
 }
 
 impl RebornServices {
@@ -651,6 +682,8 @@ impl std::fmt::Debug for RebornServices {
     }
 }
 
+// arch-exempt: optional_arc, RebornServices fields are Optional because disabled()/local-dev paths don't wire all production services; proper factories always set them, plan #4469
+
 impl RebornServices {
     pub fn disabled() -> Self {
         Self {
@@ -664,6 +697,8 @@ impl RebornServices {
             production_runtime: None,
             #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
         }
     }
 }
@@ -698,12 +733,14 @@ fn compose_product_auth_services(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
+    secret_store: Arc<dyn SecretStore>,
 ) -> Arc<RebornProductAuthServices> {
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
     };
-    let mut services = ports.into_services(auth_continuation_dispatcher(turn_coordinator));
+    let mut services =
+        ports.into_services(auth_continuation_dispatcher(turn_coordinator), secret_store);
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
     }
@@ -1042,6 +1079,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             turn_coordinator.clone(),
             provider_composition,
             security_audit_sink.clone(),
+            Arc::clone(&secret_store),
         ),
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1058,7 +1096,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Arc::clone(&durable_services),
                     provider_client,
                 )
-                .into_services(auth_continuation_dispatcher(turn_coordinator.clone()))
+                .into_services(
+                    auth_continuation_dispatcher(turn_coordinator.clone()),
+                    Arc::clone(&secret_store),
+                )
                 .with_flow_record_source(durable_services);
                 let services = match provider_composition.dcr_registry.clone() {
                     Some(registry) => services.with_dcr_oauth_registry(registry),
@@ -1227,6 +1268,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         production_runtime: None,
         #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
+        // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
     })
 }
 
@@ -3379,6 +3423,10 @@ async fn build_backend_production<F>(
     production_runtime_services: impl FnOnce(
         Arc<RebornProductionRuntimeStoreGraph<F>>,
     ) -> RebornProductionRuntimeServices,
+    // Leader lock for the background credential keepalive worker. The worker
+    // uses this to elect one process per tick as the sweep leader. `None`
+    // pool → always-leader (libsql / single-process). Stays private.
+    leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
@@ -3503,25 +3551,55 @@ where
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
-    let product_auth_ports = product_auth_ports.unwrap_or_else(|| {
-        let durable = Arc::new(FilesystemAuthProductServices::new(
-            product_auth_filesystem,
-            Arc::clone(&secret_store),
-        ));
-        RebornProductAuthServicePorts::from_shared_with_provider(
-            durable,
-            provider_composition
-                .client
-                .clone()
-                .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient)),
-        )
-    });
+    // B1: track the durable FilesystemAuthProductServices so the credential-
+    // refresh worker can enumerate candidates across all owners.  When a
+    // caller pre-supplies product_auth_ports, we do not create a durable
+    // instance here, so the candidate source is None (worker finds no
+    // candidates, which is safe for override/test callers).
+    let credential_refresh_candidate_source: Option<
+        Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
+    >;
+    let product_auth_ports = match product_auth_ports {
+        Some(ports) => {
+            credential_refresh_candidate_source = None;
+            ports
+        }
+        None => {
+            let durable = Arc::new(FilesystemAuthProductServices::new_with_root(
+                product_auth_filesystem,
+                Arc::clone(&stores.filesystem),
+                Arc::clone(&secret_store),
+            ));
+            credential_refresh_candidate_source = Some(Arc::clone(&durable)
+                as Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>);
+            RebornProductAuthServicePorts::from_shared_with_provider(
+                durable,
+                provider_composition
+                    .client
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient)),
+            )
+        }
+    };
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
         provider_composition,
         security_audit_sink,
+        Arc::clone(&secret_store),
     );
+    // Bundle the keepalive worker deps so they are wired all-or-nothing. The
+    // candidate source is present only when this path built a durable instance
+    // (no caller-supplied product_auth_ports); the leader lock and refresh port
+    // are always available here.
+    let credential_refresh_worker = match credential_refresh_candidate_source {
+        Some(candidate_source) => CredentialRefreshWorkerReady::Ready {
+            candidate_source,
+            leader_lock,
+            refresh_port: Arc::clone(&product_auth_services),
+        },
+        None => CredentialRefreshWorkerReady::Absent,
+    };
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before
     // host_runtime_for_production so WASM extensions whose manifest declares a
@@ -3561,6 +3639,10 @@ where
         production_runtime: Some(production_runtime),
         #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
+        // `Ready` only when this path built a durable candidate source (i.e. no
+        // caller-supplied product_auth_ports override); `Absent` otherwise. The
+        // leader lock is always available on this production path.
+        credential_refresh_worker,
     })
 }
 
@@ -3597,6 +3679,16 @@ async fn build_libsql_production(
         stores,
         trigger_repository,
         RebornProductionRuntimeServices::LibSql,
+        {
+            #[cfg(feature = "postgres")]
+            {
+                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None)
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader()
+            }
+        },
     )
     .await
 }
@@ -3611,6 +3703,11 @@ async fn build_postgres_production(
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
+    // A4: Clone the pool before it is moved into PostgresTriggerRepository so we
+    // can thread it to the credential keepalive worker as a leader-lock for
+    // sweep serialization.
+    // This clone stays PRIVATE — it is never exposed through any public facade.
+    let pool_for_refresh_lock = pool.clone();
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
     let trigger_repository = Arc::new(ironclaw_triggers::PostgresTriggerRepository::new(
@@ -3633,6 +3730,9 @@ async fn build_postgres_production(
         stores,
         trigger_repository,
         RebornProductionRuntimeServices::Postgres,
+        crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
+            pool_for_refresh_lock,
+        )),
     )
     .await
 }
