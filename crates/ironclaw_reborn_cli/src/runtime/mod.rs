@@ -35,25 +35,27 @@ mod trigger_poller;
 use trigger_poller::trigger_poller_settings;
 
 pub(crate) fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::Layer;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
     // stderr/fmt layer: operator-facing console output. Stays at `info` by
     // default so `debug!` diagnostics never reach (and corrupt) a REPL/TUI
-    // terminal — the repo's logging invariant. Override via IRONCLAW_REBORN_LOG.
-    let stderr_filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
-        EnvFilter::new("info,ironclaw_reborn=info,ironclaw_reborn_composition=info")
-    });
+    // terminal — the repo's logging invariant. Broad env overrides are still
+    // guarded from third-party debug floods unless those targets are explicit.
+    let stderr_filter = reborn_env_filter(
+        "IRONCLAW_REBORN_LOG",
+        "info,ironclaw_reborn=info,ironclaw_reborn_composition=info",
+    );
     // Operator Logs buffer: captures run diagnostics at `debug` for the
     // ironclaw run-path crates so the scoped (thread/run) Logs panel is
     // populated, while those `debug!` events are NOT written to stderr. This is
     // a *separate* per-layer filter, so terminal safety and Logs-panel
-    // visibility are decoupled. Override via IRONCLAW_REBORN_OPERATOR_LOG.
-    let operator_filter =
-        EnvFilter::try_from_env("IRONCLAW_REBORN_OPERATOR_LOG").unwrap_or_else(|_| {
-            EnvFilter::new("info,ironclaw_reborn=debug,ironclaw_host_runtime=debug")
-        });
+    // visibility are decoupled. Broad env overrides are guarded the same way
+    // so the browser log buffer is not filled by low-level protocol crates.
+    let operator_filter = reborn_env_filter(
+        "IRONCLAW_REBORN_OPERATOR_LOG",
+        "info,ironclaw_reborn=debug,ironclaw_host_runtime=debug",
+    );
     let _ = tracing_subscriber::registry()
         .with(
             fmt::layer()
@@ -62,6 +64,80 @@ pub(crate) fn init_tracing() {
         )
         .with(OperatorLogLayer.with_filter(operator_filter))
         .try_init();
+}
+
+const REBORN_NOISY_LOG_TARGETS: &[(&str, &str)] = &[
+    ("tokio_postgres", "warn"),
+    ("deadpool_postgres", "warn"),
+    ("h2", "warn"),
+    ("hyper", "warn"),
+    ("hyper_util", "warn"),
+    ("reqwest", "warn"),
+    ("rustls", "warn"),
+    ("tower", "warn"),
+    ("tower_http", "warn"),
+    ("ironclaw_llm", "info"),
+];
+
+fn reborn_env_filter(env_key: &str, default_filter: &str) -> tracing_subscriber::EnvFilter {
+    let default_filter = protect_reborn_log_filter(default_filter);
+    match std::env::var(env_key) {
+        Ok(raw_filter) => {
+            tracing_subscriber::EnvFilter::try_new(protect_reborn_log_filter(&raw_filter))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter))
+        }
+        Err(_) => tracing_subscriber::EnvFilter::new(default_filter),
+    }
+}
+
+fn protect_reborn_log_filter(raw_filter: &str) -> String {
+    let mut filter = if raw_filter.trim().is_empty() {
+        "info".to_string()
+    } else {
+        raw_filter.trim().to_string()
+    };
+    for (target, level) in REBORN_NOISY_LOG_TARGETS {
+        if !log_filter_mentions_target(&filter, target) {
+            filter.push(',');
+            filter.push_str(target);
+            filter.push('=');
+            filter.push_str(level);
+        }
+    }
+    filter
+}
+
+fn log_filter_mentions_target(filter: &str, target: &str) -> bool {
+    let child_prefix = format!("{target}::");
+    filter
+        .split(',')
+        .filter_map(log_directive_target)
+        .any(|directive| directive == target || directive.starts_with(&child_prefix))
+}
+
+fn log_directive_target(directive: &str) -> Option<&str> {
+    let directive = directive.trim();
+    if directive.is_empty() {
+        return None;
+    }
+    let target = match directive.split_once('=') {
+        Some((target, _level)) => target.trim(),
+        None if is_log_level_directive(directive) => return None,
+        None => directive,
+    };
+    let target = target.split_once('[').map_or(target, |(target, _)| target);
+    if target.is_empty() || is_log_level_directive(target) {
+        None
+    } else {
+        Some(target)
+    }
+}
+
+fn is_log_level_directive(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "off" | "error" | "warn" | "info" | "debug" | "trace"
+    )
 }
 
 pub(crate) fn block_on_cli<F, T, E>(future: F) -> anyhow::Result<T>
@@ -896,8 +972,46 @@ mod tests {
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
         build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
-        resolve_google_oauth_config,
+        protect_reborn_log_filter, resolve_google_oauth_config,
     };
+
+    #[test]
+    fn reborn_log_filter_suppresses_noisy_targets_for_broad_debug() {
+        let filter = protect_reborn_log_filter("debug");
+
+        assert!(filter.contains("debug"));
+        assert!(filter.contains("tokio_postgres=warn"));
+        assert!(filter.contains("deadpool_postgres=warn"));
+        assert!(filter.contains("h2=warn"));
+        assert!(filter.contains("hyper=warn"));
+        assert!(filter.contains("hyper_util=warn"));
+        assert!(filter.contains("reqwest=warn"));
+        assert!(filter.contains("rustls=warn"));
+        assert!(filter.contains("tower=warn"));
+        assert!(filter.contains("tower_http=warn"));
+        assert!(filter.contains("ironclaw_llm=info"));
+    }
+
+    #[test]
+    fn reborn_log_filter_keeps_explicit_noisy_target_directives() {
+        let filter = protect_reborn_log_filter(
+            "debug,tokio_postgres::query=debug,ironclaw_llm::nearai_chat=debug",
+        );
+
+        assert!(filter.contains("tokio_postgres::query=debug"));
+        assert!(!filter.contains("tokio_postgres=warn"));
+        assert!(filter.contains("ironclaw_llm::nearai_chat=debug"));
+        assert!(!filter.contains("ironclaw_llm=info"));
+        assert!(filter.contains("reqwest=warn"));
+    }
+
+    #[test]
+    fn reborn_log_filter_blank_env_uses_info_with_noisy_target_suppression() {
+        let filter = protect_reborn_log_filter("   ");
+
+        assert!(filter.starts_with("info,"));
+        assert!(filter.contains("tokio_postgres=warn"));
+    }
 
     #[test]
     fn credential_refresh_override_keeps_caller_default_without_env() {
