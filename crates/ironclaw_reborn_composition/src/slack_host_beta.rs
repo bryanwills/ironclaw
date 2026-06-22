@@ -419,6 +419,7 @@ struct SlackHostBetaRuntimeParts {
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     auth_challenge_provider: Option<Arc<dyn crate::AuthChallengeProvider>>,
+    auth_flow_canceller: Option<Arc<dyn crate::BlockedAuthFlowCanceller>>,
 }
 
 impl SlackHostBetaRuntimeParts {
@@ -441,6 +442,7 @@ impl SlackHostBetaRuntimeParts {
             approval_interaction_service,
             auth_interaction_service: runtime.webui_auth_interaction_service(),
             auth_challenge_provider: runtime.auth_challenge_provider(),
+            auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
         })
     }
 }
@@ -505,6 +507,7 @@ pub fn build_triggered_run_delivery_hook(
         egress,
         delivery_sink,
         auth_challenges: runtime.auth_challenge_provider(),
+        auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
         approval_requests: Some(Arc::clone(&local_runtime.approval_requests)
             as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
     };
@@ -861,6 +864,7 @@ fn build_slack_installation_record_with_resolvers(
             egress,
             delivery_sink,
             auth_challenges: parts.auth_challenge_provider.clone(),
+            auth_flow_canceller: parts.auth_flow_canceller.clone(),
             approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
                 as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
         },
@@ -4087,8 +4091,8 @@ mod tests {
         use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
         use ironclaw_triggers::{
             TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerId,
-            TriggerRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerRecord, TriggerSchedule,
+            TriggerSourceKind, TriggerState,
         };
 
         let (runtime, _tmp) = runtime_with_trigger_poller().await;
@@ -4131,7 +4135,6 @@ mod tests {
             name: "hook-wiring-e2e".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("* * * * *").expect("valid cron"),
-            completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
             prompt: "hook-wiring-e2e-prompt-marker".to_string(),
             state: TriggerState::Scheduled,
             next_run_at: Utc::now() - chrono::Duration::seconds(120),

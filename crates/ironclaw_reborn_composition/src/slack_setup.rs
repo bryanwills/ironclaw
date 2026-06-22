@@ -344,6 +344,7 @@ impl SlackSetupService {
                 self.secret_scope(),
                 handle,
                 SecretMaterial::from(material.expose_secret().to_string()),
+                None,
             )
             .await
             .map_err(map_secret_error)?;
