@@ -148,19 +148,7 @@ mod trigger_poller;
 mod trigger_poller_trusted_submit;
 mod web_access;
 mod webui;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_body_limit;
 mod webui_extension_credentials;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_operator_auth;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_rate_limit;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_route_match;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_serve;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_ws_origin;
 
 pub use auth::{
     RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
@@ -195,6 +183,12 @@ pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
+};
+#[cfg(feature = "webui-v2-beta")]
+pub use ironclaw_reborn_http_kit::{
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
+    RateLimitConfigError, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
+    WebuiServeConfigError, WebuiServeError, WebuiV2App, compose_webui_v2_app,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
@@ -275,6 +269,7 @@ pub use slack_actor_identity::{
 pub use slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
     WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
+    slack_channel_route_admin_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_connectable_channel::{
@@ -319,7 +314,7 @@ pub use slack_personal_binding_pairing::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_pairing_serve::{
     SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
-    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
+    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_serve::{
@@ -327,7 +322,8 @@ pub use slack_personal_binding_serve::{
     SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
     SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
     SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
-    SlackPersonalBindingStartResponse,
+    SlackPersonalBindingRouteMount, SlackPersonalBindingStartResponse,
+    slack_personal_binding_route_descriptors, slack_personal_binding_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{
@@ -338,13 +334,7 @@ pub use slack_serve::{
 pub use trajectory_observer::RebornTrajectoryObserver;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
-pub use webui_rate_limit::RateLimitConfigError;
-#[cfg(feature = "webui-v2-beta")]
-pub use webui_serve::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
-    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
-};
+pub use webui::{webui_v2_app, webui_v2_app_with_lifecycle};
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.

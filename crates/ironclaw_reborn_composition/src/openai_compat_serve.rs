@@ -51,7 +51,7 @@ use ironclaw_threads::{
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use crate::webui_serve::ProtectedRouteMount;
+use ironclaw_reborn_http_kit::ProtectedRouteMount;
 
 #[cfg(test)]
 mod tests;

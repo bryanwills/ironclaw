@@ -1259,6 +1259,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_reborn_composition/src",
         "crates/ironclaw_reborn_config/src",
         "crates/ironclaw_reborn_event_store/src",
+        "crates/ironclaw_reborn_http_kit/src",
         "crates/ironclaw_reborn_api/src",
         "crates/ironclaw_reborn_openai_compat/src",
         "crates/ironclaw_product_adapters/src",

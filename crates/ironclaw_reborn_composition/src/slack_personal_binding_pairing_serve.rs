@@ -24,6 +24,7 @@ use crate::slack_personal_binding_pairing::{
     SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
     SlackPersonalBindingPairingService,
 };
+use ironclaw_reborn_http_kit::ProtectedRouteMount;
 
 pub const WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH: &str =
     "/api/webchat/v2/extensions/pairing/redeem";
@@ -45,23 +46,18 @@ impl SlackPersonalBindingPairingRouteConfig {
     }
 }
 
-pub(crate) struct SlackPersonalBindingPairingRouteMount {
-    pub(crate) protected: Router,
-    pub(crate) descriptors: Vec<IngressRouteDescriptor>,
-}
-
-pub(crate) fn slack_personal_binding_pairing_route_mount(
+pub fn slack_personal_binding_pairing_route_mount(
     config: SlackPersonalBindingPairingRouteConfig,
-) -> SlackPersonalBindingPairingRouteMount {
-    SlackPersonalBindingPairingRouteMount {
-        protected: Router::new()
+) -> ProtectedRouteMount {
+    ProtectedRouteMount::new(
+        Router::new()
             .route(
                 WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
                 post(slack_personal_binding_pairing_redeem_handler),
             )
             .with_state(config),
-        descriptors: slack_personal_binding_pairing_route_descriptors(),
-    }
+        slack_personal_binding_pairing_route_descriptors(),
+    )
 }
 
 pub(crate) fn slack_personal_binding_pairing_route_descriptors() -> Vec<IngressRouteDescriptor> {
@@ -219,7 +215,7 @@ mod tests {
             Arc::new(StaticChallengeStore::found()),
         );
         let response = mount
-            .protected
+            .router
             .oneshot(redeem_request(
                 "tenant-a",
                 r#"{"channel":"slack","code":"abc12345"}"#,
@@ -239,7 +235,7 @@ mod tests {
         );
 
         let response = mount
-            .protected
+            .router
             .oneshot(redeem_request(
                 "tenant-a",
                 r#"{"channel":"slack","code":"abc123"}"#,
@@ -258,7 +254,7 @@ mod tests {
         );
 
         let response = mount
-            .protected
+            .router
             .oneshot(redeem_request(
                 "tenant-a",
                 r#"{"channel":"slack","code":"abc12345"}"#,
@@ -277,7 +273,7 @@ mod tests {
         );
 
         let response = mount
-            .protected
+            .router
             .oneshot(redeem_request(
                 "tenant-b",
                 r#"{"channel":"slack","code":"abc12345"}"#,
@@ -296,7 +292,7 @@ mod tests {
         let mount = route_mount(binding_store, Arc::new(StaticChallengeStore::found()));
 
         let response = mount
-            .protected
+            .router
             .oneshot(redeem_request(
                 "tenant-a",
                 r#"{"channel":"slack","code":"abc12345"}"#,
@@ -316,7 +312,7 @@ mod tests {
         );
 
         let response = mount
-            .protected
+            .router
             .oneshot(redeem_request(
                 "tenant-a",
                 r#"{"channel":"discord","code":"abc12345"}"#,
@@ -331,7 +327,7 @@ mod tests {
     fn route_mount(
         binding_store: Arc<RecordingBindingStore>,
         challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
-    ) -> SlackPersonalBindingPairingRouteMount {
+    ) -> ProtectedRouteMount {
         let pairing = SlackPersonalBindingPairingService::new(
             SlackPersonalUserBindingService::new(
                 [SlackPersonalBindingInstallation {

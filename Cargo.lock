@@ -5060,6 +5060,7 @@ dependencies = [
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
+ "ironclaw_reborn_http_kit",
  "ironclaw_reborn_identity",
  "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_openai_compat_storage",
@@ -5077,7 +5078,6 @@ dependencies = [
  "ironclaw_turns",
  "ironclaw_wasm_product_adapters",
  "ironclaw_webui_v2",
- "ironclaw_webui_v2_static",
  "libsql",
  "lru 0.16.4",
  "rand 0.8.6",
@@ -5095,7 +5095,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tower 0.5.3",
- "tower-http 0.6.11",
  "tracing",
  "tracing-subscriber",
  "tracing-test",
@@ -5141,6 +5140,31 @@ dependencies = [
  "tracing",
  "urlencoding",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ironclaw_reborn_http_kit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "http 1.4.1",
+ "http-body-util",
+ "ironclaw_auth",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_reborn_openai_compat",
+ "ironclaw_webui_v2",
+ "ironclaw_webui_v2_static",
+ "lru 0.16.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tower-http 0.6.11",
+ "tracing",
 ]
 
 [[package]]

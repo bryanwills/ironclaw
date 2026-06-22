@@ -660,7 +660,7 @@ mod slack_personal_binding_pairing_mount_tests {
         SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
         SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingRouteConfig,
         SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
-        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
+        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
     };
 
     #[tokio::test]
@@ -688,7 +688,9 @@ mod slack_personal_binding_pairing_mount_tests {
             Arc::new(OnlyValidToken),
             vec![HeaderValue::from_static("http://localhost:1234")],
         )
-        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(pairing));
+        .with_protected_route_mount(slack_personal_binding_pairing_route_mount(
+            SlackPersonalBindingPairingRouteConfig::new(pairing),
+        ));
         let app = webui_v2_app(bundle, config).expect("webui v2 app");
 
         let unauthenticated = app

@@ -3,6 +3,10 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use async_trait::async_trait;
+#[cfg(feature = "webui-v2-beta")]
+use axum::Router;
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_host_api::ingress::IngressAuthPolicy;
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -17,6 +21,8 @@ use ironclaw_product_workflow::{
 
 use ironclaw_triggers::TriggerRepository;
 
+#[cfg(feature = "webui-v2-beta")]
+use crate::product_auth_serve::{ProductAuthRouteState, product_auth_route_mount};
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornRuntime,
@@ -29,6 +35,11 @@ use crate::{
     },
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_reborn_http_kit::{
+    ProtectedRouteMount, PublicRouteMount, WebuiServeConfig, WebuiServeError, WebuiV2App,
+    compose_webui_v2_app,
+};
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
@@ -39,7 +50,7 @@ static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
 /// by WebChat v2 and the optional product-auth OAuth routes. HTTP
 /// routing, auth middleware, static assets, and SSE transport stay in the
 /// WebUI crate (or, when the `webui-v2-beta` feature is on, the
-/// [`crate::webui_serve`] module in this crate); lower runtime handles stay
+/// `ironclaw_reborn_http_kit` crate); lower runtime handles stay
 /// behind the existing Reborn runtime / composition services.
 #[derive(Clone)]
 pub struct RebornWebuiBundle {
@@ -57,6 +68,46 @@ impl std::fmt::Debug for RebornWebuiBundle {
             .field("readiness", &self.readiness)
             .finish()
     }
+}
+
+#[cfg(feature = "webui-v2-beta")]
+pub fn webui_v2_app(
+    bundle: RebornWebuiBundle,
+    config: WebuiServeConfig,
+) -> Result<Router, WebuiServeError> {
+    Ok(webui_v2_app_with_lifecycle(bundle, config)?.into_parts().0)
+}
+
+#[cfg(feature = "webui-v2-beta")]
+pub fn webui_v2_app_with_lifecycle(
+    bundle: RebornWebuiBundle,
+    mut config: WebuiServeConfig,
+) -> Result<WebuiV2App, WebuiServeError> {
+    if let Some(product_auth) = bundle.product_auth.clone() {
+        let mut state = ProductAuthRouteState::new(
+            product_auth,
+            config.tenant_id().clone(),
+            config.default_agent_id().cloned(),
+            config.default_project_id().cloned(),
+        );
+        if let Some(google_oauth) = config.google_oauth() {
+            state = state.with_google_oauth(google_oauth.clone());
+        }
+        let mount = product_auth_route_mount(state);
+        let (protected_descriptors, public_descriptors) =
+            mount.descriptors.into_iter().partition(|descriptor| {
+                matches!(
+                    descriptor.policy().auth(),
+                    IngressAuthPolicy::Required { .. }
+                )
+            });
+        config.prepend_protected_route_mount(ProtectedRouteMount::new(
+            mount.protected,
+            protected_descriptors,
+        ));
+        config.prepend_public_route_mount(PublicRouteMount::new(mount.public, public_descriptors));
+    }
+    compose_webui_v2_app(bundle.api.clone(), config)
 }
 
 /// Compose the WebUI-facing product facade from an already-built Reborn runtime.

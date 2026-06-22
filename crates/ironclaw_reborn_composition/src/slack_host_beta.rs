@@ -44,6 +44,7 @@ use crate::outbound_preferences::{
 use crate::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
+    slack_channel_route_admin_route_mount,
 };
 use crate::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
@@ -65,12 +66,14 @@ use crate::slack_personal_binding_pairing::{
     SlackPairingActorResolver, SlackPersonalBindingPairingChallengeStore,
     SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingService,
 };
-use crate::slack_personal_binding_pairing_serve::SlackPersonalBindingPairingRouteConfig;
+use crate::slack_personal_binding_pairing_serve::{
+    SlackPersonalBindingPairingRouteConfig, slack_personal_binding_pairing_route_mount,
+};
 use crate::slack_serve::{
     SlackEventsRouteState, SlackInstallationRecord, SlackInstallationSelector, SlackTeamId,
     StaticSlackInstallationResolver, slack_events_route_mount,
 };
-use crate::webui_serve::PublicRouteMount;
+use ironclaw_reborn_http_kit::{ProtectedRouteMount, PublicRouteMount};
 
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
@@ -355,8 +358,8 @@ pub enum SlackHostBetaBuildError {
 #[non_exhaustive]
 pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
-    pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
-    pub channel_routes: SlackChannelRouteAdminRouteConfig,
+    pub personal_binding_pairing: ProtectedRouteMount,
+    pub channel_routes: ProtectedRouteMount,
 }
 
 pub fn build_slack_events_route_mount(
@@ -515,7 +518,7 @@ pub fn build_slack_host_beta_mounts(
                 .iter()
                 .map(|route| route.subject_user_id.clone()),
         );
-    let channel_routes = SlackChannelRouteAdminRouteConfig::new(
+    let channel_routes_config = SlackChannelRouteAdminRouteConfig::new(
         config.tenant_id.clone(),
         config.installation_id.clone(),
         config.team_id.as_str().to_string(),
@@ -588,8 +591,10 @@ pub fn build_slack_host_beta_mounts(
     if outbound_delivery_provider_already_registered {
         return Ok(SlackHostBetaMounts {
             events,
-            personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
-            channel_routes,
+            personal_binding_pairing: slack_personal_binding_pairing_route_mount(
+                SlackPersonalBindingPairingRouteConfig::new(pairing),
+            ),
+            channel_routes: slack_channel_route_admin_route_mount(channel_routes_config),
         });
     }
     match runtime
@@ -611,8 +616,10 @@ pub fn build_slack_host_beta_mounts(
     }
     Ok(SlackHostBetaMounts {
         events,
-        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
-        channel_routes,
+        personal_binding_pairing: slack_personal_binding_pairing_route_mount(
+            SlackPersonalBindingPairingRouteConfig::new(pairing),
+        ),
+        channel_routes: slack_channel_route_admin_route_mount(channel_routes_config),
     })
 }
 
@@ -945,10 +952,9 @@ mod tests {
 
     use super::*;
     use crate::slack_channel_routes::{
-        InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteMount,
-        SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
-        WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
-        slack_channel_route_admin_route_mount,
+        InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteError,
+        SlackChannelRouteKey, SlackChannelRouteListPage, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
+        WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
     };
     use crate::slack_connectable_channel::{
         SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
@@ -959,15 +965,14 @@ mod tests {
         SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
         slack_reply_target_binding_ref_from_raw, slack_shared_channel_reply_target_binding_ref,
     };
-    use crate::slack_personal_binding_pairing_serve::{
-        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
-    };
+    use crate::slack_personal_binding_pairing_serve::WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH;
     use crate::slack_serve::SlackUserId;
     use crate::{
         RebornBuildError, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
         SLACK_EVENTS_PATH, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
         build_reborn_runtime, local_dev_runtime_policy, webui_v2_app,
     };
+    use ironclaw_reborn_http_kit::ProtectedRouteMount;
 
     const TENANT: &str = "tenant:slack-host";
     const AGENT: &str = "agent:slack-host";
@@ -1320,8 +1325,7 @@ mod tests {
         .expect("runtime builds");
 
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts build");
-        let pairing_mount =
-            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+        let pairing_mount = mounts.personal_binding_pairing;
 
         assert_eq!(mounts.events.descriptors.len(), 1);
         assert!(
@@ -1353,11 +1357,10 @@ mod tests {
         }
         let pairing_code = wait_for_pairing_code(&egress).await;
 
-        let pairing_mount =
-            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+        let pairing_mount = mounts.personal_binding_pairing;
         let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
         let redeem_response = pairing_mount
-            .protected
+            .router
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1519,9 +1522,9 @@ mod tests {
         .await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
-        let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes);
+        let route_mount = mounts.channel_routes;
         let assign_response = route_mount
-            .protected
+            .router
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -1622,7 +1625,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(mounts.channel_routes),
         )
         .expect("webui app");
 
@@ -1707,7 +1710,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(mounts.channel_routes),
         )
         .expect("webui app");
 
@@ -1872,7 +1875,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(mounts.channel_routes),
         )
         .expect("webui app");
 
@@ -2060,7 +2063,7 @@ mod tests {
     async fn slack_host_beta_stored_and_static_routes_appear_without_duplicates() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
-        let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
+        let route_mount = mounts.channel_routes.clone();
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -2451,11 +2454,10 @@ mod tests {
         let pairing_code = wait_for_pairing_code(&egress).await;
 
         // Step 2: authenticated WebUI user redeems the pairing code.
-        let pairing_mount =
-            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+        let pairing_mount = mounts.personal_binding_pairing;
         let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
         let redeem_response = pairing_mount
-            .protected
+            .router
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -2600,11 +2602,10 @@ mod tests {
 
         // Redeem the code — provisioning will fail in background but the HTTP
         // response must still be 200.
-        let pairing_mount =
-            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+        let pairing_mount = mounts.personal_binding_pairing;
         let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
         let redeem_response = pairing_mount
-            .protected
+            .router
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -2791,7 +2792,7 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
-        let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
+        let route_mount = mounts.channel_routes.clone();
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -2853,7 +2854,7 @@ mod tests {
     async fn slack_host_beta_admin_route_owner_change_overrides_static_channel_route() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
-        let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
+        let route_mount = mounts.channel_routes.clone();
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -2915,7 +2916,7 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
-        let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
+        let route_mount = mounts.channel_routes.clone();
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -2994,7 +2995,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(mounts.channel_routes),
         )
         .expect("webui app");
 
@@ -3318,12 +3319,12 @@ mod tests {
     }
 
     async fn upsert_slack_channel_route(
-        route_mount: &SlackChannelRouteAdminRouteMount,
+        route_mount: &ProtectedRouteMount,
         channel_id: &str,
         subject_user_id: &str,
     ) {
         let response = route_mount
-            .protected
+            .router
             .clone()
             .oneshot(
                 Request::builder()
@@ -3341,12 +3342,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    async fn delete_slack_channel_route(
-        route_mount: &SlackChannelRouteAdminRouteMount,
-        channel_id: &str,
-    ) {
+    async fn delete_slack_channel_route(route_mount: &ProtectedRouteMount, channel_id: &str) {
         let response = route_mount
-            .protected
+            .router
             .clone()
             .oneshot(
                 Request::builder()

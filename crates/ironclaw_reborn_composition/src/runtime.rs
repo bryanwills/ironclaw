@@ -986,11 +986,13 @@ impl RebornRuntime {
     }
 
     /// Public NEAR AI login callback mount for the host ingress to merge via
-    /// [`crate::webui_serve::WebuiServeConfig::with_public_route_mount`]. Built
+    /// [`ironclaw_reborn_http_kit::WebuiServeConfig::with_public_route_mount`]. Built
     /// from the runtime's private session/reload/boot so those stay internal.
     /// `None` when no LLM seam or boot config was wired.
     #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
-    pub fn nearai_login_callback_mount(&self) -> Option<crate::webui_serve::PublicRouteMount> {
+    pub fn nearai_login_callback_mount(
+        &self,
+    ) -> Option<ironclaw_reborn_http_kit::PublicRouteMount> {
         let boot = self.boot.clone()?;
         let session = self.webui_llm_session()?;
         let reload = self.webui_llm_reload_trigger()?;

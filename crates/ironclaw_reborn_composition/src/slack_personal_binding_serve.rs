@@ -40,6 +40,7 @@ use crate::slack_personal_binding::{
     SlackPersonalUserBindingService,
 };
 use crate::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
+use ironclaw_reborn_http_kit::{ProtectedRouteMount, PublicRouteMount};
 
 pub const SLACK_PERSONAL_BINDING_OAUTH_START_PATH: &str =
     "/api/reborn/slack/personal-binding/oauth/start";
@@ -194,47 +195,65 @@ impl std::fmt::Debug for SlackPersonalBindingRouteState {
     }
 }
 
-pub(crate) struct SlackPersonalBindingRouteMount {
-    pub(crate) protected: Router,
-    pub(crate) public: Router,
-    pub(crate) descriptors: Vec<IngressRouteDescriptor>,
+pub struct SlackPersonalBindingRouteMount {
+    pub protected: ProtectedRouteMount,
+    pub public: PublicRouteMount,
 }
 
-pub(crate) fn slack_personal_binding_route_mount(
+pub fn slack_personal_binding_route_mount(
+    config: SlackPersonalBindingRouteConfig,
+) -> SlackPersonalBindingRouteMount {
+    slack_personal_binding_route_mount_for_state(SlackPersonalBindingRouteState::new(config))
+}
+
+fn slack_personal_binding_route_mount_for_state(
     state: SlackPersonalBindingRouteState,
 ) -> SlackPersonalBindingRouteMount {
     SlackPersonalBindingRouteMount {
-        protected: Router::new()
-            .route(
-                SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-                post(slack_personal_binding_oauth_start_handler),
-            )
-            .with_state(state.clone()),
-        public: Router::new()
-            .route(
-                SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH,
-                get(slack_personal_binding_oauth_callback_handler),
-            )
-            .with_state(state),
-        descriptors: slack_personal_binding_route_descriptors(),
+        protected: ProtectedRouteMount::new(
+            Router::new()
+                .route(
+                    SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
+                    post(slack_personal_binding_oauth_start_handler),
+                )
+                .with_state(state.clone()),
+            vec![slack_personal_binding_oauth_start_descriptor()],
+        ),
+        public: PublicRouteMount::new(
+            Router::new()
+                .route(
+                    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH,
+                    get(slack_personal_binding_oauth_callback_handler),
+                )
+                .with_state(state),
+            vec![slack_personal_binding_oauth_callback_descriptor()],
+        ),
     }
 }
 
-pub(crate) fn slack_personal_binding_route_descriptors() -> Vec<IngressRouteDescriptor> {
+pub fn slack_personal_binding_route_descriptors() -> Vec<IngressRouteDescriptor> {
     vec![
-        descriptor(
-            SLACK_PERSONAL_BINDING_OAUTH_START_ROUTE_ID,
-            NetworkMethod::Post,
-            SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-            protected_start_policy(),
-        ),
-        descriptor(
-            SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_ROUTE_ID,
-            NetworkMethod::Get,
-            SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH,
-            callback_policy(),
-        ),
+        slack_personal_binding_oauth_start_descriptor(),
+        slack_personal_binding_oauth_callback_descriptor(),
     ]
+}
+
+fn slack_personal_binding_oauth_start_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        SLACK_PERSONAL_BINDING_OAUTH_START_ROUTE_ID,
+        NetworkMethod::Post,
+        SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
+        protected_start_policy(),
+    )
+}
+
+fn slack_personal_binding_oauth_callback_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_ROUTE_ID,
+        NetworkMethod::Get,
+        SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH,
+        callback_policy(),
+    )
 }
 
 fn descriptor(
@@ -688,10 +707,10 @@ mod tests {
             SlackPersonalBindingRouteConfig::new(service, oauth.clone(), "https://app.example")
                 .expect("valid config"),
         );
-        let mount = slack_personal_binding_route_mount(state);
+        let mount = slack_personal_binding_route_mount_for_state(state);
         let app = Router::new()
-            .merge(mount.protected)
-            .merge(mount.public)
+            .merge(mount.protected.router)
+            .merge(mount.public.router)
             .layer(Extension(caller("tenant-alpha", "user:alice")));
 
         let start_response = app
@@ -788,8 +807,8 @@ mod tests {
                 created_at: Instant::now(),
             })
             .expect("pending state");
-        let mount = slack_personal_binding_route_mount(state);
-        let app = Router::new().merge(mount.public);
+        let mount = slack_personal_binding_route_mount_for_state(state);
+        let app = Router::new().merge(mount.public.router);
         let uri = format!(
             "{SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH}?state={}&code=ok",
             pending_state.as_str()
@@ -1091,7 +1110,11 @@ mod tests {
             })
             .expect("pending state");
         let separator = if extra_query.is_empty() { "" } else { "&" };
-        let app = Router::new().merge(slack_personal_binding_route_mount(state).public);
+        let app = Router::new().merge(
+            slack_personal_binding_route_mount_for_state(state)
+                .public
+                .router,
+        );
         app.oneshot(
             Request::builder()
                 .method("GET")

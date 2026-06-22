@@ -30,23 +30,20 @@ root-llm-provider = [
 # test-support` (plus whatever feature surface the test crate also
 # requires, e.g. `webui-v2-beta`).
 test-support = []
-# Compose the Reborn WebChat v2 HTTP gateway in this crate. Off by
-# default; turning this on pulls in the v2 route crate plus the axum /
-# tower-http middleware stack used by the `webui_serve` module. The
+# Compose the Reborn WebChat v2 HTTP gateway. Off by default; turning
+# this on pulls in the v2 route crate plus the extracted HTTP kit. The
 # standalone `ironclaw-reborn` binary opts in to call `serve_webui_v2`
 # from its `serve` subcommand. Substrate-only callers (v1 `AppBuilder`,
 # diagnostic harnesses) stay off the feature and carry no WebUI code.
 webui-v2-beta = [
     "dep:ironclaw_webui_v2",
     "ironclaw_webui_v2/webui-v2-beta",
-    "dep:ironclaw_webui_v2_static",
-    "ironclaw_webui_v2_static/webui-v2-beta",
+    "dep:ironclaw_reborn_http_kit",
     "dep:ironclaw_reborn_identity",
     "ironclaw_reborn/webui-user-store",
     "libsql",
     "dep:axum",
     "dep:tower",
-    "dep:tower-http",
     "dep:lru",
 ]
 # Host-mounted Slack Events API ingress fragment for the Reborn ProductAdapter
@@ -67,6 +64,7 @@ openai-compat-beta = [
     "ironclaw_product_workflow_storage/libsql",
     "ironclaw_reborn_openai_compat_storage/libsql",
     "ironclaw_product_adapters/host-auth-mint",
+    "ironclaw_reborn_http_kit/openai-compat-beta",
 ]
 libsql = [
     "dep:libsql",
@@ -122,6 +120,7 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage", optional = true }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
+ironclaw_reborn_http_kit = { path = "../ironclaw_reborn_http_kit", optional = true }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = true }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat", optional = true }
@@ -141,17 +140,14 @@ ironclaw_projects = { path = "../ironclaw_projects" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
-# WebUI v2 route surface — feature-gated; only used by `webui_serve`.
+# WebUI v2 route surface — feature-gated; used by the WebUI facade/tests.
 ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
-# WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
-ironclaw_webui_v2_static = { path = "../ironclaw_webui_v2_static", optional = true }
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-# axum + tower middleware stack used by the `webui_serve` module. Each
-# entry is feature-gated so non-beta builds carry no HTTP surface code.
+# axum route fragments used by product-auth, Slack, and login mounts. Feature-gated
+# so non-beta builds carry no HTTP surface code.
 axum = { version = "0.8", optional = true }
 tower = { version = "0.5", optional = true }
-tower-http = { version = "0.6", optional = true, features = ["cors", "set-header", "limit", "catch-panic"] }
 lru = { version = "0.16", optional = true }
 fs4 = "0.6"
 rand = "0.8"

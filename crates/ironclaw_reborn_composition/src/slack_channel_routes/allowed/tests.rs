@@ -23,7 +23,7 @@ async fn allowed_channel_admin_saves_replaces_and_lists_channel_routes() {
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let save_response = mount
-        .protected
+        .router
         .clone()
         .oneshot(request(
             "PUT",
@@ -64,7 +64,7 @@ async fn allowed_channel_admin_saves_replaces_and_lists_channel_routes() {
     );
 
     let replace_response = mount
-        .protected
+        .router
         .clone()
         .oneshot(request("PUT", r#"{"channel_ids":["C0OPS"]}"#, TENANT))
         .await
@@ -77,7 +77,7 @@ async fn allowed_channel_admin_saves_replaces_and_lists_channel_routes() {
         serde_json::from_slice(&replace_body).expect("replace json");
 
     let list_response = mount
-        .protected
+        .router
         .oneshot(request("GET", "", TENANT))
         .await
         .expect("list responds");
@@ -104,7 +104,7 @@ async fn allowed_channel_admin_replaces_with_selected_team_subjects() {
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let save_response = mount
-        .protected
+        .router
         .clone()
         .oneshot(request(
             "PUT",
@@ -148,7 +148,7 @@ async fn allowed_channel_admin_rejects_unknown_selected_team_subject() {
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let response = mount
-            .protected
+            .router
             .oneshot(request(
                 "PUT",
                 r#"{"channels":[{"channel_id":"C0PRODUCT","subject_user_id":"user:finance-team-agent"}]}"#,
@@ -180,7 +180,7 @@ async fn allowed_channel_admin_rejects_mixed_save_shapes_without_mutating_store(
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let response = mount
-        .protected
+        .router
         .oneshot(request(
             "PUT",
             r#"{"channel_ids":["C0OPS"],"channels":[{"channel_id":"C0PRODUCT","subject_user_id":"user:eng-team-agent"}]}"#,
@@ -212,7 +212,7 @@ async fn allowed_channel_admin_preserves_matching_generated_subjects() {
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let initial_save = mount
-        .protected
+        .router
         .clone()
         .oneshot(request("PUT", r#"{"channel_ids":["C0OPS"]}"#, TENANT))
         .await
@@ -227,7 +227,7 @@ async fn allowed_channel_admin_preserves_matching_generated_subjects() {
         .expect("generated subject");
 
     let explicit_save = mount
-        .protected
+        .router
         .clone()
         .oneshot(request(
             "PUT",
@@ -274,7 +274,7 @@ async fn allowed_channel_admin_lists_and_replaces_existing_unmanaged_routes() {
         .expect("seed raw route");
 
     let list_response = mount
-        .protected
+        .router
         .clone()
         .oneshot(request("GET", "", TENANT))
         .await
@@ -291,7 +291,7 @@ async fn allowed_channel_admin_lists_and_replaces_existing_unmanaged_routes() {
     );
 
     let replace_response = mount
-        .protected
+        .router
         .oneshot(request("PUT", r#"{"channel_ids":["C0ENG"]}"#, TENANT))
         .await
         .expect("replace responds");
@@ -334,7 +334,7 @@ async fn allowed_channel_admin_preserves_existing_unmanaged_subject_for_same_cha
         .expect("seed raw route");
 
     let response = mount
-            .protected
+            .router
             .oneshot(request(
                 "PUT",
                 r#"{"channels":[{"channel_id":"C0RAW","subject_user_id":"user:raw-route-subject"},{"channel_id":"C0ENG","subject_user_id":"user:eng-team-agent"}]}"#,
@@ -386,7 +386,7 @@ async fn allowed_channel_admin_generates_only_missing_explicit_subjects() {
         .expect("seed raw route");
 
     let response = mount
-            .protected
+            .router
             .oneshot(request(
                 "PUT",
                 r#"{"channels":[{"channel_id":"C0RAW","subject_user_id":"user:raw-route-subject"},{"channel_id":"C0NEW"}]}"#,
@@ -441,7 +441,7 @@ async fn allowed_channel_admin_rejects_existing_unmanaged_subject_for_other_chan
         .expect("seed raw route");
 
     let response = mount
-        .protected
+        .router
         .oneshot(request(
             "PUT",
             r#"{"channels":[{"channel_id":"C0ENG","subject_user_id":"user:raw-route-subject"}]}"#,
@@ -488,7 +488,7 @@ async fn allowed_channel_admin_rejects_invalid_channel_without_mutating_store() 
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let response = mount
-        .protected
+        .router
         .oneshot(request("PUT", r#"{"channel_ids":["C0ENG",""]}"#, TENANT))
         .await
         .expect("save responds");
@@ -520,7 +520,7 @@ async fn allowed_channel_admin_rejects_more_than_max_allowed_channels_without_mu
     let body = serde_json::json!({ "channel_ids": channel_ids }).to_string();
 
     let response = mount
-        .protected
+        .router
         .oneshot(request("PUT", &body, TENANT))
         .await
         .expect("save responds");
@@ -572,7 +572,7 @@ async fn allowed_channel_admin_rejects_cross_tenant_and_non_operator_callers() {
         ),
     ] {
         let response = mount
-            .protected
+            .router
             .clone()
             .oneshot(request_for_caller(method, body, tenant_id, user_id))
             .await
@@ -588,7 +588,7 @@ async fn allowed_channel_admin_returns_503_when_store_unavailable() {
 
     for (method, body) in [("GET", ""), ("PUT", r#"{"channel_ids":["C0ENG"]}"#)] {
         let response = mount
-            .protected
+            .router
             .clone()
             .oneshot(request(method, body, TENANT))
             .await
@@ -607,7 +607,7 @@ async fn allowed_channel_admin_empty_save_clears_all_channel_routes() {
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let seed = mount
-        .protected
+        .router
         .clone()
         .oneshot(request(
             "PUT",
@@ -619,7 +619,7 @@ async fn allowed_channel_admin_empty_save_clears_all_channel_routes() {
     assert_eq!(seed.status(), StatusCode::OK);
 
     let clear = mount
-        .protected
+        .router
         .oneshot(request("PUT", r#"{"channel_ids":[]}"#, TENANT))
         .await
         .expect("clear responds");
@@ -665,12 +665,12 @@ fn route_config_for(
 }
 
 async fn save_single_channel_subject(
-    mount: &crate::slack_channel_routes::SlackChannelRouteAdminRouteMount,
+    mount: &ironclaw_reborn_http_kit::ProtectedRouteMount,
     tenant_id: &str,
     channel_id: &str,
 ) -> String {
     let response = mount
-        .protected
+        .router
         .clone()
         .oneshot(request(
             "PUT",

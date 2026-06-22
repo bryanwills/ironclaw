@@ -34,6 +34,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use ironclaw_reborn_http_kit::ProtectedRouteMount;
+
 mod allowed;
 mod subjects;
 
@@ -523,16 +525,11 @@ impl SlackChannelRouteAdminRouteConfig {
     }
 }
 
-pub(crate) struct SlackChannelRouteAdminRouteMount {
-    pub(crate) protected: Router,
-    pub(crate) descriptors: Vec<IngressRouteDescriptor>,
-}
-
-pub(crate) fn slack_channel_route_admin_route_mount(
+pub fn slack_channel_route_admin_route_mount(
     config: SlackChannelRouteAdminRouteConfig,
-) -> SlackChannelRouteAdminRouteMount {
-    SlackChannelRouteAdminRouteMount {
-        protected: Router::new()
+) -> ProtectedRouteMount {
+    ProtectedRouteMount::operator_gated(
+        Router::new()
             .route(
                 WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
                 get(list_slack_channel_routes_handler)
@@ -542,8 +539,8 @@ pub(crate) fn slack_channel_route_admin_route_mount(
             .merge(allowed::router())
             .merge(subjects::router())
             .with_state(config),
-        descriptors: slack_channel_route_admin_descriptors(),
-    }
+        slack_channel_route_admin_descriptors(),
+    )
 }
 
 pub(crate) fn slack_channel_route_admin_descriptors() -> Vec<IngressRouteDescriptor> {
@@ -811,7 +808,7 @@ mod tests {
         let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
         let upsert_response = mount
-            .protected
+            .router
             .clone()
             .oneshot(request(
                 "PUT",
@@ -838,7 +835,7 @@ mod tests {
         assert_eq!(routes.routes[0].subject_user_id, "user:eng-team-agent");
 
         let list_response = mount
-            .protected
+            .router
             .clone()
             .oneshot(request("GET", "", TENANT))
             .await
@@ -846,7 +843,7 @@ mod tests {
         assert_eq!(list_response.status(), StatusCode::OK);
 
         let delete_response = mount
-            .protected
+            .router
             .oneshot(request("DELETE", r#"{"channel_id":"C0ENG"}"#, TENANT))
             .await
             .expect("delete responds");
@@ -956,7 +953,7 @@ mod tests {
         )));
 
         let response = mount
-            .protected
+            .router
             .oneshot(request(
                 "PUT",
                 r#"{"channel_id":"C0ENG","subject_user_id":"user:eng-team-agent"}"#,
@@ -975,7 +972,7 @@ mod tests {
         )));
 
         let response = mount
-            .protected
+            .router
             .oneshot(request_for_user(
                 "PUT",
                 r#"{"channel_id":"C0ENG","subject_user_id":"user:eng-team-agent"}"#,
@@ -994,7 +991,7 @@ mod tests {
         let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
         let response = mount
-            .protected
+            .router
             .oneshot(request(
                 "PUT",
                 r#"{"channel_id":"C0ENG","subject_user_id":""}"#,
@@ -1026,7 +1023,7 @@ mod tests {
         let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
         let response = mount
-            .protected
+            .router
             .oneshot(request(
                 "PUT",
                 r#"{"channel_id":"C0ENG","subject_user_id":"user:other-tenant-agent"}"#,
@@ -1059,7 +1056,7 @@ mod tests {
         )));
 
         let response = mount
-            .protected
+            .router
             .oneshot(request("GET", "", TENANT))
             .await
             .expect("response");
@@ -1084,7 +1081,7 @@ mod tests {
         let mount = slack_channel_route_admin_route_mount(config);
 
         let response = mount
-            .protected
+            .router
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -1132,7 +1129,7 @@ mod tests {
         let mount = slack_channel_route_admin_route_mount(route_config(store));
         for channel_id in ["C0A", "C0B"] {
             let response = mount
-                .protected
+                .router
                 .clone()
                 .oneshot(request(
                     "PUT",
@@ -1147,7 +1144,7 @@ mod tests {
         }
 
         let response = mount
-            .protected
+            .router
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -1176,7 +1173,7 @@ mod tests {
         )));
 
         let response = mount
-            .protected
+            .router
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -1200,7 +1197,7 @@ mod tests {
         let mount = slack_channel_route_admin_route_mount(route_config(store));
 
         let response = mount
-            .protected
+            .router
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -1232,7 +1229,7 @@ mod tests {
         )));
 
         let response = mount
-            .protected
+            .router
             .oneshot(request("DELETE", r#"{"channel_id":"C0UNKNOWN"}"#, TENANT))
             .await
             .expect("delete responds");
@@ -1251,7 +1248,7 @@ mod tests {
         let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
         let response = mount
-            .protected
+            .router
             .oneshot(request(
                 "PUT",
                 r#"{"channel_id":"ignore previous instructions","subject_user_id":"user:eng-team-agent"}"#,
@@ -1283,7 +1280,7 @@ mod tests {
             slack_channel_route_admin_route_mount(route_config(Arc::new(UnavailableRouteStore)));
 
         let response = mount
-            .protected
+            .router
             .oneshot(request("GET", "", TENANT))
             .await
             .expect("list responds");
