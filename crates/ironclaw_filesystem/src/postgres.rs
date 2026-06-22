@@ -214,27 +214,27 @@ impl RootFilesystem for PostgresRootFilesystem {
         // canonical-spec equality check. Two concurrent declarers of the
         // same spec both succeed; declarers of conflicting specs see
         // IndexConflict deterministically.
-        client
-            .execute(
-                "INSERT INTO root_filesystem_index_specs (prefix, name, keys, kind) \
+        cached_execute(
+            &client,
+            "INSERT INTO root_filesystem_index_specs (prefix, name, keys, kind) \
                  VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (prefix, name) DO NOTHING",
-                &[&path.as_str(), &spec.name.as_str(), &keys_json, &kind_str],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
+            &[&path.as_str(), &spec.name.as_str(), &keys_json, &kind_str],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
 
-        let row = client
-            .query_opt(
-                "SELECT keys, kind FROM root_filesystem_index_specs WHERE prefix = $1 AND name = $2",
-                &[&path.as_str(), &spec.name.as_str()],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?
-            .ok_or_else(|| FilesystemError::IndexSpecMissingAfterUpsert {
-                path: path.clone(),
-                name: spec.name.clone(),
-            })?;
+        let row = cached_query_opt(
+            &client,
+            "SELECT keys, kind FROM root_filesystem_index_specs WHERE prefix = $1 AND name = $2",
+            &[&path.as_str(), &spec.name.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?
+        .ok_or_else(|| FilesystemError::IndexSpecMissingAfterUpsert {
+            path: path.clone(),
+            name: spec.name.clone(),
+        })?;
         let existing_keys: serde_json::Value = row.get("keys");
         let existing_kind: String = row.get("kind");
         if existing_keys != keys_json || existing_kind != kind_str {
@@ -400,13 +400,13 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         let client = self.client().await?;
-        let row = client
-            .query_opt(
-                "SELECT contents, is_dir FROM root_filesystem_entries WHERE path = $1",
-                &[&path.as_str()],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        let row = cached_query_opt(
+            &client,
+            "SELECT contents, is_dir FROM root_filesystem_entries WHERE path = $1",
+            &[&path.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
         let Some(row) = row else {
             return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
         };
@@ -428,9 +428,9 @@ impl RootFilesystem for PostgresRootFilesystem {
     ) -> Result<Option<Vec<u8>>, FilesystemError> {
         let client = self.client().await?;
         let max_bytes = max_bytes as i64;
-        let row = client
-            .query_opt(
-                r#"
+        let row = cached_query_opt(
+            &client,
+            r#"
                 SELECT
                     CASE
                         WHEN octet_length(contents)::BIGINT <= $2 THEN contents
@@ -441,10 +441,10 @@ impl RootFilesystem for PostgresRootFilesystem {
                 FROM root_filesystem_entries
                 WHERE path = $1
                 "#,
-                &[&path.as_str(), &max_bytes],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+            &[&path.as_str(), &max_bytes],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
         let Some(row) = row else {
             return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
         };
@@ -476,9 +476,9 @@ impl RootFilesystem for PostgresRootFilesystem {
         // / kind / indexed and bump version, otherwise get() after
         // write_file-overwrite of a previously record-shaped entry
         // returns stale metadata.
-        let rows = client
-            .execute(
-                r#"
+        let rows = cached_execute(
+            &client,
+            r#"
                 INSERT INTO root_filesystem_entries
                     (path, contents, is_dir, content_type, kind, indexed, version)
                 VALUES ($1, $2, FALSE, 'application/octet-stream', NULL, '{}'::jsonb, 1)
@@ -492,10 +492,10 @@ impl RootFilesystem for PostgresRootFilesystem {
                     updated_at = NOW()
                 WHERE root_filesystem_entries.is_dir = FALSE
                 "#,
-                &[&path.as_str(), &bytes],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+            &[&path.as_str(), &bytes],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
         if rows == 0 {
             return Err(directory_write_error(path.clone()));
         }
@@ -520,9 +520,9 @@ impl RootFilesystem for PostgresRootFilesystem {
         // migration cleanup pass — see RootFilesystem::append_file's
         // deprecation note). New callers must use `append`/`tail` for
         // log-shaped mounts or `get`+`put` read-modify-write.
-        client
-            .execute(
-                r#"
+        cached_execute(
+            &client,
+            r#"
                 INSERT INTO root_filesystem_entries
                     (path, contents, is_dir, content_type, kind, indexed, version)
                 VALUES ($1, $2, FALSE, 'application/octet-stream', NULL, '{}'::jsonb, 1)
@@ -535,10 +535,10 @@ impl RootFilesystem for PostgresRootFilesystem {
                     version = root_filesystem_entries.version + 1,
                     updated_at = NOW()
                 "#,
-                &[&path.as_str(), &bytes],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
+            &[&path.as_str(), &bytes],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
         Ok(())
     }
 
@@ -607,17 +607,17 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
         let client = self.client().await?;
-        let row = client
-            .query_one(
-                r#"
+        let row = cached_query_one(
+            &client,
+            r#"
                 INSERT INTO root_filesystem_events (path, payload)
                 VALUES ($1, $2)
                 RETURNING id
                 "#,
-                &[&path.as_str(), &payload],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::Append, error))?;
+            &[&path.as_str(), &payload],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Append, error))?;
         let id: i64 = row.get("id");
         seq_no_from_i64(path, id, FilesystemOperation::Append)
     }
@@ -650,19 +650,19 @@ impl RootFilesystem for PostgresRootFilesystem {
         // silent-ok: callers can request an unbounded tail; saturating keeps the
         // SQL LIMIT representable without changing the public trait contract.
         let limit_raw = i64::try_from(max_records).unwrap_or(i64::MAX);
-        let rows = client
-            .query(
-                r#"
+        let rows = cached_query(
+            &client,
+            r#"
                 SELECT id, payload
                 FROM root_filesystem_events
                 WHERE path = $1 AND id > $2
                 ORDER BY id ASC
                 LIMIT $3
                 "#,
-                &[&path.as_str(), &from_raw, &limit_raw],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::Tail, error))?;
+            &[&path.as_str(), &from_raw, &limit_raw],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Tail, error))?;
         rows.into_iter()
             .map(|row| {
                 let id: i64 = row.get("id");
@@ -688,17 +688,17 @@ impl RootFilesystem for PostgresRootFilesystem {
                 "head_seq cursor exceeds i64",
             )
         })?;
-        let row = client
-            .query_one(
-                r#"
+        let row = cached_query_one(
+            &client,
+            r#"
                 SELECT MAX(id) AS head
                 FROM root_filesystem_events
                 WHERE path = $1 AND id > $2
                 "#,
-                &[&path.as_str(), &from_raw],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::HeadSeq, error))?;
+            &[&path.as_str(), &from_raw],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::HeadSeq, error))?;
         // `MAX(...)` over an empty match set yields SQL NULL.
         let head_raw: Option<i64> = row.get("head");
         match head_raw {
@@ -760,16 +760,16 @@ impl RootFilesystem for PostgresRootFilesystem {
 impl PostgresRootFilesystem {
     async fn exact_entry_with_client(
         &self,
-        client: &tokio_postgres::Client,
+        client: &deadpool_postgres::Object,
         path: &VirtualPath,
     ) -> Result<Option<(u64, FileType, Option<std::time::SystemTime>)>, FilesystemError> {
-        let row = client
-            .query_opt(
-                "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir, EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch FROM root_filesystem_entries WHERE path = $1",
-                &[&path.as_str()],
-            )
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
+        let row = cached_query_opt(
+            client,
+            "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir, EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch FROM root_filesystem_entries WHERE path = $1",
+            &[&path.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
         Ok(row.map(|row| {
             let len: i64 = row.get("len");
             let is_dir: bool = row.get("is_dir");
@@ -788,18 +788,18 @@ impl PostgresRootFilesystem {
 
     async fn child_entries_with_client(
         &self,
-        client: &tokio_postgres::Client,
+        client: &deadpool_postgres::Object,
         parent: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
         let (prefix_lower, prefix_upper) = descendant_path_range(parent);
-        let rows = client
-            .query(
-                "SELECT path, OCTET_LENGTH(contents)::bigint AS len, is_dir FROM root_filesystem_entries WHERE path >= $1 AND path < $2 ORDER BY path",
-                &[&prefix_lower, &prefix_upper],
-            )
-            .await
-            .map_err(|error| db_error(parent.clone(), operation, error))?;
+        let rows = cached_query(
+            client,
+            "SELECT path, OCTET_LENGTH(contents)::bigint AS len, is_dir FROM root_filesystem_entries WHERE path >= $1 AND path < $2 ORDER BY path",
+            &[&prefix_lower, &prefix_upper],
+        )
+        .await
+        .map_err(|error| db_error(parent.clone(), operation, error))?;
         rows.into_iter()
             .map(|row| {
                 let path: String = row.get("path");
@@ -820,17 +820,17 @@ impl PostgresRootFilesystem {
 
     async fn has_child_entry_with_client(
         &self,
-        client: &tokio_postgres::Client,
+        client: &deadpool_postgres::Object,
         parent: &VirtualPath,
     ) -> Result<bool, FilesystemError> {
         let (prefix_lower, prefix_upper) = descendant_path_range(parent);
-        let row = client
-            .query_opt(
-                "SELECT 1 FROM root_filesystem_entries WHERE path >= $1 AND path < $2 LIMIT 1",
-                &[&prefix_lower, &prefix_upper],
-            )
-            .await
-            .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
+        let row = cached_query_opt(
+            client,
+            "SELECT 1 FROM root_filesystem_entries WHERE path >= $1 AND path < $2 LIMIT 1",
+            &[&prefix_lower, &prefix_upper],
+        )
+        .await
+        .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
         Ok(row.is_some())
     }
 
@@ -938,10 +938,9 @@ struct PostgresStorageTxn {
 
 #[cfg(feature = "postgres")]
 impl PostgresStorageTxn {
-    fn client(&self) -> Result<&tokio_postgres::Client, FilesystemError> {
+    fn client(&self) -> Result<&deadpool_postgres::Object, FilesystemError> {
         self.client
-            .as_deref()
-            .map(|client| &**client)
+            .as_ref()
             .ok_or_else(|| FilesystemError::Backend {
                 path: self.prefix.clone(),
                 operation: FilesystemOperation::BeginTxn,
@@ -1025,9 +1024,62 @@ impl Drop for PostgresStorageTxn {
     }
 }
 
+/// Prepare-cached variants of the hot fixed-SQL query paths.
+///
+/// `deadpool_postgres` keeps a per-connection statement cache, so issuing a
+/// fixed SQL string through `prepare_cached` pays the `Parse` round-trip once
+/// per connection instead of on every call (~2.8ms RTT to remote Postgres in
+/// production). The pooled connection is held for less time per op, which is
+/// what keeps the small hosted pool from starving the heartbeat/webui and
+/// wedging the runner lease.
+///
+/// Only use these with *static* SQL — dynamic SQL would grow the cache
+/// unbounded, so the filter `query` and index DDL paths stay on the uncached
+/// `tokio_postgres` calls. The error type stays `tokio_postgres::Error` so
+/// existing `db_error` mapping at call sites is unchanged.
+#[cfg(feature = "postgres")]
+async fn cached_query_opt(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Option<tokio_postgres::Row>, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query_opt(&statement, params).await
+}
+
+#[cfg(feature = "postgres")]
+async fn cached_query(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Vec<tokio_postgres::Row>, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query(&statement, params).await
+}
+
+#[cfg(feature = "postgres")]
+async fn cached_query_one(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<tokio_postgres::Row, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query_one(&statement, params).await
+}
+
+#[cfg(feature = "postgres")]
+async fn cached_execute(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<u64, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.execute(&statement, params).await
+}
+
 #[cfg(feature = "postgres")]
 async fn postgres_put_with_client(
-    client: &tokio_postgres::Client,
+    client: &deadpool_postgres::Object,
     path: &VirtualPath,
     entry: Entry,
     cas: CasExpectation,
@@ -1051,24 +1103,24 @@ async fn postgres_put_with_client(
 
     match cas {
         CasExpectation::Absent => {
-            let rows = client
-                .execute(
-                    r#"
+            let rows = cached_execute(
+                client,
+                r#"
                     INSERT INTO root_filesystem_entries
                         (path, contents, is_dir, content_type, kind, indexed, version)
                     VALUES ($1, $2, FALSE, $3, $4, $5, 1)
                     ON CONFLICT (path) DO NOTHING
                     "#,
-                    &[
-                        &path_str,
-                        &body,
-                        &content_type_str,
-                        &kind_str,
-                        &indexed_json,
-                    ],
-                )
-                .await
-                .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+                &[
+                    &path_str,
+                    &body,
+                    &content_type_str,
+                    &kind_str,
+                    &indexed_json,
+                ],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
             if rows == 0 {
                 let found = postgres_current_version_with_client(client, path).await?;
                 return Err(FilesystemError::VersionMismatch {
@@ -1081,9 +1133,9 @@ async fn postgres_put_with_client(
         }
         CasExpectation::Version(expected) => {
             let expected_raw = record_version_to_i64(path, expected)?;
-            let rows = client
-                .execute(
-                    r#"
+            let rows = cached_execute(
+                client,
+                r#"
                     UPDATE root_filesystem_entries
                     SET contents = $1,
                         content_type = $2,
@@ -1093,17 +1145,17 @@ async fn postgres_put_with_client(
                         updated_at = NOW()
                     WHERE path = $5 AND is_dir = FALSE AND version = $6
                     "#,
-                    &[
-                        &body,
-                        &content_type_str,
-                        &kind_str,
-                        &indexed_json,
-                        &path_str,
-                        &expected_raw,
-                    ],
-                )
-                .await
-                .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+                &[
+                    &body,
+                    &content_type_str,
+                    &kind_str,
+                    &indexed_json,
+                    &path_str,
+                    &expected_raw,
+                ],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
             if rows == 0 {
                 let found = postgres_current_version_with_client(client, path).await?;
                 return Err(FilesystemError::VersionMismatch {
@@ -1115,9 +1167,9 @@ async fn postgres_put_with_client(
             Ok(expected.next())
         }
         CasExpectation::Any => {
-            let row = client
-                .query_opt(
-                    r#"
+            let row = cached_query_opt(
+                client,
+                r#"
                     INSERT INTO root_filesystem_entries
                         (path, contents, is_dir, content_type, kind, indexed, version)
                     VALUES ($1, $2, FALSE, $3, $4, $5, 1)
@@ -1131,16 +1183,16 @@ async fn postgres_put_with_client(
                     WHERE root_filesystem_entries.is_dir = FALSE
                     RETURNING version
                     "#,
-                    &[
-                        &path_str,
-                        &body,
-                        &content_type_str,
-                        &kind_str,
-                        &indexed_json,
-                    ],
-                )
-                .await
-                .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+                &[
+                    &path_str,
+                    &body,
+                    &content_type_str,
+                    &kind_str,
+                    &indexed_json,
+                ],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
             let Some(row) = row else {
                 return Err(directory_write_error(path.clone()));
             };
@@ -1152,20 +1204,20 @@ async fn postgres_put_with_client(
 
 #[cfg(feature = "postgres")]
 async fn postgres_get_with_client(
-    client: &tokio_postgres::Client,
+    client: &deadpool_postgres::Object,
     path: &VirtualPath,
 ) -> Result<Option<VersionedEntry>, FilesystemError> {
-    let row = client
-        .query_opt(
-            r#"
+    let row = cached_query_opt(
+        client,
+        r#"
             SELECT contents, is_dir, content_type, kind, indexed, version
             FROM root_filesystem_entries
             WHERE path = $1
             "#,
-            &[&path.as_str()],
-        )
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
     let Some(row) = row else {
         return Ok(None);
     };
@@ -1188,17 +1240,17 @@ async fn postgres_get_with_client(
 
 #[cfg(feature = "postgres")]
 async fn postgres_delete_with_client(
-    client: &tokio_postgres::Client,
+    client: &deadpool_postgres::Object,
     path: &VirtualPath,
 ) -> Result<(), FilesystemError> {
     let (prefix_lower, prefix_upper) = descendant_path_range(path);
-    let deleted = client
-        .execute(
-            "DELETE FROM root_filesystem_entries WHERE path = $1 OR (path >= $2 AND path < $3)",
-            &[&path.as_str(), &prefix_lower, &prefix_upper],
-        )
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    let deleted = cached_execute(
+        client,
+        "DELETE FROM root_filesystem_entries WHERE path = $1 OR (path >= $2 AND path < $3)",
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
     if deleted == 0 {
         return Err(not_found(path.clone(), FilesystemOperation::Delete));
     }
@@ -1207,16 +1259,16 @@ async fn postgres_delete_with_client(
 
 #[cfg(feature = "postgres")]
 async fn postgres_current_version_with_client(
-    client: &tokio_postgres::Client,
+    client: &deadpool_postgres::Object,
     path: &VirtualPath,
 ) -> Result<Option<RecordVersion>, FilesystemError> {
-    let row = client
-        .query_opt(
-            "SELECT version FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE",
-            &[&path.as_str()],
-        )
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let row = cached_query_opt(
+        client,
+        "SELECT version FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE",
+        &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
     row.map(|row| {
         let version: i64 = row.get("version");
         record_version_from_i64(path, version)
@@ -1226,16 +1278,16 @@ async fn postgres_current_version_with_client(
 
 #[cfg(feature = "postgres")]
 async fn postgres_exact_entry_with_client(
-    client: &tokio_postgres::Client,
+    client: &deadpool_postgres::Object,
     path: &VirtualPath,
 ) -> Result<Option<(u64, FileType, Option<std::time::SystemTime>)>, FilesystemError> {
-    let row = client
-        .query_opt(
-            "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir, EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch FROM root_filesystem_entries WHERE path = $1",
-            &[&path.as_str()],
-        )
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let row = cached_query_opt(
+        client,
+        "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir, EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch FROM root_filesystem_entries WHERE path = $1",
+        &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
     Ok(row.map(|row| {
         let len: i64 = row.get("len");
         let is_dir: bool = row.get("is_dir");
@@ -1254,17 +1306,17 @@ async fn postgres_exact_entry_with_client(
 
 #[cfg(feature = "postgres")]
 async fn postgres_has_child_entry_with_client(
-    client: &tokio_postgres::Client,
+    client: &deadpool_postgres::Object,
     parent: &VirtualPath,
 ) -> Result<bool, FilesystemError> {
     let (prefix_lower, prefix_upper) = descendant_path_range(parent);
-    let row = client
-        .query_opt(
-            "SELECT 1 FROM root_filesystem_entries WHERE path >= $1 AND path < $2 LIMIT 1",
-            &[&prefix_lower, &prefix_upper],
-        )
-        .await
-        .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
+    let row = cached_query_opt(
+        client,
+        "SELECT 1 FROM root_filesystem_entries WHERE path >= $1 AND path < $2 LIMIT 1",
+        &[&prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
     Ok(row.is_some())
 }
 

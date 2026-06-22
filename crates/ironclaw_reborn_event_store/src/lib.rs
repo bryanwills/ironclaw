@@ -540,6 +540,7 @@ mod postgres_backed {
     //! filesystem-backed durable-log surface.
 
     use std::sync::Arc;
+    use std::time::Duration;
 
     use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
     use ironclaw_filesystem::PostgresRootFilesystem;
@@ -552,6 +553,12 @@ mod postgres_backed {
         PostgresPoolTlsOptions, RebornEventStoreError, RebornEventStores, RebornPostgresSslMode,
         wrap_root_filesystem_as_event_stores,
     };
+
+    /// Upper bound on how long a pool checkout (wait for a free connection,
+    /// establish a new one, or recycle an idle one) may take before it errors
+    /// instead of blocking. Chosen well under the 90s runner lease TTL so a
+    /// saturated pool surfaces a retryable error before the lease can expire.
+    const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(30);
 
     pub(super) async fn build(
         url: SecretString,
@@ -620,6 +627,16 @@ mod postgres_backed {
         };
         Pool::builder(manager)
             .max_size(max_size)
+            // Deadlock guard: without a wait timeout, `Pool::get()` blocks
+            // forever once every connection is checked out. A small hosted
+            // pool can be transiently saturated by one turn's read burst, so
+            // an unbounded wait wedges the runner heartbeat and webui until the
+            // 90s runner lease expires and the turn fails `lease_expired`.
+            // Failing the checkout well under the lease converts an
+            // unrecoverable hang into a surfaced, retryable error.
+            .wait_timeout(Some(POOL_CHECKOUT_TIMEOUT))
+            .create_timeout(Some(POOL_CHECKOUT_TIMEOUT))
+            .recycle_timeout(Some(POOL_CHECKOUT_TIMEOUT))
             .runtime(Runtime::Tokio1)
             .build()
             .map_err(|source| RebornEventStoreError::backend("postgres", "build pool", source))
