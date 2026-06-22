@@ -482,9 +482,9 @@ and an explicit runtime policy:
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-# Optional; defaults to 16. Keep below the PostgreSQL server's max_connections
-# after reserving capacity for migrations and operator sessions.
-pool_max_size = 16
+# Optional; defaults to 4. Keep below the PostgreSQL server or managed
+# session-pool cap after reserving capacity for restarts and operator sessions.
+pool_max_size = 4
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
