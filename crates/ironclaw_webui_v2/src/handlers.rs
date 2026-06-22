@@ -67,6 +67,10 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
+    /// Deployment-wide feature gates the browser uses to show/hide
+    /// not-yet-finished surfaces. Distinct from `capabilities`, which are
+    /// per-token authorization flags.
+    pub features: WebUiV2Features,
     /// Inline-attachment contract (allowed `accept` tokens + size budgets)
     /// the browser advertises on its file picker. Generated from the shared
     /// format registry so the picker can never drift from the server's
@@ -74,8 +78,22 @@ pub struct WebUiV2SessionResponse {
     pub attachments: WebUiAttachmentCapabilities,
 }
 
+/// Deployment-wide WebUI feature gates surfaced to the browser on
+/// `GET /session`. These are global "is this surface ready to show"
+/// toggles, not per-caller authorization — keep authorization in
+/// [`WebUiV2Capabilities`].
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct WebUiV2Features {
+    /// Reborn Projects surface (the conversations-panel entry + the
+    /// `/projects` route). Hidden unless the deployment sets
+    /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
+    /// finished.
+    pub reborn_projects: bool,
+}
+
 /// `GET /api/webchat/v2/session`
 pub async fn get_session(
+    State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Json<WebUiV2SessionResponse> {
@@ -83,6 +101,9 @@ pub async fn get_session(
         tenant_id: caller.tenant_id.to_string(),
         user_id: caller.user_id.to_string(),
         capabilities,
+        features: WebUiV2Features {
+            reborn_projects: state.reborn_projects_enabled(),
+        },
         attachments: webui_attachment_capabilities(),
     })
 }
@@ -875,7 +896,10 @@ pub struct ListThreadsQuery {
 /// Lists the caller-scoped schedule automations visible to the browser. The
 /// optional `?limit=N` and `?run_limit=N` queries are capped by the product
 /// workflow facade; the response is a single bounded page and does not include
-/// a cursor.
+/// a cursor. By default only active automations are returned; pass
+/// `?include_completed=true` to also include soft-completed (fire-once)
+/// automations. See [`ListAutomationsQuery`] for the full per-parameter parse
+/// behavior.
 pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -884,6 +908,7 @@ pub async fn list_automations(
     let request = WebUiListAutomationsRequest {
         limit: query.limit,
         run_limit: query.run_limit,
+        include_completed: query.include_completed,
     };
     let response = state.services().list_automations(caller, request).await?;
     Ok(Json(response))
@@ -897,6 +922,18 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of recent runs to return per automation row.
     #[serde(default)]
     pub run_limit: Option<u32>,
+    /// When `true`, soft-completed (fire-once) automations are included
+    /// alongside active ones.
+    ///
+    /// Parse behavior (via `serde_urlencoded` / axum `Query<T>`):
+    /// - **Absent** (`?` or no param): defaults to `false` (active-only).
+    /// - **`true`** / **`false`**: parsed as the corresponding boolean.
+    /// - **Malformed** (e.g. `?include_completed=garbage`): deserialization
+    ///   fails at the `Query` extractor and the request is rejected with
+    ///   `400 Bad Request` before the handler runs. There is no silent
+    ///   fallback to `false` for unparseable values.
+    #[serde(default)]
+    pub include_completed: bool,
 }
 
 /// `GET /api/webchat/v2/traces/credit`

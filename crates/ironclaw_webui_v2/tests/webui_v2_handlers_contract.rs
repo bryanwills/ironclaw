@@ -2006,6 +2006,105 @@ async fn list_automations_error_maps_to_http_status() {
 }
 
 #[tokio::test]
+async fn list_automations_include_completed_true_forwarded_to_facade() {
+    // ?include_completed=true must be parsed and forwarded as `true` in the
+    // WebUiListAutomationsRequest so the facade can widen its exclusion slice.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].include_completed,
+        "include_completed=true must be forwarded to the facade"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_include_completed_absent_defaults_to_false() {
+    // No ?include_completed query param → `include_completed` must default to
+    // false so existing callers that do not set the flag are unaffected.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].include_completed,
+        "absent include_completed must default to false (active-only)"
+    );
+}
+
+// Regression: malformed `?include_completed=garbage` must be rejected at the
+// Query extractor level (400 Bad Request) before the handler or facade run.
+// The field is a plain `bool`; `serde_urlencoded` does not silently default
+// unparseable values — it returns a deserialization error, which axum maps to
+// 400. There is no silent fallback to `false`.
+#[tokio::test]
+async fn list_automations_malformed_include_completed_rejected_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=notabool")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed include_completed must be rejected at query deserialization with 400, \
+         not silently defaulted to false"
+    );
+    assert!(
+        services
+            .list_automations_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "malformed include_completed must be rejected before reaching the facade"
+    );
+}
+
+#[tokio::test]
 async fn get_outbound_preferences_dispatches_through_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
@@ -2296,6 +2395,43 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
     assert_eq!(body["tenant_id"], "tenant-alpha");
     assert_eq!(body["user_id"], "user-alpha");
     assert_eq!(body["capabilities"]["operator_webui_config"], false);
+}
+
+// The browser hides the Projects surface (sidebar entry + `/projects` route)
+// unless the deployment opts in. The gate is delivered through the session
+// response's `features.reborn_projects` field, fed from
+// `WebUiV2State::with_reborn_projects_enabled` at composition. Drive the real
+// router (not just the state accessor) so a handler that forgot to surface the
+// flag is caught — see `.claude/rules/testing.md` "Test Through the Caller".
+#[tokio::test]
+async fn get_session_reports_reborn_projects_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_reborn_projects_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["reborn_projects"], enabled,
+            "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4585,8 +4721,8 @@ fn sample_project_info(project_id: &str) -> RebornProjectInfo {
         metadata: serde_json::json!({}),
         state: RebornProjectState::Active,
         role: RebornProjectRole::Owner,
-        created_at: "2026-06-17T00:00:00Z".to_string(),
-        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
     }
 }
 
@@ -4596,8 +4732,8 @@ fn sample_member_info(user_id: &str) -> RebornProjectMemberInfo {
         role: RebornProjectRole::Editor,
         status: RebornProjectMemberStatus::Active,
         granted_by: "user-alpha".to_string(),
-        created_at: "2026-06-17T00:00:00Z".to_string(),
-        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
     }
 }
 
