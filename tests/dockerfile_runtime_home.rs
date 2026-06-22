@@ -177,8 +177,8 @@ fn reborn_hosted_single_tenant_seed_config_contains_postgres_storage() {
         "hosted seed config must include Postgres storage"
     );
     assert!(
-        config.contains("pool_max_size = 2"),
-        "hosted seed config must cap Postgres sessions for managed session pools"
+        config.contains("pool_max_size = 16"),
+        "hosted seed config must size the shared Postgres pool for runtime concurrency"
     );
     assert!(
         !config.contains("[policy]"),
