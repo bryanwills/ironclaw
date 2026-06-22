@@ -1,0 +1,60 @@
+# ironclaw_reborn_llm_admin — Reborn LLM provider/catalog admin cluster.
+#
+# Extracted from `ironclaw_reborn_composition` so the LLM provider catalog,
+# provider-admin facade, operator key store, live reload seam, and optional
+# NEAR AI login callback route live in their own crate. Composition depends on
+# this crate and re-exports its public facade surface; the dependency direction
+# is composition -> llm_admin.
+#
+# This crate is only pulled into composition behind `root-llm-provider`. The
+# optional WebUI callback route exposes an axum `Router` plus route descriptors
+# only; it never binds a listener or owns serving lifecycle.
+[package]
+name = "ironclaw_reborn_llm_admin"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Reborn LLM provider/catalog admin composition cluster"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Compile the public NEAR AI login callback route mount. Composition forwards
+# its own `webui-v2-beta` feature here when root LLM provider support is on.
+webui-v2-beta = ["dep:axum", "dep:ironclaw_reborn_http_kit"]
+
+[dependencies]
+async-trait = "0.1"
+chrono = "0.4"
+fs4 = "0.6"
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
+ironclaw_reborn_http_kit = { path = "../ironclaw_reborn_http_kit", optional = true }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+axum = { version = "0.8", optional = true }
+
+[dev-dependencies]
+http = "1"
+http-body-util = "0.1"
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

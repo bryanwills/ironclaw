@@ -6,8 +6,6 @@ use std::{
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::FilesystemPersistentApprovalPolicyStore;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_approvals::InMemoryPersistentApprovalPolicyStore;
@@ -66,6 +64,8 @@ use ironclaw_outbound::FilesystemOutboundStateStore;
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_reborn_product_auth::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use ironclaw_resources::InMemoryResourceGovernor;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
@@ -104,40 +104,31 @@ use ironclaw_turns::{
 use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
-use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
+use crate::lifecycle::build_local_skill_management_port;
 use crate::local_dev_authorization::local_dev_authorizer;
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, workspace_mount_view,
 };
-use crate::mcp::hosted_http_mcp_runtime;
-use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_client};
-use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::web_access::register_bundled_web_access_first_party_handlers;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessState, RebornWorkerReadiness,
 };
-use crate::{
-    available_extensions::{
-        AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
-        google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
-        google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
-    },
-    extension_installation_store::FilesystemExtensionInstallationStore,
-    extension_lifecycle::{
-        ActiveExtensionPublisher, RebornLocalExtensionManagementPort,
-        restore_extension_lifecycle_state,
-    },
-    extension_lifecycle_capabilities::{
-        extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
-    },
-    gsuite::{
-        ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
-    },
-    web_access::register_bundled_web_access_first_party_handlers,
+use ironclaw_reborn_extension_host::{
+    ActiveExtensionPublisher, AvailableExtensionCatalog, FilesystemExtensionInstallationStore,
+    ProductAuthRuntimeGsuiteCredentialStager, RebornLocalExtensionManagementPort,
+    RebornLocalSkillManagementPort, extend_builtin_first_party_package, gmail_manifest_digest,
+    google_calendar_manifest_digest, google_docs_manifest_digest, google_drive_manifest_digest,
+    google_sheets_manifest_digest, google_slides_manifest_digest, hosted_http_mcp_runtime,
+    insert_extension_lifecycle_handlers, notion_mcp_manifest_digest,
+    register_bundled_gsuite_first_party_handlers, restore_extension_lifecycle_state,
+    web_access_manifest_digest,
 };
+use ironclaw_reborn_product_auth::ProductAuthRuntimeCredentialResolver;
+use ironclaw_reborn_product_auth::{OAuthProviderComposition, compose_provider_client};
 
 pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
 
@@ -2412,8 +2403,8 @@ struct RebornProductionBuildContext {
     wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
     production_wiring: RebornProductionWiring,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
-    oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
-    oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
+    oauth_provider_configs: Vec<ironclaw_reborn_product_auth::OAuthProviderBackendConfig>,
+    oauth_dcr_provider_configs: Vec<ironclaw_reborn_product_auth::OAuthDcrProviderBackendConfig>,
     owner_id: String,
 }
 
@@ -3067,12 +3058,12 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::{
-        extension_lifecycle::ExtensionActivationMode,
         local_dev_capability_policy::{
             LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
         },
         runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
+    use ironclaw_reborn_extension_host::ExtensionActivationMode;
 
     struct FailingConversationActorPairingService;
 

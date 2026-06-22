@@ -1,0 +1,74 @@
+# ironclaw_reborn_slack_host — Reborn-native Slack host-beta route cluster.
+#
+# Extracted from `ironclaw_reborn_composition` so Slack host-beta state,
+# routes, delivery, pairing, egress, and mount builders live in their own
+# product/API crate. Composition depends on this crate and keeps only the
+# thin `RebornRuntime` wiring shims.
+#
+# Per the `reborn_product_api_crates_do_not_bind_http_ingress`
+# architecture contract, this crate exposes axum `Router`s and
+# `IngressRouteDescriptor`s only; it never binds a listener or drives the
+# serve loop.
+[package]
+name = "ironclaw_reborn_slack_host"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Reborn-native Slack host-beta route cluster"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+chrono = "0.4"
+futures = "0.3"
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_outbound = { path = "../ironclaw_outbound" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage" }
+ironclaw_reborn_http_kit = { path = "../ironclaw_reborn_http_kit" }
+ironclaw_reborn_product_auth = { path = "../ironclaw_reborn_product_auth" }
+ironclaw_safety = { path = "../ironclaw_safety" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters" }
+rand = "0.8"
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+hmac = "0.12"
+http = "1"
+http-body-util = "0.1"
+ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_network = { path = "../ironclaw_network" }
+ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support"] }
+ironclaw_resources = { path = "../ironclaw_resources" }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

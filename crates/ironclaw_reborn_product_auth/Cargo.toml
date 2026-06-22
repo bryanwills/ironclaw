@@ -1,0 +1,72 @@
+# ironclaw_reborn_product_auth — Reborn-native product/OAuth auth cluster.
+#
+# Extracted from `ironclaw_reborn_composition` so the product-auth /
+# OAuth provider cluster (durable auth-product services, DCR + gate
+# providers, host OAuth provider client, manual-token flow, and the
+# WebUI-mounted product-auth HTTP route surface) lives in its own crate.
+# Composition depends on this crate and re-exports its public facade
+# surface; the dependency direction is composition -> product_auth.
+#
+# Per the `reborn_product_api_crates_do_not_bind_http_ingress`
+# architecture contract, this crate exposes axum `Router`s and
+# `IngressRouteDescriptor`s only (under `webui-v2-beta`); it never binds
+# a listener or drives the serve loop. Host composition converts the
+# product-auth route mount into the WebUI serving kit's mount vocabulary.
+[package]
+name = "ironclaw_reborn_product_auth"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Reborn-native product/OAuth auth composition cluster"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Compile the WebUI-mounted product-auth HTTP route surface
+# (`product_auth_serve`). Off by default; composition forwards its own
+# `webui-v2-beta` feature here. Pulls in the axum Router + lru cache the
+# route mount needs. The composed route mount is consumed by host
+# composition through `ProductAuthRouteMount`; this crate never serves it.
+webui-v2-beta = ["dep:axum", "dep:lru"]
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+chrono = "0.4"
+futures = "0.3"
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+ironclaw_common = { path = "../ironclaw_common" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+# axum Router + lru cache used only by the WebUI-mounted product-auth
+# route surface; feature-gated so the always-on tier carries no HTTP code.
+axum = { version = "0.8", optional = true }
+lru = { version = "0.16", optional = true }
+
+[dev-dependencies]
+http = "1"
+http-body-util = "0.1"
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

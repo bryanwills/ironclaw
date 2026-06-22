@@ -3,10 +3,10 @@ use std::collections::HashSet;
 use ironclaw_skills::{ManagedSkillSource, SkillManagementError, SkillManagementErrorKind};
 
 use crate::{
-    RebornBuildError,
-    bundled_skills::bundled_reborn_skill_summaries,
-    lifecycle::{RebornLocalSkillManagementError, build_existing_local_dev_skill_management_port},
+    RebornBuildError, bundled_skills::bundled_reborn_skill_summaries,
+    lifecycle::build_existing_local_dev_skill_management_port,
 };
+use ironclaw_reborn_extension_host::RebornLocalSkillManagementError;
 
 pub async fn list_reborn_local_skills(
     owner_id: impl Into<String>,

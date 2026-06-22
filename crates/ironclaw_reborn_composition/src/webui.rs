@@ -6,27 +6,31 @@ use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
-    WebUiAuthenticatedCaller,
+    ConnectableChannelsProductFacade, OperatorStatusService, OutboundDeliveryTargetProvider,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
 };
 
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornRuntime,
-    lifecycle::{
-        RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
-    },
-    outbound_preferences::{
-        OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
-        RebornOutboundPreferencesFacade,
-    },
+    outbound_preferences::{OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade},
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
+use ironclaw_reborn_extension_host::{
+    RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
+};
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_reborn_http_kit::{
+    ProtectedRouteMount, PublicRouteMount, WebuiServeConfig, WebuiServeError, WebuiV2App,
+    compose_webui_v2_app,
+};
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_reborn_product_auth::{ProductAuthRouteState, product_auth_route_mount};
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
@@ -37,7 +41,7 @@ static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
 /// by WebChat v2 and the optional product-auth OAuth routes. HTTP
 /// routing, auth middleware, static assets, and SSE transport stay in the
 /// WebUI crate (or, when the `webui-v2-beta` feature is on, the
-/// [`crate::webui_serve`] module in this crate); lower runtime handles stay
+/// `ironclaw_reborn_http_kit` serving core); lower runtime handles stay
 /// behind the existing Reborn runtime / composition services.
 #[derive(Clone)]
 pub struct RebornWebuiBundle {
@@ -169,8 +173,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     // crate; the service is the only facade-shaped handle that leaves.
     #[cfg(feature = "root-llm-provider")]
     if let Some(boot) = runtime.webui_boot_config() {
-        let keys = crate::LlmKeyStore::new(runtime.services().secret_store());
-        let mut llm_config = crate::RebornLlmConfigService::new(boot.clone(), keys);
+        let keys = ironclaw_reborn_llm_admin::LlmKeyStore::new(runtime.services().secret_store());
+        let mut llm_config =
+            ironclaw_reborn_llm_admin::RebornLlmConfigService::new(boot.clone(), keys);
         if let Some(reload) = runtime.webui_llm_reload_trigger() {
             llm_config = llm_config.with_reload_trigger(reload);
         }
@@ -603,6 +608,52 @@ fn status_check(
         summary,
         remediation,
     }
+}
+
+/// Build the fully-composed Reborn WebChat v2 axum [`axum::Router`].
+/// See [`ironclaw_reborn_http_kit::compose_webui_v2_app`] for the composed
+/// middleware stack. This wrapper is the product-aware seam: it lowers
+/// the bundle's product-auth services into generic route mounts before
+/// handing off to the product-agnostic serving core.
+#[cfg(feature = "webui-v2-beta")]
+pub fn webui_v2_app(
+    bundle: RebornWebuiBundle,
+    config: WebuiServeConfig,
+) -> Result<axum::Router, WebuiServeError> {
+    Ok(webui_v2_app_with_lifecycle(bundle, config)?.into_parts().0)
+}
+
+/// Like [`webui_v2_app`] but also returns the public route drain hooks
+/// host ingress runs on shutdown.
+#[cfg(feature = "webui-v2-beta")]
+pub fn webui_v2_app_with_lifecycle(
+    bundle: RebornWebuiBundle,
+    mut config: WebuiServeConfig,
+) -> Result<WebuiV2App, WebuiServeError> {
+    if let Some(product_auth) = bundle.product_auth.clone() {
+        let mut state = ProductAuthRouteState::new(
+            product_auth,
+            config.tenant_id.clone(),
+            config.default_agent_id.clone(),
+            config.default_project_id.clone(),
+        );
+        if let Some(google_oauth) = config.google_oauth.clone() {
+            state = state.with_google_oauth(google_oauth);
+        }
+        let mount = product_auth_route_mount(state);
+        // Prepend so product-auth descriptors keep their pre-inversion
+        // position ahead of host-supplied mounts. The descriptor set is
+        // carried on the protected half; the public callback router
+        // shares the same descriptor-driven middleware state.
+        config.protected_mounts.insert(
+            0,
+            ProtectedRouteMount::new(mount.protected, mount.descriptors),
+        );
+        config
+            .public_mounts
+            .insert(0, PublicRouteMount::new(mount.public, Vec::new()));
+    }
+    compose_webui_v2_app(bundle.api.clone(), config)
 }
 
 #[cfg(test)]

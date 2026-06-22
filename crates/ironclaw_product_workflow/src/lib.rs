@@ -43,6 +43,7 @@ mod inbound_turn;
 mod ledger;
 mod lifecycle;
 mod outbound_delivery;
+mod outbound_delivery_target;
 mod policy;
 mod reborn_services;
 mod webui_inbound;
@@ -124,6 +125,7 @@ pub use outbound_delivery::{
     ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
     VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
 };
+pub use outbound_delivery_target::{OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider};
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,

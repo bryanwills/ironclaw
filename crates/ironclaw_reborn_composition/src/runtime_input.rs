@@ -31,6 +31,8 @@ use ironclaw_loop_support::HostSkillContextSource;
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
+#[cfg(feature = "root-llm-provider")]
+use ironclaw_reborn_llm_admin::ResolvedRebornLlm;
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
 use crate::hooks::HooksActivationConfig;
@@ -120,33 +122,6 @@ pub trait TriggerFireAccessChecker: Send + Sync {
         &self,
         request: TriggerFireAccessCheck,
     ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
-}
-
-#[cfg(feature = "root-llm-provider")]
-#[derive(Debug, Clone)]
-pub struct ResolvedRebornLlm {
-    provider_id: String,
-    model: String,
-    pub(crate) config: ironclaw_llm::LlmConfig,
-}
-
-#[cfg(feature = "root-llm-provider")]
-impl ResolvedRebornLlm {
-    pub fn provider_id(&self) -> &str {
-        &self.provider_id
-    }
-
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
-    pub fn from_llm_config(config: ironclaw_llm::LlmConfig) -> Self {
-        Self {
-            provider_id: config.active_provider_id(),
-            model: config.active_model_name(),
-            config,
-        }
-    }
 }
 
 /// Configuration for the turn-runner worker spawned by the runtime.

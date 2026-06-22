@@ -1,0 +1,61 @@
+# ironclaw_reborn_http_kit — product-agnostic HTTP serving kit for the
+# Reborn WebChat v2 listener surface.
+#
+# Extracted from `ironclaw_reborn_composition::webui_serve` (+ the
+# descriptor-driven middleware modules) so that product route crates
+# (Slack host, product-auth, OpenAI-compat, SSO login) can depend on the
+# mount vocabulary (`ProtectedRouteMount` / `PublicRouteMount`) without
+# depending on the composition root. The kit composes middleware from
+# `IngressRouteDescriptor`s and merges host-supplied mounts; it carries
+# no product knowledge beyond the native WebChat v2 route surface it
+# exists to serve.
+[package]
+name = "ironclaw_reborn_http_kit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Descriptor-driven HTTP serving kit for the Reborn WebChat v2 surface"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Insert the OpenAI-compat authenticated-caller extension from the same
+# verified bearer result the WebUI auth middleware produces, so protected
+# OpenAI-compatible route mounts receive tenant-scoped auth evidence
+# minted by host composition (route crates must not mint it).
+openai-compat-beta = [
+    "dep:ironclaw_reborn_openai_compat",
+    "ironclaw_reborn_openai_compat/openai-compat-beta",
+    "dep:ironclaw_product_adapters",
+    "ironclaw_product_adapters/host-auth-mint",
+]
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", optional = true }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat", optional = true }
+ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", features = ["webui-v2-beta"] }
+ironclaw_webui_v2_static = { path = "../ironclaw_webui_v2_static", features = ["webui-v2-beta"] }
+lru = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tower-http = { version = "0.6", features = ["cors", "set-header", "limit", "catch-panic"] }
+tracing = "0.1"
+
+[dev-dependencies]
+http = "1"
+http-body-util = "0.1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

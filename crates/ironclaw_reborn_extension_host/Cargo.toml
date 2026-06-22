@@ -1,0 +1,48 @@
+# ironclaw_reborn_extension_host — Reborn extension/MCP lifecycle cluster.
+#
+# Extracted from `ironclaw_reborn_composition` so the local extension
+# catalog/lifecycle, hosted MCP discovery/runtime wiring, GSuite first-party
+# handlers, extension lifecycle capabilities, and local skill lifecycle facade
+# live in their own crate. Composition depends on this crate and keeps only
+# composition-local builders/shims; the dependency direction is
+# composition -> extension_host.
+[package]
+name = "ironclaw_reborn_extension_host"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Reborn extension/MCP lifecycle host composition cluster"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chrono = "0.4"
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
+ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_loop_support = { path = "../ironclaw_loop_support" }
+ironclaw_mcp = { path = "../ironclaw_mcp" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_skills = { path = "../ironclaw_skills" }
+ironclaw_trust = { path = "../ironclaw_trust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+toml = "0.8"
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

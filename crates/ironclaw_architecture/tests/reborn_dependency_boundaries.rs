@@ -818,14 +818,14 @@ fn reborn_boot_config_file_layout_is_pinned() {
          Landmines` section: \"Do not bake secret material into blueprints/config.\""
     );
 
-    // Provider-catalog load-from-path must be reachable from
-    // composition without forcing `ironclaw_reborn_config` to depend
-    // on `ironclaw_llm` (which would violate _config's standalone
-    // boundary). The composition crate is the legitimate consumer.
-    let llm_catalog = root.join("crates/ironclaw_reborn_composition/src/llm_catalog.rs");
+    // Provider-catalog load-from-path must be reachable from the extracted
+    // LLM-admin crate without forcing `ironclaw_reborn_config` to depend on
+    // `ironclaw_llm` (which would violate _config's standalone boundary).
+    // Composition depends on LLM-admin and re-exports this resolver surface.
+    let llm_catalog = root.join("crates/ironclaw_reborn_llm_admin/src/llm_catalog.rs");
     assert!(
         llm_catalog.exists(),
-        "composition must expose a catalog resolver at {} so the CLI can stitch \
+        "LLM-admin must expose a catalog resolver at {} so the CLI can stitch \
          RebornConfigFile + providers.json into a RebornLlmConfig without itself \
          depending on ironclaw_llm",
         llm_catalog.display()
@@ -838,7 +838,7 @@ fn reborn_boot_config_file_layout_is_pinned() {
     ] {
         assert!(
             llm_catalog_src.contains(required),
-            "composition llm_catalog must expose `{required}` so the resolver path is \
+            "LLM-admin llm_catalog must expose `{required}` so the resolver path is \
              stable; see reborn_boot_config_file_layout_is_pinned"
         );
     }
@@ -1278,6 +1278,25 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         // host composition's job. Without this entry the contract fails
         // open for the new route crate.
         "crates/ironclaw_webui_v2/src",
+        // Descriptor-driven WebChat v2 serving kit: owns
+        // `compose_webui_v2_app`, the mount vocabulary, and the
+        // middleware stack, but — like the route crate above — must only
+        // expose `Router`s / descriptors and never bind a listener or
+        // drive the serve loop. Its own CLAUDE.md names this contract;
+        // without this entry the contract fails open for the kit.
+        "crates/ironclaw_reborn_http_kit/src",
+        // Reborn-native product/OAuth auth cluster: exposes the
+        // product-auth route mount (`ProductAuthRouteMount` carrying axum
+        // `Router`s + `IngressRouteDescriptor`s, under `webui-v2-beta`)
+        // but binds no listener; host composition serves it. Without this
+        // entry the no-bind contract fails open for the extracted crate.
+        "crates/ironclaw_reborn_product_auth/src",
+        // Reborn LLM-admin cluster: exposes the optional NEAR AI login
+        // callback route mount (`PublicRouteMount` carrying an axum `Router`
+        // + `IngressRouteDescriptor`s, under `webui-v2-beta`) but binds no
+        // listener; host composition serves it. Without this entry the
+        // no-bind contract fails open for the extracted crate.
+        "crates/ironclaw_reborn_llm_admin/src",
     ];
 
     let mut violations = Vec::new();
@@ -1475,15 +1494,19 @@ fn reborn_product_auth_contract_stays_reborn_native() {
 
     let mut violations = Vec::new();
     collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
+    // The product-auth composition/route cluster was extracted from
+    // `ironclaw_reborn_composition` into `ironclaw_reborn_product_auth`;
+    // scan the relocated implementation here so the v1-non-mingling
+    // contract keeps covering it instead of failing open on a missing path.
     collect_forbidden_reborn_auth_file_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/auth.rs"),
+        &root.join("crates/ironclaw_reborn_product_auth/src/auth.rs"),
         &root,
         &forbidden,
         &mut violations,
     );
     collect_forbidden_reborn_auth_path_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve"),
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve.rs"),
+        &root.join("crates/ironclaw_reborn_product_auth/src/product_auth_serve"),
+        &root.join("crates/ironclaw_reborn_product_auth/src/product_auth_serve.rs"),
         &root,
         &forbidden,
         &mut violations,

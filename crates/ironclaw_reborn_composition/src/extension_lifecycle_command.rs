@@ -8,7 +8,7 @@ use ironclaw_product_workflow::{
 use thiserror::Error;
 
 use crate::factory::RebornServices;
-use crate::lifecycle::RebornLocalLifecycleFacade;
+use ironclaw_reborn_extension_host::RebornLocalLifecycleFacade;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebornExtensionLifecycleCommand {

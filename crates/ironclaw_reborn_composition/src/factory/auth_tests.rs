@@ -27,8 +27,8 @@ use secrecy::SecretString;
 use std::sync::Mutex;
 
 use super::*;
-use crate::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
-use crate::oauth_provider_client::HostOAuthProviderClient;
+use ironclaw_reborn_product_auth::HostOAuthProviderClient;
+use ironclaw_reborn_product_auth::{NOTION_PROVIDER_ID, notion_provider_spec};
 
 #[derive(Clone)]
 struct ErrorTurnCoordinator {

@@ -203,12 +203,12 @@ mod tests {
     use ironclaw_turns::{GateRef, TurnRunId};
 
     use crate::{
-        extension_lifecycle::ActiveExtensionCapability,
         local_dev_capability_policy::local_dev_capability_policy,
         runtime::local_dev::extension_surface::{
             LocalDevExtensionSurface, LocalDevExtensionSurfaceSource,
         },
     };
+    use ironclaw_reborn_extension_host::ActiveExtensionCapability;
 
     use super::*;
 

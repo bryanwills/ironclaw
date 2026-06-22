@@ -7,12 +7,14 @@ use ironclaw_host_api::{
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
-use crate::extension_lifecycle::{ActiveExtensionCapability, RebornLocalExtensionManagementPort};
 use ironclaw_first_party_extensions::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_SEARCH_CAPABILITY_ID,
     gsuite_network_policy_for,
 };
 use ironclaw_product_workflow::ProductWorkflowError;
+use ironclaw_reborn_extension_host::{
+    ActiveExtensionCapability, RebornLocalExtensionManagementPort,
+};
 
 #[derive(Clone, Default)]
 pub(in crate::runtime) struct LocalDevExtensionSurfaceSource {

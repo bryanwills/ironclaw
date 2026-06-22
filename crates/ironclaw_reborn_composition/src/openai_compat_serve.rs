@@ -42,7 +42,7 @@ use ironclaw_threads::{
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use crate::webui_serve::ProtectedRouteMount;
+use ironclaw_reborn_http_kit::ProtectedRouteMount;
 
 const OPENAI_COMPAT_LEDGER_USER_ID: &str = "openai-compat";
 const OPENAI_COMPAT_LEDGER_ENGINE_ROOT: &str = "/engine";

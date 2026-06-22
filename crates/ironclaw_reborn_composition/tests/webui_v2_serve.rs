@@ -1,5 +1,5 @@
 //! Caller-level tests for the Reborn-owned WebChat v2 HTTP gateway
-//! composition (`webui_serve`).
+//! composition (`webui.rs` + the `ironclaw_reborn_http_kit` serving kit).
 //!
 //! These tests drive [`webui_v2_app`] through `tower::ServiceExt::oneshot`
 //! so the middleware stack — bearer auth, `?token=` shim for SSE,
@@ -630,17 +630,17 @@ mod openai_compat_mount_tests {
 mod slack_personal_binding_pairing_mount_tests {
     use super::*;
     use ironclaw_product_adapters::AdapterInstallationId;
-    use ironclaw_reborn_composition::slack_serve::SlackUserId;
     use ironclaw_reborn_composition::{
         IssuedSlackPersonalBindingPairingChallenge, RebornUserIdentityBinding,
-        RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackInstallationSelector,
+        RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         SlackPersonalBindingInstallation, SlackPersonalBindingPairingChallenge,
         SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
         SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
         SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingRouteConfig,
         SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
-        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
+        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
     };
+    use ironclaw_reborn_slack_host::{SlackInstallationSelector, SlackUserId};
 
     #[tokio::test]
     async fn pairing_route_mounted_when_config_provided() {
@@ -667,7 +667,9 @@ mod slack_personal_binding_pairing_mount_tests {
             Arc::new(OnlyValidToken),
             vec![HeaderValue::from_static("http://localhost:1234")],
         )
-        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(pairing));
+        .with_protected_route_mount(slack_personal_binding_pairing_route_mount(
+            SlackPersonalBindingPairingRouteConfig::new(pairing),
+        ));
         let app = webui_v2_app(bundle, config).expect("webui v2 app");
 
         let unauthenticated = app

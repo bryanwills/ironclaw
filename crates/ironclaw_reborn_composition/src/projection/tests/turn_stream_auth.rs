@@ -201,10 +201,12 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
 #[tokio::test]
 async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_gate() {
     use crate::OAuthClientConfig;
-    use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
-    use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
     use async_trait::async_trait;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
+    use ironclaw_reborn_product_auth::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
+    use ironclaw_reborn_product_auth::{
+        RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    };
     use ironclaw_secrets::InMemorySecretStore;
 
     #[derive(Debug)]
@@ -315,13 +317,17 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
 
 #[tokio::test]
 async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credential_gate() {
-    use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
-    use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry};
     use async_trait::async_trait;
     use ironclaw_auth::{
         AuthContinuationEvent, CredentialAccountLabel, InMemoryAuthProductServices,
     };
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
+    use ironclaw_reborn_product_auth::{
+        OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
+    };
+    use ironclaw_reborn_product_auth::{
+        RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    };
     use ironclaw_secrets::InMemorySecretStore;
 
     #[derive(Debug)]
@@ -408,7 +414,7 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
     let dcr_provider = Arc::new(
         OAuthDcrProvider::new(
             OAuthDcrProviderConfig {
-                spec: crate::notion_oauth::notion_provider_spec(),
+                spec: ironclaw_reborn_product_auth::notion_provider_spec(),
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
                 account_label: CredentialAccountLabel::new("notion").unwrap(),

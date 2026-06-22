@@ -56,6 +56,16 @@ impl From<ironclaw_host_runtime::ProductionWiringReport> for RebornBuildError {
     }
 }
 
+impl From<ironclaw_reborn_product_auth::OAuthProviderCompositionError> for RebornBuildError {
+    fn from(error: ironclaw_reborn_product_auth::OAuthProviderCompositionError) -> Self {
+        match error {
+            ironclaw_reborn_product_auth::OAuthProviderCompositionError::InvalidConfig {
+                reason,
+            } => Self::InvalidConfig { reason },
+        }
+    }
+}
+
 impl From<crate::RebornCompositionError> for RebornBuildError {
     fn from(error: crate::RebornCompositionError) -> Self {
         match error {

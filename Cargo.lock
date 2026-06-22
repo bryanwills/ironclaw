@@ -4975,7 +4975,6 @@ dependencies = [
  "ironclaw_host_runtime",
  "ironclaw_llm",
  "ironclaw_loop_support",
- "ironclaw_mcp",
  "ironclaw_network",
  "ironclaw_outbound",
  "ironclaw_processes",
@@ -4986,9 +4985,14 @@ dependencies = [
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
+ "ironclaw_reborn_extension_host",
+ "ironclaw_reborn_http_kit",
  "ironclaw_reborn_identity",
+ "ironclaw_reborn_llm_admin",
  "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_openai_compat_storage",
+ "ironclaw_reborn_product_auth",
+ "ironclaw_reborn_slack_host",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runtime_policy",
@@ -5020,7 +5024,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tower 0.5.3",
- "tower-http 0.6.11",
  "tracing",
  "tracing-test",
  "url",
@@ -5068,6 +5071,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_reborn_extension_host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_auth",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_first_party_extension_ports",
+ "ironclaw_first_party_extensions",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_loop_support",
+ "ironclaw_mcp",
+ "ironclaw_product_workflow",
+ "ironclaw_skills",
+ "ironclaw_trust",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "ironclaw_reborn_http_kit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "http 1.4.1",
+ "http-body-util",
+ "ironclaw_auth",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_reborn_openai_compat",
+ "ironclaw_webui_v2",
+ "ironclaw_webui_v2_static",
+ "lru 0.16.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tower-http 0.6.11",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_reborn_identity"
 version = "0.1.0"
 dependencies = [
@@ -5081,6 +5137,36 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_reborn_llm_admin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "fs4",
+ "http 1.4.1",
+ "http-body-util",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_llm",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_reborn_config",
+ "ironclaw_reborn_http_kit",
+ "ironclaw_secrets",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "url",
  "uuid",
 ]
 
@@ -5126,6 +5212,86 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_reborn_product_auth"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "http 1.4.1",
+ "http-body-util",
+ "ironclaw_auth",
+ "ironclaw_capabilities",
+ "ironclaw_common",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_secrets",
+ "ironclaw_turns",
+ "lru 0.16.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_reborn_slack_host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "hmac 0.12.1",
+ "http 1.4.1",
+ "http-body-util",
+ "ironclaw_auth",
+ "ironclaw_authorization",
+ "ironclaw_conversations",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_network",
+ "ironclaw_outbound",
+ "ironclaw_processes",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_product_workflow_storage",
+ "ironclaw_reborn_http_kit",
+ "ironclaw_reborn_product_auth",
+ "ironclaw_resources",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "ironclaw_slack_v2_adapter",
+ "ironclaw_threads",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "rand 0.8.6",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "url",
 ]
 
 [[package]]

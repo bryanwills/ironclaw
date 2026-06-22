@@ -5,9 +5,10 @@ use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, StaticConnectableChannelsProductFacade,
 };
+use ironclaw_reborn_slack_host::SlackHostBetaMounts;
 
 use crate::{
-    RebornBuildError, RebornRuntime, RebornWebuiBundle, SlackHostBetaMounts,
+    RebornBuildError, RebornRuntime, RebornWebuiBundle,
     webui::build_webui_services_with_connectable_channels,
 };
 

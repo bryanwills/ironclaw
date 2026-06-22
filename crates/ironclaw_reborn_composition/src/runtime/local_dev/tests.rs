@@ -35,11 +35,11 @@ mod tests {
         },
     };
 
-    use crate::extension_lifecycle_capabilities::{
-        EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
-        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
-    };
     use crate::runtime::local_dev_filesystem_skill_context_source;
+    use ironclaw_reborn_extension_host::{
+        EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID, RebornLocalLifecycleFacade,
+    };
 
     async fn run_context(label: &str) -> LoopRunContext {
         run_context_with_scope(TurnScope::new(
@@ -389,10 +389,8 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
-        )
-        .with_extension_management(extension_management);
+        let facade = RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone())
+            .with_extension_management(extension_management);
         for extension_id in ["gmail", "google-calendar"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
@@ -1550,10 +1548,8 @@ mod tests {
                 .as_ref()
                 .expect("extension management")
                 .clone();
-            let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
-                local_runtime.skill_management.clone(),
-            )
-            .with_extension_management(extension_management);
+            let facade = RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone())
+                .with_extension_management(extension_management);
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
             facade
@@ -1646,10 +1642,8 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
-        )
-        .with_extension_management(extension_management);
+        let facade = RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone())
+            .with_extension_management(extension_management);
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
         facade

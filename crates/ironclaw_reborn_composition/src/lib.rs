@@ -22,133 +22,50 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod approval_test_support;
-mod auth;
-#[cfg(test)]
-mod auth_dcr_tests;
-mod auth_prompt;
 mod automation;
-mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
 mod default_system_prompt;
 mod error;
-mod extension_installation_store;
-mod extension_lifecycle;
-mod extension_lifecycle_capabilities;
+#[cfg(test)]
+mod extension_lifecycle_capabilities_tests;
 mod extension_lifecycle_command;
 mod factory;
-mod google_oauth;
-mod gsuite;
 mod hooks;
 mod input;
 mod lifecycle;
-#[cfg(feature = "root-llm-provider")]
-mod llm_catalog;
-#[cfg(feature = "root-llm-provider")]
-mod llm_config_service;
-#[cfg(feature = "root-llm-provider")]
-mod llm_key_store;
-#[cfg(feature = "root-llm-provider")]
-mod llm_reload;
 mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
-mod manual_token_flow;
-mod mcp;
-mod mcp_discovery;
-#[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
-mod nearai_login_serve;
-mod nearai_mcp;
-mod notion_oauth;
-mod oauth_dcr;
-mod oauth_dcr_protocol;
-mod oauth_gate;
-mod oauth_provider_client;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
 mod outbound_preferences;
-mod product_auth_durable;
-mod product_auth_providers;
-mod product_auth_runtime_credentials;
-#[cfg(feature = "webui-v2-beta")]
-mod product_auth_serve;
 mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
 mod projection;
-pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
-#[cfg(feature = "root-llm-provider")]
-mod provider_admin;
-#[cfg(feature = "root-llm-provider")]
-mod provider_admin_product_command;
-#[cfg(feature = "root-llm-provider")]
-mod provider_repo;
+pub use ironclaw_reborn_product_auth::{AuthChallengeProvider, AuthChallengeView};
 mod readiness;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
-mod slack_actor_identity;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_channel_routes;
-#[cfg(feature = "slack-v2-host-beta")]
 mod slack_connectable_channel;
 #[cfg(feature = "slack-v2-host-beta")]
-mod slack_delivery;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_dm_open;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_egress;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_host_beta;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_host_state;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_outbound_targets;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_pairing_notifier;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing_serve;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_serve;
-#[cfg(feature = "slack-v2-host-beta")]
-pub mod slack_serve;
+mod slack_host;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trigger_poller;
 mod trigger_poller_trusted_submit;
 mod web_access;
 mod webui;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_body_limit;
 mod webui_extension_credentials;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_operator_auth;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_rate_limit;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_route_match;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_serve;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_ws_origin;
 
-pub use auth::{
-    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
-    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
-    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
-    RebornProductAuthServicePorts, RebornProductAuthServices,
-};
 pub use automation::RebornAutomationProductFacade;
 pub use budget::build_default_budget_accountant;
 pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
@@ -160,7 +77,6 @@ pub use extension_lifecycle_command::{
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
-pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use hooks::{
     HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
     HookProjectionRegistry, HooksActivationConfig, MAX_INSTALLED_EXTENSIONS_CONSIDERED,
@@ -168,12 +84,104 @@ pub use hooks::{
     build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
     tenant_extension_root,
 };
-pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
+pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
+};
+pub use ironclaw_reborn_extension_host::{
+    bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
+};
+#[cfg(feature = "webui-v2-beta")]
+pub use ironclaw_reborn_http_kit::{
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
+    RateLimitConfigError, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
+    WebuiServeConfigError, WebuiServeError, WebuiV2App, compose_webui_v2_app,
+};
+#[cfg(feature = "root-llm-provider")]
+pub use ironclaw_reborn_llm_admin::ResolvedRebornLlm;
+#[cfg(feature = "root-llm-provider")]
+pub use ironclaw_reborn_llm_admin::{
+    LlmKeyStore, LlmKeyStoreError, LlmReloadTrigger, RebornLlmCatalogError, RebornLlmConfigService,
+    resolve_against_registry, resolve_llm_selection_against_catalog, resolve_reborn_runtime_llm,
+};
+#[cfg(feature = "root-llm-provider")]
+pub use ironclaw_reborn_llm_admin::{
+    ProviderRepo, ProviderRepoError, RebornModelRoutesState, RebornProviderAdmin,
+    RebornProviderAdminError, RebornProviderAdminProductCommandService, RebornProviderInfo,
+    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
+    RebornProviderWriteOutcome, RebornV1State,
+};
+pub use ironclaw_reborn_product_auth::OAuthClientConfig;
+pub use ironclaw_reborn_product_auth::{
+    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
+    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
+    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
+    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
+    RebornProductAuthServicePorts, RebornProductAuthServices,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
+    SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallengeStore,
+    SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
+    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
+    SlackPersonalBindingPairingService,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
+    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
+    slack_user_identity_provider_user_id,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
+    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
+    slack_events_route_mount,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
+    SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
+    SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
+    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
+    SlackPersonalBindingRouteMount, SlackPersonalBindingRouteState,
+    SlackPersonalBindingStartResponse, slack_personal_binding_route_mount,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
+    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
+    slack_channel_route_admin_route_mount,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
+    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
+    SlackFinalReplyDeliverySettings,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
+    SlackHostBetaConfigInput, SlackHostBetaMounts,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_reborn_slack_host::{
+    SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
+    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
@@ -184,15 +192,6 @@ pub use ironclaw_skills::{
     skill_summary_json as reborn_skill_summary_json,
 };
 pub use ironclaw_triggers::TriggerId;
-#[cfg(feature = "root-llm-provider")]
-pub use llm_catalog::{
-    RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
-    resolve_reborn_runtime_llm,
-};
-#[cfg(feature = "root-llm-provider")]
-pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
-#[cfg(feature = "root-llm-provider")]
-pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions, local_dev_runtime_policy,
     local_dev_yolo_runtime_policy, local_runtime_build_input,
@@ -209,16 +208,6 @@ pub use product_live_adapters::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
-#[cfg(feature = "root-llm-provider")]
-pub use provider_admin::{
-    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
-    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome, RebornV1State,
-};
-#[cfg(feature = "root-llm-provider")]
-pub use provider_admin_product_command::RebornProviderAdminProductCommandService;
-#[cfg(feature = "root-llm-provider")]
-pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
@@ -229,8 +218,6 @@ pub use runtime::{
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
-#[cfg(feature = "root-llm-provider")]
-pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
     RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck, TriggerFireAccessChecker,
@@ -238,78 +225,17 @@ pub use runtime_input::{
 };
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack_actor_identity::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
-    slack_user_identity_provider_user_id,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack_connectable_channel::{
     SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_egress::{
-    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
-    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_host_beta::{
-    SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_route_mount,
-    build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing::{
-    IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
-    SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallengeStore,
-    SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
-    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
-    SlackPersonalBindingPairingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing_serve::{
-    SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
-    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_serve::{
-    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-    SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
-    SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
-    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
-    SlackPersonalBindingStartResponse,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_serve::{
-    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
-    slack_events_route_mount,
+pub use slack_host::{
+    build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
+    build_slack_host_beta_mounts, slack_host_runtime_handles_from_runtime,
 };
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
-pub use webui_rate_limit::RateLimitConfigError;
-#[cfg(feature = "webui-v2-beta")]
-pub use webui_serve::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
-    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
-};
+pub use webui::{webui_v2_app, webui_v2_app_with_lifecycle};
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// [`WebuiServeConfig`] (and any other public type on this crate whose

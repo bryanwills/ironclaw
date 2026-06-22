@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ironclaw_auth::{AuthProductError, CredentialAccountLabel, OAuthClientId, OAuthRedirectUri};
+use ironclaw_auth::CredentialAccountLabel;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 #[cfg(feature = "postgres")]
@@ -16,6 +16,7 @@ use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
 use ironclaw_trust::HostTrustPolicy;
 use ironclaw_turns::TurnRunWakeNotifier;
+#[cfg(feature = "postgres")]
 use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
@@ -25,11 +26,11 @@ use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode}
 
 #[cfg(feature = "postgres")]
 use crate::RebornBuildError;
-use crate::google_oauth::google_provider_spec;
-use crate::notion_oauth::notion_provider_spec;
-use crate::oauth_dcr::OAuthDcrProviderConfig;
-use crate::oauth_provider_client::HostOAuthProviderSpec;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
+use ironclaw_reborn_product_auth::{
+    HostOAuthProviderSpec, OAuthClientConfig, OAuthDcrProviderBackendConfig,
+    OAuthDcrProviderConfig, OAuthProviderBackendConfig, google_provider_spec, notion_provider_spec,
+};
 
 #[cfg(feature = "postgres")]
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
@@ -40,67 +41,6 @@ const DATABASE_SSLMODE_ENV: &str = "DATABASE_SSLMODE";
 #[cfg(feature = "postgres")]
 const ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV: &str =
     "IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT";
-
-/// Composition-time OAuth client metadata.
-///
-/// `RebornBuildInput` owns this seam for product/bootstrap-provided values
-/// until a settings-backed source exists.
-#[derive(Clone)]
-pub struct OAuthClientConfig {
-    pub client_id: OAuthClientId,
-    pub client_secret: Option<SecretString>,
-    pub redirect_uri: OAuthRedirectUri,
-    pub hosted_domain_hint: Option<String>,
-}
-
-impl OAuthClientConfig {
-    pub fn new(
-        client_id: impl Into<String>,
-        redirect_uri: impl Into<String>,
-        client_secret: Option<SecretString>,
-    ) -> Result<Self, AuthProductError> {
-        Ok(Self {
-            client_id: OAuthClientId::new(client_id)?,
-            client_secret,
-            redirect_uri: OAuthRedirectUri::new(redirect_uri)?,
-            hosted_domain_hint: None,
-        })
-    }
-
-    pub fn with_hosted_domain_hint(mut self, hosted_domain_hint: impl Into<String>) -> Self {
-        self.hosted_domain_hint = Some(hosted_domain_hint.into());
-        self
-    }
-}
-
-impl std::fmt::Debug for OAuthClientConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OAuthClientConfig")
-            .field("client_id", &self.client_id.as_str())
-            .field(
-                "client_secret",
-                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field("redirect_uri", &self.redirect_uri)
-            .field(
-                "hosted_domain_hint",
-                &self.hosted_domain_hint.as_ref().map(|_| "[REDACTED]"),
-            )
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct OAuthProviderBackendConfig {
-    pub(crate) spec: HostOAuthProviderSpec,
-    pub(crate) client: OAuthClientConfig,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct OAuthDcrProviderBackendConfig {
-    pub(crate) config: OAuthDcrProviderConfig,
-}
 
 #[derive(Clone, Debug, Default)]
 pub enum RebornRuntimeProcessBinding {
@@ -572,7 +512,7 @@ impl RebornBuildInput {
         if let Some(existing) = self
             .oauth_provider_configs
             .iter_mut()
-            .find(|existing| existing.spec.provider_id == spec.provider_id)
+            .find(|existing| existing.spec.provider_id() == spec.provider_id())
         {
             existing.spec = spec;
             existing.client = client;
@@ -586,7 +526,7 @@ impl RebornBuildInput {
         if let Some(existing) = self
             .oauth_dcr_provider_configs
             .iter_mut()
-            .find(|existing| existing.config.spec.provider_id == config.spec.provider_id)
+            .find(|existing| existing.config.spec.provider_id() == config.spec.provider_id())
         {
             existing.config = config;
             return;
