@@ -61,5 +61,5 @@ pub use service::{
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
     MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
     MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
-    MemoryServiceWriteResponse, NativeMemoryService,
+    MemoryServiceWriteResponse, NativeMemoryService, SeedMemoryDocument,
 };

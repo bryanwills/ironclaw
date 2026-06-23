@@ -18,6 +18,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::{
+    AgentId, CorrelationId, InvocationId, ProjectId, ResourceScope, TenantId, UserId,
+};
 use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted_with_limit};
 use serde_json::{Map, Value, json};
 
@@ -58,9 +61,97 @@ impl std::fmt::Debug for NativeMemoryService {
     }
 }
 
+/// A starting document for [`NativeMemoryService::seed_documents`].
+///
+/// Each seed carries its own tenant/user/agent/project scope plus a memory
+/// document path, content, and optional metadata. Seeds are written through the
+/// real native write pipeline (identical to an agent write), so they are
+/// stored, versioned, prompt-safety-scanned, and chunked/indexed exactly like
+/// any other write — including the fact that an in-memory backend has no
+/// full-text search, so search behavior is unchanged.
+#[derive(Debug, Clone)]
+pub struct SeedMemoryDocument {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub agent_id: Option<String>,
+    pub project_id: Option<String>,
+    /// Relative memory document path (e.g. `MEMORY.md`, `notes/alpha.md`).
+    /// Validated by the native write path identically to an agent write.
+    pub path: String,
+    pub content: String,
+    pub metadata: Option<DocumentMetadata>,
+}
+
+impl SeedMemoryDocument {
+    pub fn new(
+        tenant_id: impl Into<String>,
+        user_id: impl Into<String>,
+        path: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            user_id: user_id.into(),
+            agent_id: None,
+            project_id: None,
+            path: path.into(),
+            content: content.into(),
+            metadata: None,
+        }
+    }
+
+    pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
+        self.agent_id = Some(agent_id.into());
+        self
+    }
+
+    pub fn with_project_id(mut self, project_id: impl Into<String>) -> Self {
+        self.project_id = Some(project_id.into());
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: DocumentMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+}
+
 impl NativeMemoryService {
     pub fn new(backend: Arc<dyn MemoryBackend>) -> Self {
         Self { backend }
+    }
+
+    /// Write a set of starting documents through the real native write path.
+    ///
+    /// Every seed is ingested by calling [`MemoryService::write`] — the exact
+    /// entrypoint an agent write uses — so each document is stored, versioned,
+    /// prompt-safety-scanned, and chunked/indexed identically to an agent
+    /// write. Nothing is special-cased or bypassed: search, capabilities, and
+    /// scope filtering are untouched (an in-memory backend still has no FTS, so
+    /// search remains a no-op for those documents). Each seed's own
+    /// tenant/user/agent/project scope is honored via its [`MemoryInvocation`].
+    pub async fn seed_documents(
+        &self,
+        documents: impl IntoIterator<Item = SeedMemoryDocument>,
+    ) -> Result<(), MemoryServiceError> {
+        for document in documents {
+            let invocation = MemoryInvocation {
+                scope: seed_resource_scope(&document)?,
+                correlation_id: CorrelationId::new(),
+            };
+            let request = MemoryServiceWriteRequest {
+                target: document.path,
+                content: document.content,
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: document.metadata,
+                timezone: None,
+            };
+            self.write(invocation, request).await?;
+        }
+        Ok(())
     }
 
     pub fn from_filesystem(
@@ -470,6 +561,36 @@ fn profile_scope_and_path(
         MemoryDocumentPath::new_with_agent(tenant_id, user_id, None, None, PROFILE_DOCUMENT_PATH)
             .map_err(|_| MemoryServiceError::input())?;
     Ok((scope, path))
+}
+
+/// Build the [`ResourceScope`] for a seed document. Mirrors how the host
+/// resolves an agent's scope: validated tenant/user, optional agent/project,
+/// no mission/thread, and a fresh invocation id. The native write path then
+/// derives the `MemoryDocumentScope` from this exactly as it does for an agent
+/// write (see [`NativeMemoryService::scoped_context`]).
+fn seed_resource_scope(document: &SeedMemoryDocument) -> Result<ResourceScope, MemoryServiceError> {
+    let agent_id = document
+        .agent_id
+        .as_deref()
+        .map(AgentId::new)
+        .transpose()
+        .map_err(|_| MemoryServiceError::input())?;
+    let project_id = document
+        .project_id
+        .as_deref()
+        .map(ProjectId::new)
+        .transpose()
+        .map_err(|_| MemoryServiceError::input())?;
+    Ok(ResourceScope {
+        tenant_id: TenantId::new(document.tenant_id.as_str())
+            .map_err(|_| MemoryServiceError::input())?,
+        user_id: UserId::new(document.user_id.as_str()).map_err(|_| MemoryServiceError::input())?,
+        agent_id,
+        project_id,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    })
 }
 
 fn write_options(metadata_overlay: Option<&DocumentMetadata>) -> MemoryBackendWriteOptions {

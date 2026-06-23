@@ -190,6 +190,14 @@ pub struct RebornBuildInput {
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
     pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+    /// Starting documents to write into the runtime's native memory before it is
+    /// returned. Each seed carries its own scope/path/content/metadata and is
+    /// ingested through the real native write path (identical to an agent
+    /// write), so seeds are stored, versioned, prompt-safety-scanned, and
+    /// chunked/indexed exactly like any other write — search, capabilities, and
+    /// scope filtering are untouched. Empty (the default) writes nothing and is
+    /// byte-identical to today.
+    pub(crate) seed_memory_documents: Vec<ironclaw_memory_native::SeedMemoryDocument>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
     pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
@@ -564,6 +572,26 @@ impl RebornBuildInput {
         self
     }
 
+    /// Provide a set of starting documents to write into the runtime's native
+    /// memory before the runtime is returned.
+    ///
+    /// Each [`SeedMemoryDocument`](ironclaw_memory_native::SeedMemoryDocument)
+    /// carries its own tenant/user/agent/project scope, a memory document path,
+    /// content, and optional metadata. Seeds are ingested through the **real
+    /// native write path** — the same pipeline an agent write uses — so they
+    /// are stored, versioned, prompt-safety-scanned, and chunked/indexed
+    /// identically to agent writes (an in-memory backend still has no full-text
+    /// search, so search behavior is unchanged). This is a general capability
+    /// (tests/demos/migrations), not benchmark-specific. An empty list (the
+    /// default) writes nothing and is byte-identical to today on all paths.
+    pub fn with_seed_memory(
+        mut self,
+        documents: impl IntoIterator<Item = ironclaw_memory_native::SeedMemoryDocument>,
+    ) -> Self {
+        self.seed_memory_documents = documents.into_iter().collect();
+        self
+    }
+
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
         config: crate::nearai_mcp::NearAiMcpBootstrapConfig,
@@ -719,6 +747,7 @@ impl RebornBuildInput {
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),
             nearai_mcp_bootstrap_config: None,
+            seed_memory_documents: Vec::new(),
             turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
         }
     }
@@ -987,5 +1016,26 @@ mod tests {
             RebornBuildInput::disabled("test-owner").with_product_auth_ports(product_auth.clone());
 
         assert!(input.product_auth_ports.is_some());
+    }
+
+    #[test]
+    fn with_seed_memory_records_documents() {
+        let input = RebornBuildInput::disabled("test-owner").with_seed_memory([
+            ironclaw_memory_native::SeedMemoryDocument::new(
+                "tenant",
+                "user",
+                "MEMORY.md",
+                "seed content",
+            ),
+        ]);
+
+        assert_eq!(input.seed_memory_documents.len(), 1);
+        assert_eq!(input.seed_memory_documents[0].path, "MEMORY.md");
+    }
+
+    #[test]
+    fn seed_memory_defaults_to_empty() {
+        let input = RebornBuildInput::disabled("test-owner");
+        assert!(input.seed_memory_documents.is_empty());
     }
 }

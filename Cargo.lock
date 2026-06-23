@@ -5071,6 +5071,7 @@ dependencies = [
  "ironclaw_llm",
  "ironclaw_loop_support",
  "ironclaw_mcp",
+ "ironclaw_memory_native",
  "ironclaw_network",
  "ironclaw_outbound",
  "ironclaw_processes",

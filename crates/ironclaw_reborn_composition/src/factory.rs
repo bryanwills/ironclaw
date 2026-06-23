@@ -819,6 +819,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         nearai_mcp_bootstrap_config,
+        seed_memory_documents,
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
@@ -1309,6 +1310,17 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
     })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
+
+    // Write any caller-provided starting documents into native memory through
+    // the real native write path before the runtime is returned. The runtime's
+    // own lazily-built `NativeMemoryService` reads the same composed filesystem,
+    // so seeds are visible to subsequent reads/tree/search exactly as if an
+    // agent had written them. Empty (the default) is a no-op.
+    seed_native_memory(
+        Arc::clone(&filesystem) as Arc<dyn RootFilesystem>,
+        seed_memory_documents,
+    )
+    .await?;
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
@@ -2868,6 +2880,34 @@ fn production_builtin_extension_registry(
     Ok(registry)
 }
 
+/// Write caller-provided starting documents into native memory over the
+/// composed runtime filesystem, through the real native write path.
+///
+/// Builds a [`NativeMemoryService`](ironclaw_memory_native::NativeMemoryService)
+/// over the same `filesystem` the runtime's memory capability uses (so seeds
+/// persist where subsequent dispatch reads them) and calls `seed_documents`,
+/// which routes every doc through the identical agent-write pipeline. An empty
+/// list is a no-op, keeping default behavior byte-identical. Search,
+/// capabilities, and scope filtering are untouched.
+async fn seed_native_memory(
+    filesystem: Arc<dyn RootFilesystem>,
+    documents: Vec<ironclaw_memory_native::SeedMemoryDocument>,
+) -> Result<(), RebornBuildError> {
+    if documents.is_empty() {
+        return Ok(());
+    }
+    // No prompt-write-safety event sink: seeds are setup, not agent actions, so
+    // they emit no audit events — but the native write pipeline still applies
+    // the same prompt-safety policy scan, versioning, and indexing.
+    let service = ironclaw_memory_native::NativeMemoryService::from_filesystem(filesystem, None);
+    service
+        .seed_documents(documents)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("native memory seed documents could not be written: {error}"),
+        })
+}
+
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
@@ -3094,6 +3134,7 @@ async fn build_production_shaped(
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         nearai_mcp_bootstrap_config: _,
+        seed_memory_documents,
         turn_state_store_limits,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3115,6 +3156,7 @@ async fn build_production_shaped(
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        seed_memory_documents,
         turn_state_store_limits,
     );
 
@@ -3168,6 +3210,7 @@ async fn build_production_shaped(
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
+                seed_memory_documents,
                 scheduler_wake_wiring,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
@@ -3204,6 +3247,7 @@ async fn build_production_shaped(
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
+                seed_memory_documents,
                 scheduler_wake_wiring,
             };
             build_postgres_production(context, pool, url, tls_options, secret_master_key).await
@@ -3239,6 +3283,10 @@ struct RebornProductionBuildContext {
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    /// Starting documents to write into native memory through the real native
+    /// write path before the runtime is returned (see [`seed_native_memory`]).
+    /// Empty is a no-op.
+    seed_memory_documents: Vec<ironclaw_memory_native::SeedMemoryDocument>,
     /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
@@ -3617,6 +3665,7 @@ where
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
+        seed_memory_documents,
         scheduler_wake_wiring,
     } = context;
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
@@ -3814,6 +3863,15 @@ where
     })?;
     let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
+    // Seed native memory through the real native write path over the same
+    // DB-backed filesystem the production memory capability uses. Empty is a
+    // no-op, keeping the default production path byte-identical.
+    seed_native_memory(
+        Arc::clone(&stores.filesystem) as Arc<dyn RootFilesystem>,
+        seed_memory_documents,
+    )
+    .await?;
+
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
 
@@ -3997,10 +4055,11 @@ mod tests {
         TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
-        MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-        RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
-        SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-        TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+        MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+        RuntimeFailureKind, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+        TRIGGER_REMOVE_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -4353,6 +4412,83 @@ mod tests {
         assert_eq!(
             search["results"][0]["path"],
             serde_json::json!("projects/alpha/notes.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_seed_memory_documents_are_readable_through_native_dispatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Seed under the same scope the local-default test execution context
+        // resolves (tenant=default, user=local-dev-test-user, agent=default,
+        // project=bootstrap), so the runtime's real memory dispatch reads it.
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev("local-dev-test-user", dir.path().join("local-dev"))
+                .with_seed_memory([ironclaw_memory_native::SeedMemoryDocument::new(
+                    "default",
+                    "local-dev-test-user",
+                    "projects/seeded/notes.md",
+                    "seeded native memory marker",
+                )
+                .with_agent_id("default")
+                .with_project_id("bootstrap")]),
+        )
+        .await
+        .expect("local-dev services build with seeded memory");
+
+        // The seeded doc is readable through the real native read dispatch.
+        let read = invoke_json(
+            &services,
+            MEMORY_READ_CAPABILITY_ID,
+            memory_context(MEMORY_READ_CAPABILITY_ID),
+            serde_json::json!({"path": "projects/seeded/notes.md"}),
+        )
+        .await
+        .expect("memory_read should return the seeded document");
+        assert_eq!(
+            read["content"],
+            serde_json::json!("seeded native memory marker")
+        );
+
+        // And it shows up in the native tree listing like any agent write.
+        let tree = invoke_json(
+            &services,
+            MEMORY_TREE_CAPABILITY_ID,
+            memory_context(MEMORY_TREE_CAPABILITY_ID),
+            serde_json::json!({"path": "", "depth": 3}),
+        )
+        .await
+        .expect("memory_tree should list the seeded document");
+        assert!(
+            tree.to_string().contains("seeded/"),
+            "memory_tree should include the seeded memory document: {tree}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_default_has_no_seed_documents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No seeds supplied: the memory tree must be empty, proving the default
+        // path is unchanged.
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-test-user",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build without seeds");
+
+        let tree = invoke_json(
+            &services,
+            MEMORY_TREE_CAPABILITY_ID,
+            memory_context(MEMORY_TREE_CAPABILITY_ID),
+            serde_json::json!({"path": "", "depth": 3}),
+        )
+        .await
+        .expect("memory_tree should query an empty /memory root");
+        let entries = tree.get("entries").unwrap_or(&tree);
+        assert_eq!(
+            entries,
+            &serde_json::json!([]),
+            "default (no-seed) memory tree must be empty: {tree}"
         );
     }
 

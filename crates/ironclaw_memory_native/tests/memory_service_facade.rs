@@ -11,7 +11,7 @@ use ironclaw_memory_native::{
 use ironclaw_memory_native::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceProfileSetRequest,
     MemoryServiceReadRequest, MemoryServiceSearchRequest, MemoryServiceTreeRequest,
-    MemoryServiceWriteRequest, NativeMemoryService,
+    MemoryServiceWriteRequest, NativeMemoryService, SeedMemoryDocument,
 };
 use serde_json::{Value, json};
 
@@ -92,6 +92,117 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
         .expect("search through IronClaw memory facade");
     assert_eq!(search.results.len(), 1);
     assert_eq!(search.results[0].path, "notes/alpha.md");
+}
+
+#[tokio::test]
+async fn seed_documents_are_written_through_the_native_path_and_readable() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    service
+        .seed_documents([
+            SeedMemoryDocument::new(
+                "tenant-native-memory",
+                "user-native-memory",
+                "notes/seeded.md",
+                "seeded native IronClaw memory marker",
+            ),
+            SeedMemoryDocument::new(
+                "tenant-native-memory",
+                "user-native-memory",
+                "MEMORY.md",
+                "seeded memory root content",
+            ),
+        ])
+        .await
+        .expect("seeds write through the native path");
+
+    let invocation = invocation();
+
+    // Seeded docs are readable exactly like agent-written docs.
+    let read = service
+        .read(
+            invocation.clone(),
+            MemoryServiceReadRequest {
+                path: "notes/seeded.md".to_string(),
+            },
+        )
+        .await
+        .expect("seeded document is readable");
+    assert_eq!(read.content, "seeded native IronClaw memory marker");
+
+    // And they show up in the native tree listing like any other write.
+    let tree = service
+        .tree(
+            invocation,
+            MemoryServiceTreeRequest {
+                path: String::new(),
+                depth: 2,
+            },
+        )
+        .await
+        .expect("tree lists seeded documents");
+    let serialized = serde_json::to_string(&tree.entries).expect("tree serializes");
+    assert!(serialized.contains("seeded.md"));
+    assert!(serialized.contains("MEMORY.md"));
+}
+
+#[tokio::test]
+async fn seed_documents_honor_per_document_scope() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    // Two seeds under DIFFERENT tenant/user scopes.
+    service
+        .seed_documents([
+            SeedMemoryDocument::new("tenant-a", "user-a", "scoped.md", "content for tenant a"),
+            SeedMemoryDocument::new("tenant-b", "user-b", "scoped.md", "content for tenant b"),
+        ])
+        .await
+        .expect("scoped seeds write through the native path");
+
+    let read_a = service
+        .read(
+            MemoryInvocation {
+                scope: ResourceScope {
+                    tenant_id: TenantId::new("tenant-a").unwrap(),
+                    user_id: UserId::new("user-a").unwrap(),
+                    agent_id: None,
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                },
+                correlation_id: ironclaw_host_api::CorrelationId::new(),
+            },
+            MemoryServiceReadRequest {
+                path: "scoped.md".to_string(),
+            },
+        )
+        .await
+        .expect("tenant-a seed is readable under tenant-a scope");
+    assert_eq!(read_a.content, "content for tenant a");
+
+    // The tenant-a scope must NOT see tenant-b's document path... it sees its own.
+    let read_b = service
+        .read(
+            MemoryInvocation {
+                scope: ResourceScope {
+                    tenant_id: TenantId::new("tenant-b").unwrap(),
+                    user_id: UserId::new("user-b").unwrap(),
+                    agent_id: None,
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                },
+                correlation_id: ironclaw_host_api::CorrelationId::new(),
+            },
+            MemoryServiceReadRequest {
+                path: "scoped.md".to_string(),
+            },
+        )
+        .await
+        .expect("tenant-b seed is readable under tenant-b scope");
+    assert_eq!(read_b.content, "content for tenant b");
 }
 
 #[tokio::test]
