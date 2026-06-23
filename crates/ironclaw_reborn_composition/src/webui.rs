@@ -238,10 +238,15 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
     if let Some(local_runtime) = &services.local_runtime {
+        #[cfg(feature = "root-llm-provider")]
+        let webui_boot_config = runtime.webui_boot_config();
+        #[cfg(not(feature = "root-llm-provider"))]
+        let webui_boot_config = None;
         api = api.with_operator_service_lifecycle_service(Arc::new(
-            crate::operator_service_lifecycle::RebornLocalServiceLifecycle::new_for_operator(
+            crate::operator_service_lifecycle::RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
                 local_runtime.owner_user_id.clone(),
+                webui_boot_config,
             ),
         ));
     }

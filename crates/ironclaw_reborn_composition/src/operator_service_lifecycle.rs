@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -83,7 +83,8 @@ impl ServiceCommandRunner for SystemCommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, ServiceCommandError> {
         let mut child = Command::new(program)
             .args(args)
-            .stdout(std::process::Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(ServiceCommandError::Start)?;
         let started = Instant::now();
@@ -160,7 +161,9 @@ struct OperatorIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WebuiBootEnv {
+    token_env_name: String,
     token: String,
+    user_id_env_name: String,
     user_id: String,
 }
 
@@ -191,13 +194,17 @@ impl RebornLocalServiceLifecycle {
         }
     }
 
-    pub(crate) fn new_for_operator(operator_tenant_id: TenantId, operator_user_id: UserId) -> Self {
+    pub(crate) fn new_for_operator_with_boot_config(
+        operator_tenant_id: TenantId,
+        operator_user_id: UserId,
+        boot: Option<&ironclaw_reborn_config::RebornBootConfig>,
+    ) -> Self {
         Self {
             platform: ServicePlatform::current(),
             home_dir: std::env::var_os("HOME").map(PathBuf::from),
             executable: std::env::current_exe()
                 .map_err(|error| format!("current executable path could not be resolved: {error}")),
-            webui_boot_env: webui_boot_env_from_env(),
+            webui_boot_env: webui_boot_env_from_env_for_boot_config(boot),
             operator_identity: Some(OperatorIdentity {
                 tenant_id: operator_tenant_id,
                 user_id: operator_user_id,
@@ -219,7 +226,9 @@ impl RebornLocalServiceLifecycle {
             home_dir,
             executable: Ok(executable),
             webui_boot_env: Ok(WebuiBootEnv {
+                token_env_name: WEBUI_TOKEN_ENV.to_string(),
                 token: "test-webui-token".to_string(),
+                user_id_env_name: WEBUI_USER_ID_ENV.to_string(),
                 user_id: "user-test".to_string(),
             }),
             operator_identity: Some(test_operator_identity()),
@@ -240,7 +249,9 @@ impl RebornLocalServiceLifecycle {
             home_dir,
             executable: Err(executable_error),
             webui_boot_env: Ok(WebuiBootEnv {
+                token_env_name: WEBUI_TOKEN_ENV.to_string(),
                 token: "test-webui-token".to_string(),
+                user_id_env_name: WEBUI_USER_ID_ENV.to_string(),
                 user_id: "user-test".to_string(),
             }),
             operator_identity: Some(test_operator_identity()),
@@ -258,6 +269,23 @@ impl RebornLocalServiceLifecycle {
     #[cfg(test)]
     fn with_webui_boot_env_error(mut self, error: &str) -> Self {
         self.webui_boot_env = Err(error.to_string());
+        self
+    }
+
+    #[cfg(test)]
+    fn with_webui_boot_env(
+        mut self,
+        token_env_name: &str,
+        token: &str,
+        user_id_env_name: &str,
+        user_id: &str,
+    ) -> Self {
+        self.webui_boot_env = Ok(WebuiBootEnv {
+            token_env_name: token_env_name.to_string(),
+            token: token.to_string(),
+            user_id_env_name: user_id_env_name.to_string(),
+            user_id: user_id.to_string(),
+        });
         self
     }
 
@@ -439,19 +467,15 @@ impl RebornLocalServiceLifecycle {
                     Err(response) => return response,
                 };
                 let path = path.to_string_lossy().to_string();
-                if !self
-                    .runner
-                    .run("launchctl", &["stop", LAUNCHD_LABEL])
-                    .is_ok_and(|output| output.success)
+                if let Err(response) =
+                    self.require_command_success(action, "launchctl", &["stop", LAUNCHD_LABEL])
                 {
-                    return Self::failed_response(action, "local service manager command failed");
+                    return response;
                 }
-                if !self
-                    .runner
-                    .run("launchctl", &["unload", "-w", &path])
-                    .is_ok_and(|output| output.success)
+                if let Err(response) =
+                    self.require_command_success(action, "launchctl", &["unload", "-w", &path])
                 {
-                    return Self::failed_response(action, "local service manager command failed");
+                    return response;
                 }
                 RebornServiceLifecycleResponse {
                     action,
@@ -494,29 +518,27 @@ impl RebornLocalServiceLifecycle {
                         RebornServiceLifecycleState::Unknown,
                         "local Reborn service state is unknown",
                     ),
-                    Err(_) => Self::failed_response(
-                        action,
-                        "local service manager status could not be queried",
-                    ),
+                    Err(error) => Self::status_query_failed_response(action, error),
                 }
             }
             ServicePlatform::Macos => {
                 let output = self.runner.run("launchctl", &["list"]);
                 match output {
-                    Ok(output) if launchd_status_is_running(output.stdout_text().as_ref()) => {
-                        Self::status_response(
+                    Ok(output) => match launchd_status(output.stdout_text().as_ref()) {
+                        LaunchdStatus::Running => Self::status_response(
                             RebornServiceLifecycleState::Running,
                             "local Reborn service is running",
-                        )
-                    }
-                    Ok(_) => Self::status_response(
-                        RebornServiceLifecycleState::Stopped,
-                        "local Reborn service is stopped",
-                    ),
-                    Err(_) => Self::failed_response(
-                        action,
-                        "local service manager status could not be queried",
-                    ),
+                        ),
+                        LaunchdStatus::Stopped => Self::status_response(
+                            RebornServiceLifecycleState::Stopped,
+                            "local Reborn service is stopped",
+                        ),
+                        LaunchdStatus::Failed => Self::status_response(
+                            RebornServiceLifecycleState::Failed,
+                            "local Reborn service is failed",
+                        ),
+                    },
+                    Err(error) => Self::status_query_failed_response(action, error),
                 }
             }
             ServicePlatform::Unsupported => Self::unsupported_response(action),
@@ -543,20 +565,54 @@ impl RebornLocalServiceLifecycle {
         success_state: RebornServiceLifecycleState,
         success_message: &str,
     ) -> RebornServiceLifecycleResponse {
-        match self.runner.run(program, args) {
-            Ok(output) if output.success => RebornServiceLifecycleResponse {
+        match self.require_command_success(action, program, args) {
+            Ok(()) => RebornServiceLifecycleResponse {
                 action,
                 state: success_state,
                 message: success_message.to_string(),
                 remediation: None,
             },
-            Ok(_) => Self::failed_response(action, "local service manager command failed"),
-            Err(ServiceCommandError::Timeout) => {
-                Self::failed_response(action, "local service manager command timed out")
-            }
+            Err(response) => response,
+        }
+    }
+
+    fn require_command_success(
+        &self,
+        action: RebornServiceLifecycleAction,
+        program: &str,
+        args: &[&str],
+    ) -> Result<(), RebornServiceLifecycleResponse> {
+        match self.runner.run(program, args) {
+            Ok(output) if output.success => Ok(()),
+            Ok(_) => Err(Self::failed_response(
+                action,
+                "local service manager command failed",
+            )),
+            Err(ServiceCommandError::Timeout) => Err(Self::failed_response(
+                action,
+                "local service manager command timed out",
+            )),
             Err(error) => {
                 tracing::debug!(%error, "service manager command failed");
-                Self::failed_response(action, "local service manager command failed")
+                Err(Self::failed_response(
+                    action,
+                    "local service manager command failed",
+                ))
+            }
+        }
+    }
+
+    fn status_query_failed_response(
+        action: RebornServiceLifecycleAction,
+        error: ServiceCommandError,
+    ) -> RebornServiceLifecycleResponse {
+        match error {
+            ServiceCommandError::Timeout => {
+                Self::failed_response(action, "local service manager command timed out")
+            }
+            error => {
+                tracing::debug!(%error, "service manager status query failed");
+                Self::failed_response(action, "local service manager status could not be queried")
             }
         }
     }
@@ -568,7 +624,9 @@ impl RebornLocalServiceLifecycle {
         let executable = self.executable_path_for_action(action)?;
         let boot_env = self.webui_boot_env_for_action(action)?;
         let exe = systemd_escape(executable.to_string_lossy().as_ref());
+        let token_env_name = systemd_escape(&boot_env.token_env_name);
         let token = systemd_escape(&boot_env.token);
+        let user_id_env_name = systemd_escape(&boot_env.user_id_env_name);
         let user_id = systemd_escape(&boot_env.user_id);
         Ok(format!(
             "[Unit]\n\
@@ -577,8 +635,8 @@ impl RebornLocalServiceLifecycle {
              \n\
              [Service]\n\
              Type=simple\n\
-             Environment=\"{WEBUI_TOKEN_ENV}={token}\"\n\
-             Environment=\"{WEBUI_USER_ID_ENV}={user_id}\"\n\
+             Environment=\"{token_env_name}={token}\"\n\
+             Environment=\"{user_id_env_name}={user_id}\"\n\
              ExecStart=\"{exe}\" serve\n\
              Restart=always\n\
              RestartSec=3\n\
@@ -595,7 +653,9 @@ impl RebornLocalServiceLifecycle {
         let executable = self.executable_path_for_action(action)?;
         let boot_env = self.webui_boot_env_for_action(action)?;
         let exe = xml_escape(executable.to_string_lossy().as_ref());
+        let token_env_name = xml_escape(&boot_env.token_env_name);
         let token = xml_escape(&boot_env.token);
+        let user_id_env_name = xml_escape(&boot_env.user_id_env_name);
         let user_id = xml_escape(&boot_env.user_id);
         Ok(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -611,9 +671,9 @@ impl RebornLocalServiceLifecycle {
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>{WEBUI_TOKEN_ENV}</key>
+    <key>{token_env_name}</key>
     <string>{token}</string>
-    <key>{WEBUI_USER_ID_ENV}</key>
+    <key>{user_id_env_name}</key>
     <string>{user_id}</string>
   </dict>
   <key>RunAtLoad</key>
@@ -693,20 +753,35 @@ fn systemd_escape(value: &str) -> String {
         .replace('$', "$$")
 }
 
-fn launchd_status_is_running(stdout: &str) -> bool {
-    stdout.lines().any(|line| {
-        let mut columns = line.split_whitespace();
-        let Some(pid) = columns.next() else {
-            return false;
-        };
-        let Some(_status) = columns.next() else {
-            return false;
-        };
-        let Some(label) = columns.next() else {
-            return false;
-        };
-        label == LAUNCHD_LABEL && pid.parse::<i32>().is_ok()
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchdStatus {
+    Running,
+    Stopped,
+    Failed,
+}
+
+fn launchd_status(stdout: &str) -> LaunchdStatus {
+    stdout
+        .lines()
+        .find_map(|line| {
+            launchd_status_from_line(line).filter(|(_, label)| label == &LAUNCHD_LABEL)
+        })
+        .map_or(LaunchdStatus::Stopped, |(status, _)| status)
+}
+
+fn launchd_status_from_line(line: &str) -> Option<(LaunchdStatus, &str)> {
+    let mut columns = line.split_whitespace();
+    let pid = columns.next()?;
+    let exit_status = columns.next()?;
+    let label = columns.next()?;
+    let status = if pid.parse::<i32>().is_ok() {
+        LaunchdStatus::Running
+    } else if exit_status.parse::<i32>().is_ok_and(|status| status != 0) {
+        LaunchdStatus::Failed
+    } else {
+        LaunchdStatus::Stopped
+    };
+    Some((status, label))
 }
 
 fn xml_escape(raw: &str) -> String {
@@ -718,9 +793,61 @@ fn xml_escape(raw: &str) -> String {
 }
 
 fn webui_boot_env_from_env() -> Result<WebuiBootEnv, String> {
-    let token = required_env(WEBUI_TOKEN_ENV)?;
-    let user_id = required_env(WEBUI_USER_ID_ENV)?;
-    Ok(WebuiBootEnv { token, user_id })
+    webui_boot_env_from_env_names(WebuiEnvNames::default())
+}
+
+fn webui_boot_env_from_env_for_boot_config(
+    boot: Option<&ironclaw_reborn_config::RebornBootConfig>,
+) -> Result<WebuiBootEnv, String> {
+    webui_env_names_for_boot_config(boot).and_then(webui_boot_env_from_env_names)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebuiEnvNames {
+    token: String,
+    user_id: String,
+}
+
+impl Default for WebuiEnvNames {
+    fn default() -> Self {
+        Self {
+            token: WEBUI_TOKEN_ENV.to_string(),
+            user_id: WEBUI_USER_ID_ENV.to_string(),
+        }
+    }
+}
+
+fn webui_env_names_for_boot_config(
+    boot: Option<&ironclaw_reborn_config::RebornBootConfig>,
+) -> Result<WebuiEnvNames, String> {
+    let Some(boot) = boot else {
+        return Ok(WebuiEnvNames::default());
+    };
+    let config_path = boot.home().config_file_path();
+    let config = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+        .map_err(|error| format!("Reborn config file could not be loaded: {error}"))?;
+    let Some(webui) = config.and_then(|config| config.webui) else {
+        return Ok(WebuiEnvNames::default());
+    };
+    Ok(WebuiEnvNames {
+        token: webui
+            .env_token_var
+            .unwrap_or_else(|| WEBUI_TOKEN_ENV.to_string()),
+        user_id: webui
+            .env_user_id_var
+            .unwrap_or_else(|| WEBUI_USER_ID_ENV.to_string()),
+    })
+}
+
+fn webui_boot_env_from_env_names(names: WebuiEnvNames) -> Result<WebuiBootEnv, String> {
+    let token = required_env(&names.token)?;
+    let user_id = required_env(&names.user_id)?;
+    Ok(WebuiBootEnv {
+        token_env_name: names.token,
+        token,
+        user_id_env_name: names.user_id,
+        user_id,
+    })
 }
 
 fn required_env(name: &str) -> Result<String, String> {
@@ -823,7 +950,7 @@ mod tests {
             }
             let reports_status = (program == "systemctl"
                 && args.ends_with(&["is-active", SYSTEMD_UNIT]))
-                || (program == "launchctl" && args == ["list"]);
+                || (program == "launchctl" && args == &["list"]);
             let stdout = if reports_status {
                 self.status_stdout.lock().expect("lock").as_bytes().to_vec()
             } else {
@@ -905,6 +1032,62 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn linux_install_uses_custom_webui_env_names() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new("inactive"));
+        let service = linux_service(&temp, runner).with_webui_boot_env(
+            "CUSTOM_WEBUI_TOKEN",
+            "test-webui-token",
+            "CUSTOM_WEBUI_USER_ID",
+            "user-test",
+        );
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Install,
+                },
+            )
+            .await
+            .expect("install response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Installed);
+        let unit_path = temp.path().join(".config/systemd/user").join(SYSTEMD_UNIT);
+        let unit = std::fs::read_to_string(unit_path).expect("unit file");
+        assert!(unit.contains("Environment=\"CUSTOM_WEBUI_TOKEN=test-webui-token\""));
+        assert!(unit.contains("Environment=\"CUSTOM_WEBUI_USER_ID=user-test\""));
+        assert!(!unit.contains(WEBUI_TOKEN_ENV));
+        assert!(!unit.contains(WEBUI_USER_ID_ENV));
+    }
+
+    #[test]
+    fn webui_env_names_follow_reborn_config_file() {
+        let temp = TempDir::new().expect("tempdir");
+        std::fs::write(
+            temp.path().join("config.toml"),
+            r#"
+[webui]
+env_token_var = "CUSTOM_WEBUI_TOKEN"
+env_user_id_var = "CUSTOM_WEBUI_USER_ID"
+"#,
+        )
+        .expect("config file");
+        let boot = ironclaw_reborn_config::RebornBootConfig::resolve_from_env_parts(
+            Some(temp.path().as_os_str().to_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let names = webui_env_names_for_boot_config(Some(&boot)).expect("env names");
+
+        assert_eq!(names.token, "CUSTOM_WEBUI_TOKEN");
+        assert_eq!(names.user_id, "CUSTOM_WEBUI_USER_ID");
     }
 
     #[tokio::test]
@@ -1186,6 +1369,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn macos_install_uses_custom_webui_env_names() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new(""));
+        let service = macos_service(&temp, runner).with_webui_boot_env(
+            "CUSTOM_WEBUI_TOKEN",
+            "test-webui-token",
+            "CUSTOM_WEBUI_USER_ID",
+            "user-test",
+        );
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Install,
+                },
+            )
+            .await
+            .expect("install response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Installed);
+        let plist_path = temp
+            .path()
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{LAUNCHD_LABEL}.plist"));
+        let plist = std::fs::read_to_string(plist_path).expect("plist file");
+        assert!(plist.contains("<key>CUSTOM_WEBUI_TOKEN</key>"));
+        assert!(plist.contains("<key>CUSTOM_WEBUI_USER_ID</key>"));
+        assert!(!plist.contains(WEBUI_TOKEN_ENV));
+        assert!(!plist.contains(WEBUI_USER_ID_ENV));
+    }
+
+    #[tokio::test]
     async fn macos_stop_failure_returns_failed_state() {
         let temp = TempDir::new().expect("tempdir");
         let runner = Arc::new(RecordingRunner::new(""));
@@ -1206,6 +1423,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn macos_stop_timeout_returns_timeout_failed_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new(""));
+        runner.timeout_command("launchctl", &["stop", LAUNCHD_LABEL]);
+        let service = macos_service(&temp, runner);
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Stop,
+                },
+            )
+            .await
+            .expect("stop response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Failed);
+        assert_eq!(response.message, "local service manager command timed out");
+    }
+
+    #[tokio::test]
     async fn macos_status_requires_numeric_pid_for_running_state() {
         let temp = TempDir::new().expect("tempdir");
         let runner = Arc::new(RecordingRunner::new(&format!("-\t0\t{LAUNCHD_LABEL}\n")));
@@ -1222,6 +1460,46 @@ mod tests {
             .expect("status response");
 
         assert_eq!(response.state, RebornServiceLifecycleState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn macos_status_maps_nonzero_launchd_exit_to_failed() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new(&format!("-\t78\t{LAUNCHD_LABEL}\n")));
+        let service = macos_service(&temp, runner);
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Status,
+                },
+            )
+            .await
+            .expect("status response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Failed);
+    }
+
+    #[tokio::test]
+    async fn macos_status_timeout_returns_timeout_failed_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new(""));
+        runner.timeout_command("launchctl", &["list"]);
+        let service = macos_service(&temp, runner);
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Status,
+                },
+            )
+            .await
+            .expect("status response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Failed);
+        assert_eq!(response.message, "local service manager command timed out");
     }
 
     #[tokio::test]
