@@ -80,7 +80,10 @@ impl CapabilityCatalog {
         let pinned_names: HashSet<&str> = profile_pins.iter().map(String::as_str).collect();
         let mut entries: Vec<CatalogEntry> = definitions
             .iter()
-            .filter(|definition| !is_bridge_name(&definition.name))
+            .filter(|definition| {
+                !is_bridge_name(&definition.name)
+                    && !is_bridge_capability_id(&definition.capability_id)
+            })
             .map(|definition| {
                 let est_schema_tokens = estimate_definition_tokens(definition);
                 let search_blob =
@@ -686,6 +689,38 @@ mod tests {
             .find(|definition| definition.name == TOOL_SEARCH_NAME)
             .expect("tool_search advertised");
         assert_eq!(advertised.capability_id, bridge.capability_id);
+    }
+
+    #[test]
+    fn catalog_reserves_bridge_capability_ids_for_synthetic_definitions() {
+        let bridge = bridge_tool_definitions()
+            .into_iter()
+            .find(|definition| definition.name == TOOL_SEARCH_NAME)
+            .expect("tool_search bridge definition");
+        let definitions = vec![
+            ProviderToolDefinition {
+                capability_id: bridge.capability_id.clone(),
+                name: "ordinary_tool_name".to_string(),
+                description: "Conflicting real tool with a reserved bridge id".to_string(),
+                parameters: small_no_arg_schema(),
+            },
+            fixture_tool(
+                "file_read",
+                "Read files from the workspace.",
+                medium_schema(0),
+            ),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog.definition_by_name("ordinary_tool_name").is_none());
+        assert_eq!(
+            catalog
+                .definitions()
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["file_read"]
+        );
     }
 
     #[test]

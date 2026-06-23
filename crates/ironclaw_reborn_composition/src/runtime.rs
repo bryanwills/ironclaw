@@ -65,7 +65,8 @@ use ironclaw_reborn::milestone_events::{
 };
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    RuntimeSubagentGoalStore, RuntimeTurnStateStore, build_default_planned_runtime,
+    RuntimeSubagentGoalStore, RuntimeTurnStateStore, ToolDisclosureMode,
+    build_default_planned_runtime,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
@@ -2309,6 +2310,7 @@ pub async fn build_reborn_runtime(
         #[cfg(feature = "root-llm-provider")]
         boot,
         runner,
+        tool_disclosure,
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
@@ -2896,7 +2898,9 @@ pub async fn build_reborn_runtime(
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
-            ..DefaultPlannedRuntimeConfig::default()
+            text_only_driver: Default::default(),
+            host: Default::default(),
+            tool_disclosure: tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env),
         },
         model_route_resolver: None,
         cancellation_factory: None,

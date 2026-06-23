@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, InvocationId};
+use ironclaw_host_api::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId};
 use ironclaw_loop_support::{
     CapabilityResultWrite, LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
 };
@@ -93,20 +93,20 @@ struct BridgeInvocation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PromotionScopeKey {
-    tenant_id: String,
-    agent_id: Option<String>,
-    project_id: Option<String>,
-    thread_id: String,
+    tenant_id: TenantId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    thread_id: ThreadId,
 }
 
 impl PromotionScopeKey {
     fn from_run_context(run_context: &LoopRunContext) -> Self {
         let scope = &run_context.scope;
         Self {
-            tenant_id: scope.tenant_id.as_str().to_string(),
-            agent_id: scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
-            project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
-            thread_id: scope.thread_id.as_str().to_string(),
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
         }
     }
 }
@@ -224,7 +224,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             .collect();
         surface.descriptors.retain(|descriptor| {
             active_or_disclosed_ids.contains(&descriptor.capability_id)
-                || is_bridge_capability_id(&descriptor.capability_id)
+                && !is_bridge_capability_id(&descriptor.capability_id)
         });
         let mut advertised_ids: BTreeSet<CapabilityId> = surface
             .descriptors
