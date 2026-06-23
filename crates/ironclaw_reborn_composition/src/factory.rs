@@ -324,6 +324,32 @@ where
         })
 }
 
+fn attach_runtime_credential_unauthorized_recovery<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+    credential_accounts: Arc<dyn ironclaw_auth::CredentialAccountService>,
+) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    let runtime_http_egress =
+        services
+            .runtime_http_egress()
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason:
+                    "runtime HTTP egress unavailable for credential unauthorized recovery consumer"
+                        .to_string(),
+            })?;
+    Ok(services.with_runtime_http_egress(Arc::new(
+        crate::runtime_credential_unauthorized::RuntimeCredentialUnauthorizedRecoveryEgress::new(
+            runtime_http_egress,
+            credential_accounts,
+        ),
+    )))
+}
+
 fn attach_hosted_mcp_runtime<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
 ) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
@@ -1197,6 +1223,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
         }
     };
+    services = attach_runtime_credential_unauthorized_recovery(
+        services,
+        product_auth.credential_account_service(),
+    )?;
     services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
             product_auth.runtime_credential_account_selection_service(),
@@ -3790,6 +3820,10 @@ where
         None => CredentialRefreshWorkerReady::Absent,
     };
     let product_auth_ready = true;
+    let services = attach_runtime_credential_unauthorized_recovery(
+        services,
+        product_auth_services.credential_account_service(),
+    )?;
     // Wire ProductAuthAccount runtime credential resolver before
     // host_runtime_for_production so WASM extensions whose manifest declares a
     // ProductAuthAccount runtime credential source resolve through

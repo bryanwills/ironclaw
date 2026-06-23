@@ -138,6 +138,7 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
         request_bytes: 5,
         response_bytes: 0,
         redaction_applied: false,
+        credential_unauthorized: None,
     }));
     let wasm_http = Arc::new(
         WasmRuntimeHttpAdapter::new(
@@ -470,6 +471,7 @@ async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
         request_bytes: 5,
         response_bytes: 0,
         redaction_applied: false,
+        credential_unauthorized: None,
     }));
     let wasm_http = Arc::new(
         WasmRuntimeHttpAdapter::new(

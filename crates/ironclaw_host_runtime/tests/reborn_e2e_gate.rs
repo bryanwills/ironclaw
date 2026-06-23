@@ -596,6 +596,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
                 prefix: Some("Bearer ".to_string()),
             },
             required: true,
+            credential_account: None,
         }],
         response_body_limit: Some(4096),
         save_body_to: None,

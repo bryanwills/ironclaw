@@ -94,6 +94,7 @@ mod tests {
                 body,
                 saved_body: None,
                 redaction_applied: false,
+                credential_unauthorized: None,
             })
         }
     }

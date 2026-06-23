@@ -1351,6 +1351,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                 request_bytes: request.body.len() as u64,
                 response_bytes: 24,
                 redaction_applied: false,
+                credential_unauthorized: None,
             });
         }
         match method.as_str() {
@@ -1380,6 +1381,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                 request_bytes: request.body.len() as u64,
                 response_bytes: 0,
                 redaction_applied: false,
+                credential_unauthorized: None,
             }),
             "tools/call" => {
                 let id = json_rpc_id(&request.body);
@@ -1553,6 +1555,7 @@ fn runtime_json_response(
         saved_body: None,
         request_bytes: 0,
         redaction_applied: false,
+        credential_unauthorized: None,
     }
 }
 
@@ -1571,6 +1574,7 @@ fn runtime_sse_response(id: Option<u64>, result: serde_json::Value) -> RuntimeHt
         saved_body: None,
         request_bytes: 0,
         redaction_applied: false,
+        credential_unauthorized: None,
     }
 }
 
@@ -1620,6 +1624,7 @@ impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
                 request_bytes: request.body.len() as u64,
                 response_bytes: 0,
                 redaction_applied: false,
+                credential_unauthorized: None,
             }),
             "tools/call" => Ok(runtime_json_response(
                 json_rpc_id(&request.body),
@@ -1674,6 +1679,7 @@ impl RuntimeHttpEgress for RotatingSessionRuntimeEgress {
                 request_bytes: request.body.len() as u64,
                 response_bytes: 0,
                 redaction_applied: false,
+                credential_unauthorized: None,
             }),
             "tools/call" => Ok(runtime_json_response(
                 json_rpc_id(&request.body),
@@ -1737,6 +1743,7 @@ impl RuntimeHttpEgress for MissingIdRuntimeEgress {
                 request_bytes: request.body.len() as u64,
                 response_bytes: 0,
                 redaction_applied: false,
+                credential_unauthorized: None,
             }),
             "tools/call" => Ok(runtime_json_response(
                 None,
@@ -1791,6 +1798,7 @@ impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
                         request_bytes: request.body.len() as u64,
                         response_bytes: "server error".len() as u64,
                         redaction_applied: false,
+                        credential_unauthorized: None,
                     });
                 }
                 Ok(runtime_json_response(
@@ -1811,6 +1819,7 @@ impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
                 request_bytes: request.body.len() as u64,
                 response_bytes: 0,
                 redaction_applied: false,
+                credential_unauthorized: None,
             }),
             "tools/call" => Ok(runtime_json_response(
                 json_rpc_id(&request.body),

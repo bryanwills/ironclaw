@@ -5,8 +5,8 @@ mod sanitize;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, NetworkPolicy, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    CapabilityId, NetworkPolicy, ResourceScope, RuntimeCredentialUnauthorized, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
 };
 use ironclaw_network::{NetworkHttpEgress, NetworkHttpError};
 use ironclaw_safety::LeakDetector;
@@ -300,5 +300,15 @@ pub(super) fn runtime_response(
         request_bytes: response.usage.request_bytes,
         response_bytes: response.usage.response_bytes,
         redaction_applied,
+        credential_unauthorized: None,
+    }
+}
+
+pub(super) fn attach_credential_unauthorized_on_401(
+    response: &mut RuntimeHttpEgressResponse,
+    marker: Option<RuntimeCredentialUnauthorized>,
+) {
+    if response.status == 401 && response.credential_unauthorized.is_none() {
+        response.credential_unauthorized = marker;
     }
 }

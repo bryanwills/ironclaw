@@ -528,6 +528,94 @@ async fn provider_backed_refresh_preserves_requester_for_authorized_extensions()
 }
 
 #[tokio::test]
+async fn provider_backed_refresh_if_unchanged_refreshes_authorized_extension_account() {
+    let services = Arc::new(InMemoryAuthProductServices::new());
+    let auth = provider_backed_auth(services.clone());
+    let owner = scope("alice");
+    let extension = ExtensionId::new("github-refresh-extension").unwrap();
+    let old_access = SecretHandle::new("github-refresh-if-unchanged-access").unwrap();
+    let account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("extension owned"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(extension.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(old_access.clone()),
+            refresh_secret: Some(SecretHandle::new("github-refresh-if-unchanged-refresh").unwrap()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("extension-owned account");
+
+    let report = auth
+        .refresh_if_unchanged(
+            CredentialRefreshRequest::new(owner.clone(), provider(), account.id)
+                .for_extension(extension.clone()),
+            account.updated_at,
+        )
+        .await
+        .expect("conditional refresh")
+        .expect("fresh marker should refresh account");
+
+    assert!(report.refreshed);
+    let stored = auth
+        .get_account(
+            CredentialAccountLookupRequest::new(owner, account.id).for_extension(extension),
+        )
+        .await
+        .expect("lookup")
+        .expect("refreshed account");
+    assert_eq!(stored.status, CredentialAccountStatus::Configured);
+    assert_ne!(stored.access_secret, Some(old_access));
+}
+
+#[tokio::test]
+async fn provider_backed_refresh_if_unchanged_skips_stale_marker() {
+    let services = Arc::new(InMemoryAuthProductServices::new());
+    let auth = provider_backed_auth(services.clone());
+    let owner = scope("alice");
+    let old_access = SecretHandle::new("github-stale-marker-access").unwrap();
+    let account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("stale marker"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(old_access.clone()),
+            refresh_secret: Some(SecretHandle::new("github-stale-marker-refresh").unwrap()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("configured account");
+    auth.update_status(&owner, account.id, CredentialAccountStatus::Expired)
+        .await
+        .expect("touch account after marker staging");
+
+    let report = auth
+        .refresh_if_unchanged(
+            CredentialRefreshRequest::new(owner.clone(), provider(), account.id),
+            account.updated_at,
+        )
+        .await
+        .expect("conditional refresh");
+
+    assert_eq!(report, None);
+    let stored = auth
+        .get_account(CredentialAccountLookupRequest::new(owner, account.id))
+        .await
+        .expect("lookup")
+        .expect("stale account");
+    assert_eq!(stored.status, CredentialAccountStatus::Expired);
+    assert_eq!(stored.access_secret, Some(old_access));
+}
+
+#[tokio::test]
 async fn credential_refresh_rejects_terminal_statuses_even_with_refresh_secret() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");

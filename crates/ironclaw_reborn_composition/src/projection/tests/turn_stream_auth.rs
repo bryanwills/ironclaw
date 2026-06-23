@@ -464,6 +464,7 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
                 body,
                 saved_body: None,
                 redaction_applied: false,
+                credential_unauthorized: None,
             })
         }
     }

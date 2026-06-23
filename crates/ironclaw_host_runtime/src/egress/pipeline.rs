@@ -49,7 +49,7 @@ where
         .map_err(PipelineError::pre_transport)?;
     let scope = request.scope.clone();
     let capability_id = request.capability_id.clone();
-    let redaction_values = super::credential::apply_credential_injections(
+    let credential_result = super::credential::apply_credential_injections(
         service.secrets(),
         service.secret_injections(),
         &mut request,
@@ -61,10 +61,10 @@ where
     } else {
         dispatch_network(service, request, network_policy).await?
     };
-    let credentials_injected = !redaction_values.is_empty();
+    let credentials_injected = !credential_result.redaction_values.is_empty();
     let (response, response_redacted) = super::sanitize::sanitize_runtime_response(
         response,
-        &redaction_values,
+        &credential_result.redaction_values,
         service.leak_detector(),
     )
     .map_err(PipelineError::post_transport)?;
@@ -76,11 +76,16 @@ where
         &capability_id,
     )
     .map_err(PipelineError::post_transport)?;
-    Ok(runtime_response(
+    let mut response = runtime_response(
         response,
         credentials_injected || response_redacted,
         saved_body,
-    ))
+    );
+    super::attach_credential_unauthorized_on_401(
+        &mut response,
+        credential_result.credential_unauthorized,
+    );
+    Ok(response)
 }
 
 fn authorize_body_store<N, S>(

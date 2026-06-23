@@ -8725,6 +8725,7 @@ impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
             saved_body: None,
             request_bytes: request.body.len() as u64,
             redaction_applied: false,
+            credential_unauthorized: None,
         })
     }
 }

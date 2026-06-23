@@ -572,6 +572,29 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         Ok(account.clone())
     }
 
+    async fn revoke_if_unchanged(
+        &self,
+        scope: &crate::AuthProductScope,
+        account_id: CredentialAccountId,
+        expected_updated_at: Timestamp,
+    ) -> Result<Option<CredentialAccount>, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let Some(account) = state.accounts.get_mut(&account_id) else {
+            return Ok(None);
+        };
+        if !scope_matches(scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.updated_at != expected_updated_at {
+            return Ok(None);
+        }
+        validate_credential_status_transition(account.status, CredentialAccountStatus::Revoked)?;
+        account.status = CredentialAccountStatus::Revoked;
+        account.updated_at = now;
+        Ok(Some(account.clone()))
+    }
+
     async fn select_unique_configured_account(
         &self,
         request: CredentialAccountSelectionRequest,

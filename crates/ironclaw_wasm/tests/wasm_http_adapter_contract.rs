@@ -23,6 +23,7 @@ async fn wasm_runtime_http_adapter_uses_shared_runtime_egress() {
         request_bytes: 7,
         response_bytes: 11,
         redaction_applied: false,
+        credential_unauthorized: None,
     });
     let scope = sample_scope();
     let policy = sample_policy();
@@ -83,6 +84,7 @@ async fn wasm_runtime_http_adapter_works_inside_current_thread_runtime() {
         request_bytes: 0,
         response_bytes: 0,
         redaction_applied: false,
+        credential_unauthorized: None,
     });
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(egress.clone()),
@@ -115,6 +117,7 @@ fn wasm_runtime_http_adapter_reuses_worker_runtime_without_active_tokio_runtime(
         request_bytes: 0,
         response_bytes: 0,
         redaction_applied: false,
+        credential_unauthorized: None,
     });
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(egress.clone()),
@@ -172,6 +175,7 @@ async fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
         request_bytes: 0,
         response_bytes: 2,
         redaction_applied: true,
+        credential_unauthorized: None,
     });
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(egress),
@@ -223,6 +227,7 @@ async fn wasm_runtime_http_adapter_combines_duplicate_response_headers() {
         request_bytes: 0,
         response_bytes: 2,
         redaction_applied: false,
+        credential_unauthorized: None,
     });
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(egress),
@@ -261,6 +266,7 @@ async fn wasm_runtime_http_adapter_resolves_credentials_per_request_destination(
         request_bytes: 0,
         response_bytes: 2,
         redaction_applied: true,
+        credential_unauthorized: None,
     });
     let injection = sample_injection();
     let adapter = WasmRuntimeHttpAdapter::new(
@@ -299,6 +305,7 @@ async fn wasm_runtime_http_adapter_does_not_reuse_credentials_for_other_destinat
         request_bytes: 0,
         response_bytes: 2,
         redaction_applied: true,
+        credential_unauthorized: None,
     });
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(egress.clone()),
@@ -336,6 +343,7 @@ async fn wasm_runtime_http_adapter_can_build_staged_obligation_credentials() {
         request_bytes: 0,
         response_bytes: 2,
         redaction_applied: true,
+        credential_unauthorized: None,
     });
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
@@ -391,6 +399,7 @@ async fn wasm_runtime_http_adapter_rejects_invalid_guest_headers_before_egress()
         request_bytes: 0,
         response_bytes: 0,
         redaction_applied: false,
+        credential_unauthorized: None,
     });
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(egress.clone()),
@@ -609,6 +618,7 @@ async fn wasm_runtime_http_adapter_redacts_credential_provider_errors() {
             request_bytes: 0,
             response_bytes: 2,
             redaction_applied: false,
+            credential_unauthorized: None,
         })),
         sample_scope(),
         sample_capability_id(),
@@ -643,6 +653,7 @@ async fn wasm_runtime_http_adapter_discards_staged_policy_on_pre_egress_request_
         request_bytes: 0,
         response_bytes: 2,
         redaction_applied: false,
+        credential_unauthorized: None,
     });
     let discarder = Arc::new(RecordingPolicyDiscarder::default());
     let scope = sample_scope();
@@ -680,6 +691,7 @@ async fn wasm_runtime_http_adapter_discards_staged_policy_on_credential_provider
         request_bytes: 0,
         response_bytes: 2,
         redaction_applied: false,
+        credential_unauthorized: None,
     });
     let discarder = Arc::new(RecordingPolicyDiscarder::default());
     let scope = sample_scope();

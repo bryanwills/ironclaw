@@ -4497,6 +4497,7 @@ impl RuntimeCredentialAccountResolver for SourceScopedCredentialAccountResolver 
         Ok(RuntimeCredentialAccessSecret {
             scope: self.source_scope.clone(),
             handle: self.handle.clone(),
+            credential_account: None,
         })
     }
 }

@@ -11,8 +11,8 @@ use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
-    CapabilityId, HostApiError, MountGrant, NetworkMethod, NetworkPolicy, ResourceScope,
-    RuntimeKind, ScopedPath, SecretHandle,
+    CapabilityId, ExtensionId, HostApiError, MountGrant, NetworkMethod, NetworkPolicy,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeKind, ScopedPath, SecretHandle,
 };
 
 /// Runtime HTTP request accepted by the host-owned egress service.
@@ -107,6 +107,61 @@ pub struct RuntimeCredentialInjection {
     pub source: RuntimeCredentialSource,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
+}
+
+/// Product-auth account identity associated with a host-staged runtime
+/// credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialAccountIdentity {
+    pub scope: ResourceScope,
+    pub account_provider: RuntimeCredentialAccountProviderId,
+    pub account_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_updated_at: Option<crate::Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_extension: Option<ExtensionId>,
+    #[serde(default)]
+    pub unauthorized_policy: RuntimeCredentialUnauthorizedPolicy,
+}
+
+impl RuntimeCredentialAccountIdentity {
+    pub fn new(
+        scope: ResourceScope,
+        account_provider: RuntimeCredentialAccountProviderId,
+        account_id: impl Into<String>,
+        account_updated_at: Option<crate::Timestamp>,
+        unauthorized_policy: RuntimeCredentialUnauthorizedPolicy,
+    ) -> Self {
+        Self {
+            scope,
+            account_provider,
+            account_id: account_id.into(),
+            account_updated_at,
+            requester_extension: None,
+            unauthorized_policy,
+        }
+    }
+
+    pub fn with_requester_extension(mut self, requester_extension: Option<ExtensionId>) -> Self {
+        self.requester_extension = requester_extension;
+        self
+    }
+
+    pub fn marker_on_unauthorized(&self) -> Option<RuntimeCredentialUnauthorized> {
+        if self.account_updated_at.is_some() {
+            Some(self.clone())
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCredentialUnauthorizedPolicy {
+    #[default]
+    RevokeAccount,
+    RefreshAccount,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,6 +310,8 @@ pub struct RuntimeHttpEgressResponse {
     pub request_bytes: u64,
     pub response_bytes: u64,
     pub redaction_applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_unauthorized: Option<RuntimeCredentialUnauthorized>,
 }
 
 pub const RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED: &str = "response_body_limit_exceeded";
@@ -274,6 +331,10 @@ pub struct RuntimeHttpSavedBody {
     pub path: ScopedPath,
     pub bytes_written: u64,
 }
+
+/// Typed signal that a response came back unauthorized for an injected
+/// product-auth credential.
+pub type RuntimeCredentialUnauthorized = RuntimeCredentialAccountIdentity;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RuntimeHttpEgressError {

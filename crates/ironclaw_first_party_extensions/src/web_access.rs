@@ -839,6 +839,7 @@ mod tests {
                 request_bytes: 10,
                 response_bytes: 20,
                 redaction_applied: false,
+                credential_unauthorized: None,
             }
         }
 
@@ -851,6 +852,7 @@ mod tests {
                 request_bytes: 5,
                 response_bytes: 0,
                 redaction_applied: false,
+                credential_unauthorized: None,
             }
         }
 

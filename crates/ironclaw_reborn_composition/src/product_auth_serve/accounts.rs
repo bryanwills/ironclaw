@@ -113,3 +113,23 @@ pub(super) async fn accounts_refresh_handler(
 
     Ok(Json(report))
 }
+
+pub(super) async fn accounts_revoke_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(request): Json<AccountsRevokeRequest>,
+) -> Result<Json<CredentialAccountProjection>, ProductAuthRouteFailure> {
+    let scope =
+        scope_from_authenticated_caller_parts_requiring_invocation(&caller, &request.scope)?;
+    let account_id = parse_credential_account_id(&request.account_id)?;
+
+    let account = run_with_backend_timeout(
+        state
+            .product_auth
+            .credential_account_service()
+            .update_status(&scope, account_id, CredentialAccountStatus::Revoked),
+    )
+    .await?;
+
+    Ok(Json(account.projection()))
+}

@@ -21,8 +21,9 @@ use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
     ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
     ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, SandboxQuota, SecretHandle, Timestamp,
+    RuntimeCredentialAccountIdentity, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    SandboxQuota, SecretHandle, Timestamp,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -54,6 +55,7 @@ pub struct RuntimeCredentialAccountRequest<'a> {
 pub struct RuntimeCredentialAccessSecret {
     pub scope: ResourceScope,
     pub handle: SecretHandle,
+    pub credential_account: Option<RuntimeCredentialAccountIdentity>,
 }
 
 #[async_trait]
@@ -91,7 +93,14 @@ struct RuntimeSecretInjectionState {
 
 struct RuntimeSecretInjectionEntry {
     material: SecretMaterial,
+    credential_account: Option<RuntimeCredentialAccountIdentity>,
     expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeStagedSecretMaterial {
+    pub(crate) material: SecretMaterial,
+    pub(crate) credential_account: Option<RuntimeCredentialAccountIdentity>,
 }
 
 impl RuntimeSecretInjectionStore {
@@ -115,6 +124,17 @@ impl RuntimeSecretInjectionStore {
         handle: &SecretHandle,
         material: SecretMaterial,
     ) -> Result<(), RuntimeSecretInjectionStoreError> {
+        self.insert_with_credential_account(scope, capability_id, handle, material, None)
+    }
+
+    pub(crate) fn insert_with_credential_account(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+        material: SecretMaterial,
+        credential_account: Option<RuntimeCredentialAccountIdentity>,
+    ) -> Result<(), RuntimeSecretInjectionStoreError> {
         let now = Instant::now();
         let expires_at = now.checked_add(self.state.ttl).unwrap_or(now);
         let mut secrets = self.lock()?;
@@ -123,6 +143,7 @@ impl RuntimeSecretInjectionStore {
             RuntimeSecretInjectionKey::new(scope, capability_id, handle),
             RuntimeSecretInjectionEntry {
                 material,
+                credential_account,
                 expires_at,
             },
         );
@@ -147,12 +168,33 @@ impl RuntimeSecretInjectionStore {
             .map(|entry| entry.material))
     }
 
-    pub(crate) fn clone_material(
+    pub(crate) fn take_with_metadata(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
         handle: &SecretHandle,
-    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
+    ) -> Result<Option<RuntimeStagedSecretMaterial>, RuntimeSecretInjectionStoreError> {
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
+            .remove(&RuntimeSecretInjectionKey::new(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .map(|entry| RuntimeStagedSecretMaterial {
+                material: entry.material,
+                credential_account: entry.credential_account,
+            }))
+    }
+
+    pub(crate) fn clone_material_with_metadata(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<Option<RuntimeStagedSecretMaterial>, RuntimeSecretInjectionStoreError> {
         let now = Instant::now();
         let mut secrets = self.lock()?;
         prune_expired_entries(&mut secrets, now);
@@ -162,7 +204,10 @@ impl RuntimeSecretInjectionStore {
                 capability_id,
                 handle,
             ))
-            .map(|entry| SecretMaterial::from(entry.material.expose_secret())))
+            .map(|entry| RuntimeStagedSecretMaterial {
+                material: SecretMaterial::from(entry.material.expose_secret()),
+                credential_account: entry.credential_account.clone(),
+            }))
     }
 
     /// Discard all staged secrets for a scoped capability before process ownership exists.
@@ -1333,6 +1378,7 @@ impl BuiltinObligationHandler {
                 request.capability_id,
                 &access_secret.handle,
                 obligation.handle,
+                access_secret.credential_account,
             )
             .await
             .map_err(|error| {
@@ -1838,6 +1884,7 @@ async fn stage_credential_material(
     capability_id: &CapabilityId,
     source: &SecretHandle,
     target: &SecretHandle,
+    credential_account: Option<RuntimeCredentialAccountIdentity>,
 ) -> Result<(), CredentialStageError> {
     let lease = secret_store
         .lease_once(source_scope, source)
@@ -1854,7 +1901,13 @@ async fn stage_credential_material(
             crate::services::stage_secret_error(e)
         })?;
     secret_injections
-        .insert(target_scope, capability_id, target, secret)
+        .insert_with_credential_account(
+            target_scope,
+            capability_id,
+            target,
+            secret,
+            credential_account,
+        )
         .map_err(|e| {
             tracing::debug!(err = %e, "stage_credential_material: insert failed");
             CredentialStageError::Backend

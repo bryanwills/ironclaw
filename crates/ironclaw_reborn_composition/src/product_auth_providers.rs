@@ -711,6 +711,7 @@ mod tests {
                 request_bytes: 0,
                 response_bytes: 0,
                 redaction_applied: true,
+                credential_unauthorized: None,
             })
         }
     }

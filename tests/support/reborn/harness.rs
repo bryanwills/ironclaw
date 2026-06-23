@@ -2801,6 +2801,7 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
             .map(|handle| RuntimeCredentialAccessSecret {
                 scope: request.scope.clone(),
                 handle,
+                credential_account: None,
             })
     }
 }
@@ -3004,6 +3005,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             request_bytes,
             response_bytes: body.len() as u64,
             redaction_applied: false,
+            credential_unauthorized: None,
         })
     }
 }

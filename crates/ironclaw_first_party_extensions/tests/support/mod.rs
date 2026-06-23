@@ -82,6 +82,7 @@ impl RecordingEgress {
             body,
             saved_body: None,
             redaction_applied: true,
+            credential_unauthorized: None,
         }
     }
 
@@ -94,6 +95,7 @@ impl RecordingEgress {
             request_bytes: 123,
             response_bytes: 0,
             redaction_applied: true,
+            credential_unauthorized: None,
         }
     }
 
@@ -110,6 +112,7 @@ impl RecordingEgress {
             body,
             saved_body: None,
             redaction_applied: true,
+            credential_unauthorized: None,
         }
     }
 
@@ -122,6 +125,7 @@ impl RecordingEgress {
             body: b"{".to_vec(),
             saved_body: None,
             redaction_applied: true,
+            credential_unauthorized: None,
         }
     }
 

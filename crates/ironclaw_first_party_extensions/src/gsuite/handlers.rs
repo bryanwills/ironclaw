@@ -1346,6 +1346,7 @@ mod tests {
             request_bytes: 0,
             response_bytes: 0,
             redaction_applied: false,
+            credential_unauthorized: None,
         };
         assert!(is_google_auth_expired_response(&response));
 
@@ -1357,6 +1358,7 @@ mod tests {
             request_bytes: 0,
             response_bytes: 0,
             redaction_applied: false,
+            credential_unauthorized: None,
         };
         assert!(!is_google_auth_expired_response(&response));
     }
@@ -1485,6 +1487,7 @@ mod tests {
             request_bytes: 0,
             response_bytes: 0,
             redaction_applied: false,
+            credential_unauthorized: None,
         };
         assert_eq!(
             response_etag(&response, &serde_json::json!({"etag": "body-etag"})),

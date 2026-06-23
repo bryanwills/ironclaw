@@ -5,8 +5,8 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{
     ExtensionId, InvocationId, MissionId, ResourceScope, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, ThreadId,
-    UserId,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialUnauthorizedPolicy, SecretHandle, ThreadId, UserId,
 };
 use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 
@@ -442,6 +442,14 @@ async fn resolver_returns_configured_product_auth_access_secret() {
 
     assert_eq!(resolved.handle, access_secret);
     assert_eq!(resolved.scope, scope);
+    assert_eq!(
+        resolved
+            .credential_account
+            .as_ref()
+            .expect("product-auth account identity")
+            .unauthorized_policy,
+        RuntimeCredentialUnauthorizedPolicy::RevokeAccount
+    );
 }
 
 #[tokio::test]
@@ -478,6 +486,17 @@ async fn resolver_refreshes_oauth_account_before_staging_access_secret() {
             .handle
             .as_str()
             .starts_with("oauth-refreshed-access")
+    );
+    let credential_account = resolved
+        .credential_account
+        .expect("product-auth account identity");
+    assert_eq!(
+        credential_account.unauthorized_policy,
+        RuntimeCredentialUnauthorizedPolicy::RefreshAccount
+    );
+    assert_eq!(
+        credential_account.requester_extension,
+        Some(ExtensionId::new("google-drive").unwrap())
     );
 }
 
@@ -591,6 +610,14 @@ async fn resolver_stages_oauth_access_secret_when_refresh_secret_is_absent() {
 
     assert_eq!(resolved.handle, access_secret);
     assert_eq!(resolved.scope, scope);
+    assert_eq!(
+        resolved
+            .credential_account
+            .as_ref()
+            .expect("product-auth account identity")
+            .unauthorized_policy,
+        RuntimeCredentialUnauthorizedPolicy::RevokeAccount
+    );
 }
 
 #[tokio::test]
@@ -623,6 +650,14 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
 
     assert_eq!(resolved.handle, access_secret);
     assert_eq!(resolved.scope, scope);
+    assert_eq!(
+        resolved
+            .credential_account
+            .as_ref()
+            .expect("product-auth account identity")
+            .unauthorized_policy,
+        RuntimeCredentialUnauthorizedPolicy::RefreshAccount
+    );
 }
 
 #[tokio::test]

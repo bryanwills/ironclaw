@@ -1124,6 +1124,7 @@ fn runtime_http_egress_response_defaults_optional_saved_body() {
         request_bytes: 0,
         response_bytes: 2,
         redaction_applied: false,
+        credential_unauthorized: None,
     })
     .unwrap();
 
@@ -1131,6 +1132,60 @@ fn runtime_http_egress_response_defaults_optional_saved_body() {
 
     let response: RuntimeHttpEgressResponse = serde_json::from_value(value).unwrap();
     assert_eq!(response.saved_body, None);
+}
+
+#[test]
+fn runtime_http_egress_response_round_trips_optional_credential_unauthorized() {
+    let invocation_id = InvocationId::new();
+    let scope = ResourceScope::local_default(UserId::new("alice").unwrap(), invocation_id).unwrap();
+    let updated_at = Timestamp::from_timestamp_secs(1).unwrap();
+    let mut value = serde_json::to_value(RuntimeHttpEgressResponse {
+        status: 401,
+        headers: vec![],
+        body: b"unauthorized".to_vec(),
+        saved_body: None,
+        request_bytes: 32,
+        response_bytes: 12,
+        redaction_applied: true,
+        credential_unauthorized: Some(
+            RuntimeCredentialUnauthorized::new(
+                scope.clone(),
+                RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                "account-123",
+                Some(updated_at),
+                RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
+            )
+            .with_requester_extension(Some(ExtensionId::new("github").unwrap())),
+        ),
+    })
+    .unwrap();
+
+    let response: RuntimeHttpEgressResponse = serde_json::from_value(value.clone()).unwrap();
+    let rejected = response
+        .credential_unauthorized
+        .expect("populated marker should round-trip");
+    assert_eq!(rejected.scope, scope);
+    assert_eq!(
+        rejected.account_provider,
+        RuntimeCredentialAccountProviderId::new("github").unwrap()
+    );
+    assert_eq!(rejected.account_id, "account-123");
+    assert_eq!(rejected.account_updated_at, Some(updated_at));
+    assert_eq!(
+        rejected.requester_extension,
+        Some(ExtensionId::new("github").unwrap())
+    );
+    assert_eq!(
+        rejected.unauthorized_policy,
+        RuntimeCredentialUnauthorizedPolicy::RevokeAccount
+    );
+
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("credential_unauthorized");
+    let response_without_marker: RuntimeHttpEgressResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(response_without_marker.credential_unauthorized, None);
 }
 
 #[test]

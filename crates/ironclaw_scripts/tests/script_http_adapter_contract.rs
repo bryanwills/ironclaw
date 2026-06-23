@@ -18,6 +18,7 @@ async fn script_host_http_adapter_uses_shared_runtime_egress() {
         request_bytes: 7,
         response_bytes: 11,
         redaction_applied: false,
+        credential_unauthorized: None,
     });
     let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(egress.clone()));
     let scope = sample_scope();
@@ -64,6 +65,7 @@ async fn script_host_http_adapter_forwards_host_supplied_policy_credentials_time
         request_bytes: 13,
         response_bytes: 0,
         redaction_applied: false,
+        credential_unauthorized: None,
     });
     let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(egress.clone()));
     let scope = sample_scope();

@@ -177,11 +177,12 @@ impl RuntimeCredentialRestager {
             .await
             .map_err(crate::services::stage_secret_error)?;
         self.secret_injections
-            .insert(
+            .insert_with_credential_account(
                 &request.scope,
                 &request.capability_id,
                 &credential.handle,
                 material,
+                access_secret.credential_account,
             )
             .map_err(|_| CredentialStageError::Backend)
     }

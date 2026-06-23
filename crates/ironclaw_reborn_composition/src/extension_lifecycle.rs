@@ -4021,6 +4021,7 @@ mod tests {
             saved_body: None,
             request_bytes: 0,
             redaction_applied: false,
+            credential_unauthorized: None,
         })
     }
 

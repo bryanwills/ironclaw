@@ -159,6 +159,7 @@ impl RuntimeHttpEgress for FailingDcrEgress {
             body: Vec::new(),
             saved_body: None,
             redaction_applied: false,
+            credential_unauthorized: None,
         })
     }
 }

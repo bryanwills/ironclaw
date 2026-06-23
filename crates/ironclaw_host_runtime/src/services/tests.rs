@@ -235,6 +235,7 @@ async fn host_runtime_http_egress_port_executes_with_host_staged_credentials() {
                 prefix: Some("Bearer ".to_string()),
             },
             required: true,
+            credential_account: None,
         }],
     })
     .await

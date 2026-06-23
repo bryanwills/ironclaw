@@ -261,11 +261,11 @@ impl HostOAuthProviderClient {
             if (500..600).contains(&response.status) {
                 return Err(AuthProductError::BackendUnavailable);
             }
-            // For 4xx errors on a refresh request, check for invalid_grant to
-            // distinguish permanent revocation from transient failure.
-            // REDACTION: extract only the `error` code string — never log, serialize,
-            // or return the raw body, access token, refresh token, or any secret.
             if refresh_request {
+                // For 4xx errors on a refresh request, check for invalid_grant to
+                // distinguish permanent revocation from transient failure.
+                // REDACTION: extract only the `error` code string — never log, serialize,
+                // or return the raw body, access token, refresh token, or any secret.
                 let error_code = serde_json::from_slice::<OAuthErrorResponseBody>(&response.body)
                     .ok()
                     .and_then(|body| body.error);

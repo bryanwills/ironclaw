@@ -81,6 +81,7 @@ pub(crate) const ACCOUNTS_LIST_PATH: &str = "/api/reborn/product-auth/accounts/l
 pub(crate) const ACCOUNTS_SELECT_PATH: &str = "/api/reborn/product-auth/accounts/select";
 pub(crate) const ACCOUNTS_RECOVERY_PATH: &str = "/api/reborn/product-auth/accounts/recovery";
 pub(crate) const ACCOUNTS_REFRESH_PATH: &str = "/api/reborn/product-auth/accounts/refresh";
+pub(crate) const ACCOUNTS_REVOKE_PATH: &str = "/api/reborn/product-auth/accounts/revoke";
 pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecycle/cleanup";
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
@@ -95,6 +96,7 @@ const ACCOUNTS_LIST_ROUTE_ID: &str = "product_auth.accounts.list";
 const ACCOUNTS_SELECT_ROUTE_ID: &str = "product_auth.accounts.select";
 const ACCOUNTS_RECOVERY_ROUTE_ID: &str = "product_auth.accounts.recovery";
 const ACCOUNTS_REFRESH_ROUTE_ID: &str = "product_auth.accounts.refresh";
+const ACCOUNTS_REVOKE_ROUTE_ID: &str = "product_auth.accounts.revoke";
 const LIFECYCLE_CLEANUP_ROUTE_ID: &str = "product_auth.lifecycle.cleanup";
 const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(1024) {
     Some(value) => value,
@@ -343,6 +345,10 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
                 post(accounts::accounts_refresh_handler),
             )
             .route(
+                ACCOUNTS_REVOKE_PATH,
+                post(accounts::accounts_revoke_handler),
+            )
+            .route(
                 LIFECYCLE_CLEANUP_PATH,
                 post(lifecycle::lifecycle_cleanup_handler),
             )
@@ -376,6 +382,7 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         (ACCOUNTS_SELECT_ROUTE_ID, ACCOUNTS_SELECT_PATH),
         (ACCOUNTS_RECOVERY_ROUTE_ID, ACCOUNTS_RECOVERY_PATH),
         // accounts/refresh omitted here — uses tighter rate limit below.
+        (ACCOUNTS_REVOKE_ROUTE_ID, ACCOUNTS_REVOKE_PATH),
         (LIFECYCLE_CLEANUP_ROUTE_ID, LIFECYCLE_CLEANUP_PATH),
     ];
     let mut descriptors: Vec<IngressRouteDescriptor> = PROTECTED_MUTATIONS
@@ -640,6 +647,13 @@ pub(super) struct AccountsRefreshRequest {
     provider: String,
     account_id: String,
     requester_extension: Option<String>,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+#[derive(Deserialize)]
+pub(super) struct AccountsRevokeRequest {
+    account_id: String,
     #[serde(flatten)]
     scope: ScopeFields,
 }
@@ -1991,6 +2005,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn accounts_revoke_route_marks_account_revoked() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopDispatcher),
+        ));
+        let resource = test_resource_scope();
+        let scope = AuthProductScope::new(resource.clone(), AuthSurface::Callback);
+        let account = shared
+            .create_account(NewCredentialAccount {
+                scope: scope.clone(),
+                provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).expect("provider"),
+                label: CredentialAccountLabel::new("google account").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: None,
+                refresh_secret: None,
+                scopes: vec![
+                    ProviderScope::new("https://www.googleapis.com/auth/drive")
+                        .expect("provider scope"),
+                ],
+            })
+            .await
+            .expect("seed account");
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(ACCOUNTS_REVOKE_PATH)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "account_id": account.id.to_string(),
+                            "invocation_id": resource.invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("revoke json");
+        assert_eq!(json["status"], "revoked");
+        let stored = shared
+            .get_account(CredentialAccountLookupRequest::new(scope, account.id))
+            .await
+            .expect("lookup")
+            .expect("stored account");
+        assert_eq!(stored.status, CredentialAccountStatus::Revoked);
+    }
+
     #[derive(Debug)]
     struct PanickingDcrEgress;
 
@@ -2036,6 +2119,7 @@ mod tests {
                 body,
                 saved_body: None,
                 redaction_applied: false,
+                credential_unauthorized: None,
             })
         }
     }

@@ -101,6 +101,7 @@ impl RuntimeHttpEgress for RecordingEgress {
             request_bytes: 123,
             response_bytes: 21,
             redaction_applied: true,
+            credential_unauthorized: None,
         })
     }
 }

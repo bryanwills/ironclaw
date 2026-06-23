@@ -1281,6 +1281,7 @@ impl RuntimeCredentialAccountResolver for FixedHandleResolver {
         Ok(RuntimeCredentialAccessSecret {
             scope: request.scope.clone(),
             handle: self.0.clone(),
+            credential_account: None,
         })
     }
 }
@@ -1300,6 +1301,7 @@ impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
         Ok(RuntimeCredentialAccessSecret {
             scope: self.source_scope.clone(),
             handle: self.handle.clone(),
+            credential_account: None,
         })
     }
 }

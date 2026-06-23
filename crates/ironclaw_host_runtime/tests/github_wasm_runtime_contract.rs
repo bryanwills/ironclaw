@@ -1403,6 +1403,7 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
             .map(|handle| RuntimeCredentialAccessSecret {
                 scope: request.scope.clone(),
                 handle,
+                credential_account: None,
             })
     }
 }
@@ -1431,6 +1432,7 @@ impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountRes
             .map(|handle| RuntimeCredentialAccessSecret {
                 scope: request.scope.clone(),
                 handle,
+                credential_account: None,
             })
     }
 }

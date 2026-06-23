@@ -15,7 +15,7 @@ use ironclaw_auth::{
     CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountService,
     CredentialAccountStatus, CredentialRecoveryProjection, CredentialRecoveryReason,
     CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSetupService, NewCredentialAccount,
+    CredentialSetupService, NewCredentialAccount, Timestamp,
 };
 
 #[async_trait]
@@ -106,6 +106,31 @@ where
         self.write_account(&account, CasExpectation::Version(version))
             .await?;
         Ok(account)
+    }
+
+    async fn revoke_if_unchanged(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        account_id: CredentialAccountId,
+        expected_updated_at: Timestamp,
+    ) -> Result<Option<CredentialAccount>, AuthProductError> {
+        let lock = self.lock_for(format!("account:{account_id}"));
+        let _guard = lock.lock().await;
+        let Some((mut account, version)) = self.read_account(scope, account_id).await? else {
+            return Ok(None);
+        };
+        if !scope_matches(scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.updated_at != expected_updated_at {
+            return Ok(None);
+        }
+        validate_credential_status_transition(account.status, CredentialAccountStatus::Revoked)?;
+        account.status = CredentialAccountStatus::Revoked;
+        account.updated_at = Utc::now();
+        self.write_account(&account, CasExpectation::Version(version))
+            .await?;
+        Ok(Some(account))
     }
 
     async fn select_unique_configured_account(

@@ -1,14 +1,15 @@
 use ironclaw_host_api::{
-    CapabilityId, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+    CapabilityId, RuntimeCredentialAccountIdentity, RuntimeCredentialInjection,
+    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeCredentialUnauthorized,
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
 };
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
-use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_secrets::{SecretStore, SecretStoreError};
 use secrecy::ExposeSecret;
 use std::sync::LazyLock;
 
-use crate::obligations::RuntimeSecretInjectionStore;
+use crate::obligations::{RuntimeSecretInjectionStore, RuntimeStagedSecretMaterial};
 
 #[derive(Clone, PartialEq, Eq)]
 enum CredentialCacheKey {
@@ -28,7 +29,12 @@ struct CredentialCacheEntry {
     /// end of the egress call. Holding plaintext as `String` here instead
     /// would leave the credential on the heap for the duration of the request,
     /// defeating `SecretMaterial::ZeroizeOnDrop`.
-    value: Option<SecretMaterial>,
+    value: Option<RuntimeStagedSecretMaterial>,
+}
+
+pub(super) struct CredentialInjectionResult {
+    pub(super) redaction_values: Vec<String>,
+    pub(super) credential_unauthorized: Option<RuntimeCredentialUnauthorized>,
 }
 
 enum CredentialSourceStrategy<'a> {
@@ -88,7 +94,7 @@ impl<'a> CredentialSourceStrategy<'a> {
         secret_injections: Option<&RuntimeSecretInjectionStore>,
         request: &RuntimeHttpEgressRequest,
         injection: &RuntimeCredentialInjection,
-    ) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
+    ) -> Result<Option<RuntimeStagedSecretMaterial>, RuntimeHttpEgressError>
     where
         S: SecretStore,
     {
@@ -114,12 +120,14 @@ pub(super) fn apply_credential_injections<S>(
     secrets: &S,
     secret_injections: Option<&RuntimeSecretInjectionStore>,
     request: &mut RuntimeHttpEgressRequest,
-) -> Result<Vec<String>, RuntimeHttpEgressError>
+) -> Result<CredentialInjectionResult, RuntimeHttpEgressError>
 where
     S: SecretStore,
 {
     let mut redaction_values = Vec::new();
     let mut credential_materials = Vec::new();
+    let mut unauthorized_identity = None::<RuntimeCredentialUnauthorized>;
+    let mut ambiguous_unauthorized_identity = false;
     let mut parsed_url = None;
     let credential_injections = std::mem::take(&mut request.credential_injections);
     for injection in &credential_injections {
@@ -148,7 +156,12 @@ where
         // injection because the network layer and response-body scanner
         // consume raw bytes, but the cache itself never holds a non-zeroizing
         // copy.
-        let plaintext = value.expose_secret();
+        record_unauthorized_identity(
+            &value.credential_account,
+            &mut unauthorized_identity,
+            &mut ambiguous_unauthorized_identity,
+        );
+        let plaintext = value.material.expose_secret();
         if let Err(error) =
             apply_credential_injection(request, &mut parsed_url, &injection.target, plaintext)
         {
@@ -161,7 +174,14 @@ where
     if let Some(url) = parsed_url {
         request.url = url.to_string();
     }
-    Ok(redaction_values)
+    Ok(CredentialInjectionResult {
+        redaction_values,
+        credential_unauthorized: if ambiguous_unauthorized_identity {
+            None
+        } else {
+            unauthorized_identity
+        },
+    })
 }
 
 fn restore_staged_secrets(
@@ -181,14 +201,18 @@ fn restore_staged_secrets(
                 capability_id,
                 handle,
             },
-            Some(material),
+            Some(staged),
         ) = (entry.key, entry.value)
         else {
             continue;
         };
-        if let Err(error) =
-            secret_injections.insert(&request.scope, &capability_id, &handle, material)
-        {
+        if let Err(error) = secret_injections.insert_with_credential_account(
+            &request.scope,
+            &capability_id,
+            &handle,
+            staged.material,
+            staged.credential_account,
+        ) {
             tracing::debug!(
                 error = ?error,
                 capability_id = %capability_id,
@@ -204,7 +228,7 @@ fn credential_value_for_injection<'cache, S>(
     secret_injections: Option<&RuntimeSecretInjectionStore>,
     request: &RuntimeHttpEgressRequest,
     injection: &RuntimeCredentialInjection,
-) -> Result<Option<&'cache SecretMaterial>, RuntimeHttpEgressError>
+) -> Result<Option<&'cache RuntimeStagedSecretMaterial>, RuntimeHttpEgressError>
 where
     S: SecretStore,
 {
@@ -233,14 +257,18 @@ fn staged_secret_for_injection(
     request: &RuntimeHttpEgressRequest,
     capability_id: &CapabilityId,
     injection: &RuntimeCredentialInjection,
-) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError> {
+) -> Result<Option<RuntimeStagedSecretMaterial>, RuntimeHttpEgressError> {
     let Some(secret_injections) = secret_injections else {
         return missing_runtime_credential(injection.required);
     };
     let material = if runtime_reuses_staged_credentials(request.runtime) {
-        secret_injections.clone_material(&request.scope, capability_id, &injection.handle)
+        secret_injections.clone_material_with_metadata(
+            &request.scope,
+            capability_id,
+            &injection.handle,
+        )
     } else {
-        secret_injections.take(&request.scope, capability_id, &injection.handle)
+        secret_injections.take_with_metadata(&request.scope, capability_id, &injection.handle)
     };
     match material {
         Ok(Some(material)) => Ok(Some(material)),
@@ -248,6 +276,26 @@ fn staged_secret_for_injection(
         Err(_) => Err(RuntimeHttpEgressError::Credential {
             reason: "runtime credential injection store unavailable".to_string(),
         }),
+    }
+}
+
+fn record_unauthorized_identity(
+    account: &Option<RuntimeCredentialAccountIdentity>,
+    unauthorized_identity: &mut Option<RuntimeCredentialUnauthorized>,
+    ambiguous_unauthorized_identity: &mut bool,
+) {
+    let Some(account) = account else {
+        return;
+    };
+    let Some(candidate) = account.marker_on_unauthorized() else {
+        return;
+    };
+    if let Some(existing) = unauthorized_identity {
+        if existing != &candidate {
+            *ambiguous_unauthorized_identity = true;
+        }
+    } else {
+        *unauthorized_identity = Some(candidate);
     }
 }
 
@@ -259,7 +307,7 @@ fn runtime_reuses_staged_credentials(runtime: RuntimeKind) -> bool {
 
 fn missing_runtime_credential(
     required: bool,
-) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError> {
+) -> Result<Option<RuntimeStagedSecretMaterial>, RuntimeHttpEgressError> {
     if required {
         Err(RuntimeHttpEgressError::Credential {
             reason: "required credential is unavailable".to_string(),
@@ -273,7 +321,7 @@ fn lease_secret_for_injection<S>(
     secrets: &S,
     request: &RuntimeHttpEgressRequest,
     injection: &RuntimeCredentialInjection,
-) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
+) -> Result<Option<RuntimeStagedSecretMaterial>, RuntimeHttpEgressError>
 where
     S: SecretStore,
 {
@@ -287,7 +335,10 @@ where
             .await?;
         secrets.consume(&request.scope, lease.id).await.map(Some)
     }) {
-        Ok(Some(material)) => Ok(Some(material)),
+        Ok(Some(material)) => Ok(Some(RuntimeStagedSecretMaterial {
+            material,
+            credential_account: None,
+        })),
         Ok(None) => missing_runtime_credential(injection.required),
         Err(SecretStoreError::UnknownSecret { .. }) => {
             missing_runtime_credential(injection.required)
@@ -461,7 +512,7 @@ fn parsed_request_url<'a>(
 const _: fn(&CredentialCacheEntry) = |entry| {
     fn require_zeroize_on_drop<T: ?Sized + secrecy::zeroize::ZeroizeOnDrop>(_: &T) {}
     if let Some(value) = entry.value.as_ref() {
-        require_zeroize_on_drop(value);
+        require_zeroize_on_drop(&value.material);
     }
 };
 
@@ -472,6 +523,7 @@ mod tests {
         InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
         Timestamp, UserId,
     };
+    use ironclaw_secrets::SecretMaterial;
     use ironclaw_secrets::{
         InMemorySecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,
     };
@@ -600,7 +652,7 @@ mod tests {
                 .expect("tokio-backed secret store should resolve through the sync bridge")
                 .expect("required credential should be present");
 
-        assert_eq!(material.expose_secret(), "sk-test-secret");
+        assert_eq!(material.material.expose_secret(), "sk-test-secret");
     }
 
     fn credential_reason(error: &RuntimeHttpEgressError) -> &str {

@@ -6448,6 +6448,7 @@ impl WasmRuntimeCredentialProvider for SecretStoreLeaseCredentials {
                 prefix: Some("Bearer ".to_string()),
             },
             required: true,
+            credential_account: None,
         }])
     }
 }
@@ -6505,6 +6506,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             request_bytes: request.body.len() as u64,
             response_bytes: 0,
             redaction_applied: false,
+            credential_unauthorized: None,
         })
     }
 }

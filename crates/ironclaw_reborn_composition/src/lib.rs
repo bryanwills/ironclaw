@@ -108,6 +108,7 @@ mod provider_admin_product_command;
 mod provider_repo;
 mod readiness;
 mod runtime;
+mod runtime_credential_unauthorized;
 mod runtime_input;
 mod runtime_profile_approval_policy;
 mod skill_learning;

@@ -9,8 +9,9 @@ use ironclaw_auth::{
     select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_host_api::{
-    CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+    CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountIdentity,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorizedPolicy,
 };
 use ironclaw_host_runtime::{
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
@@ -488,11 +489,20 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             .select_unique_configured_runtime_account(selection_request.clone())
             .await
             .map_err(map_account_error)?;
+        let setup = selection_request.setup.clone();
+        let requester_extension = selection_request.lookup.requester_extension.clone();
         let account = self
             .refresher
             .refresh_configured_runtime_account(selection_request, account, self.accounts.as_ref())
             .await
             .map_err(map_account_error)?;
+        let unauthorized_policy = unauthorized_policy_for_account(&setup, &account);
+        let recovery_requester_extension = match unauthorized_policy {
+            RuntimeCredentialUnauthorizedPolicy::RefreshAccount => {
+                refresh_requester_for_account(&account, requester_extension.as_ref())
+            }
+            RuntimeCredentialUnauthorizedPolicy::RevokeAccount => None,
+        };
         if account.status != CredentialAccountStatus::Configured {
             return Err(CredentialStageError::AuthRequired);
         }
@@ -502,10 +512,21 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
         // both together; cleanup/uninstall clears status to Revoked together with
         // the handle), so this branch can only fire on corrupt state. Return
         // Backend so the caller does not loop through re-auth.
-        let handle = account.access_secret.ok_or(CredentialStageError::Backend)?;
+        let handle = account
+            .access_secret
+            .clone()
+            .ok_or(CredentialStageError::Backend)?;
         Ok(RuntimeCredentialAccessSecret {
-            scope: account.scope.resource,
+            scope: account.scope.resource.clone(),
             handle,
+            credential_account: Some(RuntimeCredentialAccountIdentity {
+                scope: account.scope.resource,
+                account_provider: request.provider.clone(),
+                account_id: account.id.to_string(),
+                account_updated_at: Some(account.updated_at),
+                requester_extension: recovery_requester_extension,
+                unauthorized_policy,
+            }),
         })
     }
 }
@@ -565,6 +586,23 @@ fn credential_setup_requires_stored_scopes(setup: &RuntimeCredentialAccountSetup
     match setup {
         RuntimeCredentialAccountSetup::OAuth { .. } => true,
         RuntimeCredentialAccountSetup::ManualToken => false,
+    }
+}
+
+fn unauthorized_policy_for_account(
+    setup: &RuntimeCredentialAccountSetup,
+    account: &CredentialAccount,
+) -> RuntimeCredentialUnauthorizedPolicy {
+    match setup {
+        RuntimeCredentialAccountSetup::ManualToken => {
+            RuntimeCredentialUnauthorizedPolicy::RevokeAccount
+        }
+        RuntimeCredentialAccountSetup::OAuth { .. } if account.refresh_secret.is_some() => {
+            RuntimeCredentialUnauthorizedPolicy::RefreshAccount
+        }
+        RuntimeCredentialAccountSetup::OAuth { .. } => {
+            RuntimeCredentialUnauthorizedPolicy::RevokeAccount
+        }
     }
 }
 
