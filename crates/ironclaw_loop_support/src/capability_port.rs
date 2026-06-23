@@ -1494,6 +1494,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 capability.estimate.clone(),
             )
         };
+        let requested_invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
         let mut invocation_context =
             invocation_context_from_visible(VisibleInvocationContextRequest {
                 base: &self.visible_request.context,
@@ -1534,6 +1535,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         match &resume_mode {
             ResolvedResumeMode::Approval(resume) => {
                 let resume_invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
+                ensure_resume_invocation_matches_activity(
+                    resume_invocation_id,
+                    requested_invocation_id,
+                    "approval",
+                )?;
                 invocation_context.invocation_id = resume_invocation_id;
                 invocation_context.correlation_id = resume.correlation_id;
                 invocation_context.resource_scope.invocation_id = resume_invocation_id;
@@ -1550,6 +1556,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 // and claimed.
                 let resume_invocation_id =
                     invocation_id_from_resume_token(&auth_resume.resume_token)?;
+                ensure_resume_invocation_matches_activity(
+                    resume_invocation_id,
+                    requested_invocation_id,
+                    "auth",
+                )?;
                 invocation_context.invocation_id = resume_invocation_id;
                 invocation_context.resource_scope.invocation_id = resume_invocation_id;
                 // Restore original correlation identifier when a prior approval is
@@ -2572,6 +2583,20 @@ fn invocation_id_from_resume_token(
             "capability approval resume token is invalid",
         )
     })
+}
+
+fn ensure_resume_invocation_matches_activity(
+    resume_invocation_id: InvocationId,
+    requested_invocation_id: InvocationId,
+    resume_kind: &'static str,
+) -> Result<(), AgentLoopHostError> {
+    if resume_invocation_id == requested_invocation_id {
+        return Ok(());
+    }
+    Err(AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        format!("capability {resume_kind} resume activity identity does not match resume token"),
+    ))
 }
 
 fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {
@@ -4454,7 +4479,7 @@ mod tests {
         );
 
         let invocation = CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: candidate.activity_id,
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
@@ -4467,7 +4492,7 @@ mod tests {
             .expect("capability_info invocation succeeds");
         let replayed_outcome = port
             .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: invocation.activity_id,
                 surface_version: invocation.surface_version,
                 capability_id: invocation.capability_id,
                 input_ref: invocation.input_ref,
@@ -4520,7 +4545,7 @@ mod tests {
             .await
             .expect("capability_info call should register");
         let invocation = CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: candidate.activity_id,
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
@@ -4591,7 +4616,7 @@ mod tests {
             "known target should include both capability_info and target ids"
         );
         port.invoke_capability(CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: candidate.activity_id,
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
@@ -4669,7 +4694,7 @@ mod tests {
 
             let outcome = port
                 .invoke_capability(CapabilityInvocation {
-                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                    activity_id: candidate.activity_id,
                     surface_version: surface.version.clone(),
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
@@ -4752,7 +4777,7 @@ mod tests {
 
             let outcome = port
                 .invoke_capability(CapabilityInvocation {
-                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                    activity_id: candidate.activity_id,
                     surface_version: surface.version.clone(),
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
@@ -4834,7 +4859,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -5128,7 +5153,7 @@ mod tests {
                 .await
                 .expect("capability_info call should register");
             port.invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: candidate.activity_id,
                 surface_version: surface.version.clone(),
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -5562,7 +5587,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id,
                 input_ref: candidate.input_ref,
@@ -5658,7 +5683,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id,
                 input_ref: candidate.input_ref,
@@ -5754,7 +5779,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id,
                 input_ref: candidate.input_ref,
@@ -6320,6 +6345,104 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn invoke_capability_rejects_approval_resume_activity_mismatch() {
+        use ironclaw_host_api::ApprovalRequestId;
+        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+            "thread-approval-resume-activity-mismatch",
+        )
+        .await;
+
+        let invocation = visible_runtime_invocation(&port).await;
+        let err = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: invocation.activity_id,
+                surface_version: invocation.surface_version,
+                capability_id: invocation.capability_id,
+                input_ref: invocation.input_ref.clone(),
+                approval_resume: Some(CapabilityApprovalResume {
+                    approval_request_id: ApprovalRequestId::new(),
+                    resume_token: resume_token_for_different_activity(invocation.activity_id),
+                    correlation_id: CorrelationId::new(),
+                    input_ref: invocation.input_ref,
+                    input: serde_json::json!({}),
+                    estimate: ResourceEstimate::default(),
+                }),
+                auth_resume: None,
+            })
+            .await
+            .expect_err("mismatched approval resume activity must be rejected");
+
+        assert_eq!(err.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            err.safe_summary.contains("activity identity"),
+            "error should name the activity identity mismatch: {:?}",
+            err.safe_summary
+        );
+        assert!(runtime.take_requests().is_empty());
+        assert!(runtime.take_spawn_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invoke_capability_rejects_auth_resume_activity_mismatch() {
+        use ironclaw_turns::run_profile::CapabilityAuthResume;
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+            "thread-auth-resume-activity-mismatch",
+        )
+        .await;
+
+        let invocation = visible_runtime_invocation(&port).await;
+        let err = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: invocation.activity_id,
+                surface_version: invocation.surface_version,
+                capability_id: invocation.capability_id,
+                input_ref: invocation.input_ref,
+                approval_resume: None,
+                auth_resume: Some(CapabilityAuthResume {
+                    resume_token: resume_token_for_different_activity(invocation.activity_id),
+                    prior_approval: None,
+                    replay: None,
+                }),
+            })
+            .await
+            .expect_err("mismatched auth resume activity must be rejected");
+
+        assert_eq!(err.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            err.safe_summary.contains("activity identity"),
+            "error should name the activity identity mismatch: {:?}",
+            err.safe_summary
+        );
+        assert!(runtime.take_requests().is_empty());
+        assert!(runtime.take_spawn_requests().is_empty());
+    }
+
     fn visible_request(
         context: ExecutionContext,
     ) -> ironclaw_host_runtime::VisibleCapabilityRequest {
@@ -6620,12 +6743,24 @@ mod tests {
             .await
             .expect("provider tool call registers");
         CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: candidate.activity_id,
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
             auth_resume: None,
+        }
+    }
+
+    fn resume_token_for_different_activity(
+        activity_id: CapabilityActivityId,
+    ) -> CapabilityResumeToken {
+        loop {
+            let invocation_id = InvocationId::new();
+            if invocation_id.as_uuid() != activity_id.as_uuid() {
+                return CapabilityResumeToken::new(invocation_id.to_string())
+                    .expect("valid resume token");
+            }
         }
     }
 

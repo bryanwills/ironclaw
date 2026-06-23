@@ -269,6 +269,31 @@ function clearPendingNonAuthGateForRun(setPendingGate, runId, promptRunIdRef) {
   });
 }
 
+function promptRunIdsFromProjectionItems(items) {
+  const runIds = new Set();
+  for (const item of items) {
+    const runStatus = item.run_status;
+    if (runStatus?.run_id && PROMPT_RUN_STATUSES.has(runStatus.status)) {
+      runIds.add(runStatus.run_id);
+    }
+  }
+  return runIds;
+}
+
+function pendingGateFromProjectionGate(gate) {
+  if (!gate?.run_id || !gate.gate_ref) return null;
+  return {
+    kind: "gate",
+    gateKind: gate.gate_kind || "generic",
+    runId: gate.run_id,
+    gateRef: gate.gate_ref,
+    invocationId: gate.invocation_id || null,
+    headline: gate.headline,
+    body: "",
+    allowAlways: gate.allow_always === true,
+  };
+}
+
 function applyProjectionItems({
   items,
   threadId,
@@ -287,6 +312,7 @@ function applyProjectionItems({
   // Snapshot the most recent run id so stale terminal run_status frames can
   // be filtered while a locally resolved gate is resuming a newer run.
   let activeRunId = latestRunIdRef?.current ?? null;
+  const promptRunIdsInFrame = promptRunIdsFromProjectionItems(items);
   for (const item of items) {
     if (item.run_status) {
       const {
@@ -482,22 +508,15 @@ function applyProjectionItems({
     }
 
     if (item.gate) {
-      const runId = item.gate.run_id || null;
+      const pendingGate = pendingGateFromProjectionGate(item.gate);
+      const runId = pendingGate?.runId || null;
       if (
         runId &&
-        promptRunIdRef?.current === runId &&
-        !isLocallyResolvedGate(locallyResolvedGatesRef, runId, item.gate.gate_ref)
+        (promptRunIdRef?.current === runId || promptRunIdsInFrame.has(runId)) &&
+        !isLocallyResolvedGate(locallyResolvedGatesRef, runId, pendingGate.gateRef)
       ) {
-        setPendingGate((current) => current || {
-          kind: "gate",
-          gateKind: item.gate.gate_kind || "generic",
-          runId,
-          gateRef: item.gate.gate_ref,
-          invocationId: item.gate.invocation_id || null,
-          headline: item.gate.headline,
-          body: "",
-          allowAlways: item.gate.allow_always === true,
-        });
+        ensureGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
+        setPendingGate((current) => current || pendingGate);
         setIsProcessing(false);
       }
     }

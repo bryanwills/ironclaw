@@ -1201,7 +1201,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
     let view = AuthPromptView {
         turn_run_id: TurnRunId::new(),
         auth_request_ref: "gate-ref-001".to_string(),
-        invocation_id: None,
+        invocation_id: Some(InvocationId::new()),
         headline: "Authentication required".to_string(),
         body: "Authenticate to continue.".to_string(),
         challenge_kind: Some(AuthPromptChallengeKind::OAuthUrl),
@@ -1218,6 +1218,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert_eq!(json["challenge_kind"], "oauth_url");
+    assert!(json["invocation_id"].is_string());
     assert_eq!(json["provider"], "google");
     assert_eq!(json["account_label"], "work@example.com");
     assert!(
@@ -1266,6 +1267,10 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
     assert!(
         json.get("expires_at").is_none(),
         "expires_at should be absent when None"
+    );
+    assert!(
+        json.get("invocation_id").is_none(),
+        "invocation_id should be absent when None"
     );
 }
 

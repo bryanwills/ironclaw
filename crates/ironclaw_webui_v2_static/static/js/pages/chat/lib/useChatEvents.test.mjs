@@ -434,6 +434,50 @@ test("useChatEvents: projection approval gate preserves always-allow affordance"
     body: "",
     allowAlways: true,
   });
+  const activity = harness.messages.find((message) => message.id === "tool-invocation-approval");
+  assert.equal(activity?.gateRef, "gate:approval");
+  assert.equal(activity?.toolStatus, "running");
+  assert.equal(activity?.toolName, "Approval required");
+});
+
+test("useChatEvents: projection gate visibility is independent of item order", () => {
+  const runId = "run-gate-before-status";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            gate: {
+              run_id: runId,
+              gate_kind: "approval",
+              gate_ref: "gate:ordered",
+              invocation_id: "invocation-ordered",
+              headline: "Approve ordered action",
+              allow_always: false,
+            },
+          },
+          { run_status: { run_id: runId, status: "blocked_approval" } },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.pendingGate), {
+    kind: "gate",
+    gateKind: "approval",
+    runId,
+    gateRef: "gate:ordered",
+    invocationId: "invocation-ordered",
+    headline: "Approve ordered action",
+    body: "",
+    allowAlways: false,
+  });
+  const activity = harness.messages.find((message) => message.id === "tool-invocation-ordered");
+  assert.equal(activity?.gateRef, "gate:ordered");
+  assert.equal(activity?.toolStatus, "running");
 });
 
 test("useChatEvents: failed terminal projection appends visible error", () => {

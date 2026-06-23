@@ -66,17 +66,17 @@ function toolCardFromGate(gate, overrides = {}) {
     !gate?.runId ||
     !gate?.gateRef ||
     !gate.invocationId ||
-    gate.kind !== "gate" ||
-    !gate.toolName
+    gate.kind !== "gate"
   ) {
     return null;
   }
   const invocationId = gate.invocationId;
+  const displaySource = gate.toolName || gate.headline || gate.gateKind || "gate";
   return {
     invocationId,
     callId: invocationId,
-    capabilityId: gate.toolName,
-    toolName: toolDisplayName(gate.toolName) || gate.toolName,
+    capabilityId: gate.toolName || gate.gateKind || null,
+    toolName: toolDisplayName(displaySource) || displaySource,
     toolStatus: overrides.toolStatus || "running",
     toolDetail: null,
     toolParameters: null,
@@ -121,6 +121,7 @@ function mergeToolActivity(current, incoming) {
   const currentTerminal = isTerminalToolStatus(current.toolStatus);
   const incomingTerminal = isTerminalToolStatus(incoming.toolStatus);
   const keepCurrentTerminal = currentTerminal && !incomingTerminal;
+  const incomingGateOnly = incoming.gateActivity && !current.gateActivity;
   const merged = {
     ...current,
     ...incoming,
@@ -134,7 +135,9 @@ function mergeToolActivity(current, incoming) {
       current.gateActivity && !incoming.gateActivity
         ? incoming.callId
         : current.callId || incoming.callId,
-    toolName: incoming.toolName || current.toolName,
+    toolName: incomingGateOnly
+      ? current.toolName
+      : incoming.toolName || current.toolName,
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
     toolError: incoming.toolError || current.toolError,
     toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
@@ -144,7 +147,9 @@ function mergeToolActivity(current, incoming) {
     turnRunId: incoming.turnRunId || current.turnRunId || null,
     gateRef: incoming.gateRef || current.gateRef || null,
     gateActivity: current.gateActivity && incoming.gateActivity,
-    capabilityId: incoming.capabilityId || current.capabilityId || null,
+    capabilityId: incomingGateOnly
+      ? current.capabilityId || incoming.capabilityId || null
+      : incoming.capabilityId || current.capabilityId || null,
     activityOrder: mergedActivityOrder(current, incoming),
     activityOrderSource: incoming.activityOrderSource || current.activityOrderSource || null,
   };
