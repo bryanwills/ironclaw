@@ -1416,12 +1416,13 @@ mod tests {
         let report = worker
             .tick_once(fire_slot)
             .await
-            .expect("worker records permanent failure");
+            .expect("worker records blocked materialization failure");
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
-                | Some(TriggerPollerFireOutcome::DueFireFailed { .. })
+            Some(TriggerPollerFireOutcome::RetryableFailed {
+                reason: TriggerPollerFailureReason::BlockedMaterialization,
+            })
         ));
         assert_eq!(submit_turn_count.load(Ordering::SeqCst), 0);
     }
