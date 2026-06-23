@@ -56,7 +56,6 @@ use self::surface_snapshot::{
 // existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
-const MAX_IN_MEMORY_PROVIDER_TOOL_CALL_ACTIVITY_IDS: usize = 128;
 
 /// Observes a capability invocation's resolved input (arguments) as the host
 /// loop executes it, for trajectory capture by downstream consumers (benchmark
@@ -88,7 +87,6 @@ pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
         arguments: &serde_json::Value,
     );
 }
-const MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS: usize = 128;
 
 #[async_trait]
 pub trait LoopCapabilityInputResolver: Send + Sync {
@@ -473,10 +471,14 @@ enum DispatchRecord {
         outcome: RuntimeCapabilityOutcome,
     },
     TerminalMilestonePending {
+        invocation_id: InvocationId,
         result: Result<CapabilityOutcome, AgentLoopHostError>,
         milestone: LoopHostMilestoneKind,
     },
-    LoopCompleted(Result<CapabilityOutcome, AgentLoopHostError>),
+    LoopCompleted {
+        invocation_id: InvocationId,
+        result: Result<CapabilityOutcome, AgentLoopHostError>,
+    },
 }
 
 struct RuntimeOutcomeCompletion<'a> {
@@ -506,6 +508,19 @@ struct CapabilityReplayInput<'a> {
     estimate: &'a ResourceEstimate,
 }
 
+fn ensure_cached_invocation_matches_activity(
+    cached_invocation_id: InvocationId,
+    requested_invocation_id: InvocationId,
+) -> Result<(), AgentLoopHostError> {
+    if cached_invocation_id == requested_invocation_id {
+        return Ok(());
+    }
+    Err(AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        "cached capability dispatch activity identity does not match the requested activity",
+    ))
+}
+
 impl<'a> RuntimeOutcomeCompletion<'a> {
     fn conversion(&self) -> RuntimeOutcomeConversion<'a> {
         RuntimeOutcomeConversion {
@@ -527,7 +542,11 @@ struct DispatchRecordStore {
 }
 
 impl DispatchRecordStore {
-    fn reserve(&mut self, key: &IdempotencyKey) -> Result<DispatchReservation, AgentLoopHostError> {
+    fn reserve(
+        &mut self,
+        key: &IdempotencyKey,
+        requested_invocation_id: InvocationId,
+    ) -> Result<DispatchReservation, AgentLoopHostError> {
         let key_value = key.as_str().to_string();
         match self.records.get(key.as_str()).cloned() {
             Some(DispatchRecord::InFlight { notify }) => Ok(DispatchReservation::Wait(notify)),
@@ -537,6 +556,7 @@ impl DispatchRecordStore {
                 requested_capability_id,
                 outcome,
             }) => {
+                ensure_cached_invocation_matches_activity(invocation_id, requested_invocation_id)?;
                 self.records.insert(
                     key_value,
                     DispatchRecord::InFlight {
@@ -550,16 +570,29 @@ impl DispatchRecordStore {
                     outcome,
                 })
             }
-            Some(DispatchRecord::TerminalMilestonePending { result, milestone }) => {
+            Some(DispatchRecord::TerminalMilestonePending {
+                invocation_id,
+                result,
+                milestone,
+            }) => {
+                ensure_cached_invocation_matches_activity(invocation_id, requested_invocation_id)?;
                 self.records.insert(
                     key_value,
                     DispatchRecord::InFlight {
                         notify: Arc::new(Notify::new()),
                     },
                 );
-                Ok(DispatchReservation::TerminalMilestonePending { result, milestone })
+                Ok(DispatchReservation::TerminalMilestonePending {
+                    invocation_id,
+                    result,
+                    milestone,
+                })
             }
-            Some(DispatchRecord::LoopCompleted(result)) => {
+            Some(DispatchRecord::LoopCompleted {
+                invocation_id,
+                result,
+            }) => {
+                ensure_cached_invocation_matches_activity(invocation_id, requested_invocation_id)?;
                 Ok(DispatchReservation::LoopCompleted(result))
             }
             None => {
@@ -614,7 +647,7 @@ impl DispatchRecordStore {
                 Some(DispatchRecord::InFlight { .. }) => self.insertion_order.push_back(candidate),
                 Some(DispatchRecord::RuntimeCompleted { .. })
                 | Some(DispatchRecord::TerminalMilestonePending { .. })
-                | Some(DispatchRecord::LoopCompleted(_)) => {
+                | Some(DispatchRecord::LoopCompleted { .. }) => {
                     self.records.remove(&candidate);
                 }
             }
@@ -639,6 +672,7 @@ enum DispatchReservation {
         outcome: RuntimeCapabilityOutcome,
     },
     TerminalMilestonePending {
+        invocation_id: InvocationId,
         result: Result<CapabilityOutcome, AgentLoopHostError>,
         milestone: LoopHostMilestoneKind,
     },
@@ -676,94 +710,47 @@ impl Drop for DispatchReservationGuard<'_> {
 }
 
 #[derive(Default)]
-struct ProviderToolCallEffectiveCapabilityIdStore {
-    records: HashMap<String, HashSet<CapabilityId>>,
-    insertion_order: VecDeque<String>,
+struct ProviderToolCallRegistrationStore {
+    records: HashMap<String, ProviderToolCallRegistrationRecord>,
 }
 
-impl ProviderToolCallEffectiveCapabilityIdStore {
+struct ProviderToolCallRegistrationRecord {
+    activity_id: CapabilityActivityId,
+    effective_capability_ids: HashSet<CapabilityId>,
+}
+
+impl ProviderToolCallRegistrationStore {
+    /// Register one canonical provider tool call for this run. `input_ref` is
+    /// only the lookup key; the activity id remains an independent UI identity
+    /// stored with the registration record.
     fn record(
         &mut self,
         input_ref: &CapabilityInputRef,
-        capability_ids: HashSet<CapabilityId>,
-    ) -> Result<(), AgentLoopHostError> {
+        effective_capability_ids: Option<HashSet<CapabilityId>>,
+    ) -> CapabilityActivityId {
         let key = input_ref.as_str().to_string();
-        if !self.records.contains_key(input_ref.as_str()) {
-            self.evict_until_below_limit()?;
-            self.insertion_order.push_back(key.clone());
+        let record =
+            self.records
+                .entry(key)
+                .or_insert_with(|| ProviderToolCallRegistrationRecord {
+                    activity_id: CapabilityActivityId::new(),
+                    effective_capability_ids: HashSet::new(),
+                });
+        if let Some(effective_capability_ids) = effective_capability_ids {
+            record.effective_capability_ids = effective_capability_ids;
         }
-        self.records.insert(key, capability_ids);
-        Ok(())
+        record.activity_id
     }
 
-    fn staged_effective_capability_ids_for(
+    fn registered_effective_capability_ids_for(
         &self,
         input_ref: &CapabilityInputRef,
     ) -> HashSet<CapabilityId> {
         self.records
             .get(input_ref.as_str())
+            .map(|record| &record.effective_capability_ids)
             .cloned()
             .unwrap_or_default()
-    }
-
-    fn evict_until_below_limit(&mut self) -> Result<(), AgentLoopHostError> {
-        let mut scanned = 0;
-        let scan_limit = self.insertion_order.len();
-        while self.records.len() >= MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS
-            && scanned < scan_limit
-        {
-            let Some(candidate) = self.insertion_order.pop_front() else {
-                break;
-            };
-            scanned += 1;
-            self.records.remove(&candidate);
-        }
-        if self.records.len() >= MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "provider tool-call effective capability id store is unavailable",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct ProviderToolCallActivityIdStore {
-    records: HashMap<String, CapabilityActivityId>,
-    insertion_order: VecDeque<String>,
-}
-
-impl ProviderToolCallActivityIdStore {
-    fn get_or_insert(
-        &mut self,
-        input_ref: &CapabilityInputRef,
-    ) -> Result<CapabilityActivityId, AgentLoopHostError> {
-        if let Some(activity_id) = self.records.get(input_ref.as_str()) {
-            return Ok(*activity_id);
-        }
-        self.evict_until_below_limit()?;
-        let key = input_ref.as_str().to_string();
-        let activity_id = CapabilityActivityId::new();
-        self.insertion_order.push_back(key.clone());
-        self.records.insert(key, activity_id);
-        Ok(activity_id)
-    }
-
-    fn evict_until_below_limit(&mut self) -> Result<(), AgentLoopHostError> {
-        while self.records.len() >= MAX_IN_MEMORY_PROVIDER_TOOL_CALL_ACTIVITY_IDS {
-            let Some(candidate) = self.insertion_order.pop_front() else {
-                break;
-            };
-            self.records.remove(&candidate);
-        }
-        if self.records.len() >= MAX_IN_MEMORY_PROVIDER_TOOL_CALL_ACTIVITY_IDS {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "provider tool-call activity id store is unavailable",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -779,8 +766,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     snapshots: Mutex<HashMap<String, SurfaceSnapshot>>,
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
-    provider_tool_call_effective_capability_ids: Mutex<ProviderToolCallEffectiveCapabilityIdStore>,
-    provider_tool_call_activity_ids: Mutex<ProviderToolCallActivityIdStore>,
+    provider_tool_call_registrations: Mutex<ProviderToolCallRegistrationStore>,
     trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
@@ -823,10 +809,9 @@ impl HostRuntimeLoopCapabilityPort {
             snapshots: Mutex::new(HashMap::new()),
             current_surface_version: Mutex::new(None),
             dispatch_records: Mutex::new(DispatchRecordStore::default()),
-            provider_tool_call_effective_capability_ids: Mutex::new(
-                ProviderToolCallEffectiveCapabilityIdStore::default(),
+            provider_tool_call_registrations: Mutex::new(
+                ProviderToolCallRegistrationStore::default(),
             ),
-            provider_tool_call_activity_ids: Mutex::new(ProviderToolCallActivityIdStore::default()),
             trajectory_observer: None,
         }
     }
@@ -895,8 +880,10 @@ impl HostRuntimeLoopCapabilityPort {
     fn reserve_dispatch(
         &self,
         key: &IdempotencyKey,
+        requested_invocation_id: InvocationId,
     ) -> Result<DispatchReservation, AgentLoopHostError> {
-        lock_mut(&self.dispatch_records, "capability dispatch record store")?.reserve(key)
+        lock_mut(&self.dispatch_records, "capability dispatch record store")?
+            .reserve(key, requested_invocation_id)
     }
 
     fn dispatch_in_flight_matches(
@@ -936,12 +923,17 @@ impl HostRuntimeLoopCapabilityPort {
     fn record_terminal_milestone_pending(
         &self,
         key: &IdempotencyKey,
+        invocation_id: InvocationId,
         result: Result<CapabilityOutcome, AgentLoopHostError>,
         milestone: LoopHostMilestoneKind,
     ) -> Result<(), AgentLoopHostError> {
         let notify = lock_mut(&self.dispatch_records, "capability dispatch record store")?.record(
             key,
-            DispatchRecord::TerminalMilestonePending { result, milestone },
+            DispatchRecord::TerminalMilestonePending {
+                invocation_id,
+                result,
+                milestone,
+            },
         );
         if let Some(notify) = notify {
             notify.notify_waiters();
@@ -952,10 +944,16 @@ impl HostRuntimeLoopCapabilityPort {
     fn record_loop_completed(
         &self,
         key: &IdempotencyKey,
+        invocation_id: InvocationId,
         result: Result<CapabilityOutcome, AgentLoopHostError>,
     ) -> Result<(), AgentLoopHostError> {
-        let notify = lock_mut(&self.dispatch_records, "capability dispatch record store")?
-            .record(key, DispatchRecord::LoopCompleted(result));
+        let notify = lock_mut(&self.dispatch_records, "capability dispatch record store")?.record(
+            key,
+            DispatchRecord::LoopCompleted {
+                invocation_id,
+                result,
+            },
+        );
         if let Some(notify) = notify {
             notify.notify_waiters();
         }
@@ -971,39 +969,27 @@ impl HostRuntimeLoopCapabilityPort {
         Ok(())
     }
 
-    fn record_provider_tool_call_effective_capability_ids(
+    fn record_provider_tool_call_registration(
         &self,
         input_ref: &CapabilityInputRef,
-        capability_ids: HashSet<CapabilityId>,
-    ) -> Result<(), AgentLoopHostError> {
-        lock_mut(
-            &self.provider_tool_call_effective_capability_ids,
-            "provider tool-call effective capability id store",
+        effective_capability_ids: Option<HashSet<CapabilityId>>,
+    ) -> Result<CapabilityActivityId, AgentLoopHostError> {
+        Ok(lock_mut(
+            &self.provider_tool_call_registrations,
+            "provider tool-call registration store",
         )?
-        .record(input_ref, capability_ids)?;
-        Ok(())
+        .record(input_ref, effective_capability_ids))
     }
 
-    fn staged_effective_capability_ids_for(
+    fn registered_effective_capability_ids_for(
         &self,
         input_ref: &CapabilityInputRef,
     ) -> Result<HashSet<CapabilityId>, AgentLoopHostError> {
         Ok(lock_mut(
-            &self.provider_tool_call_effective_capability_ids,
-            "provider tool-call effective capability id store",
+            &self.provider_tool_call_registrations,
+            "provider tool-call registration store",
         )?
-        .staged_effective_capability_ids_for(input_ref))
-    }
-
-    fn activity_id_for_provider_tool_call(
-        &self,
-        input_ref: &CapabilityInputRef,
-    ) -> Result<CapabilityActivityId, AgentLoopHostError> {
-        lock_mut(
-            &self.provider_tool_call_activity_ids,
-            "provider tool-call activity id store",
-        )?
-        .get_or_insert(input_ref)
+        .registered_effective_capability_ids_for(input_ref))
     }
 
     /// Drop guard for an `InFlight` dispatch reservation. Releases the
@@ -1075,7 +1061,7 @@ impl HostRuntimeLoopCapabilityPort {
             return result;
         }
         if result.is_err() {
-            self.record_loop_completed(key, result.clone())?;
+            self.record_loop_completed(key, completion.invocation_id, result.clone())?;
             return result;
         }
         let terminal_milestone = match runtime_terminal_milestone(
@@ -1087,27 +1073,28 @@ impl HostRuntimeLoopCapabilityPort {
             Ok(milestone) => milestone,
             Err(error) => {
                 let result = Err(error);
-                self.record_loop_completed(key, result.clone())?;
+                self.record_loop_completed(key, completion.invocation_id, result.clone())?;
                 return result;
             }
         };
-        self.complete_terminal_milestone(key, result, terminal_milestone)
+        self.complete_terminal_milestone(key, completion.invocation_id, result, terminal_milestone)
             .await
     }
 
     async fn complete_terminal_milestone(
         &self,
         key: &IdempotencyKey,
+        invocation_id: InvocationId,
         result: Result<CapabilityOutcome, AgentLoopHostError>,
         terminal_milestone: Option<LoopHostMilestoneKind>,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         if let Some(milestone) = terminal_milestone
             && let Err(error) = self.emit_capability_milestone(milestone.clone()).await
         {
-            self.record_terminal_milestone_pending(key, result.clone(), milestone)?;
+            self.record_terminal_milestone_pending(key, invocation_id, result.clone(), milestone)?;
             return Err(error);
         }
-        self.record_loop_completed(key, result.clone())?;
+        self.record_loop_completed(key, invocation_id, result.clone())?;
         result
     }
 
@@ -1151,7 +1138,7 @@ impl HostRuntimeLoopCapabilityPort {
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
         let effective_capability_ids =
-            self.staged_effective_capability_ids_for(&request.input_ref)?;
+            self.registered_effective_capability_ids_for(&request.input_ref)?;
         let output = match capability.output(&input, |requested| {
             let capability = snapshot.capability_info(requested)?;
             if !effective_capability_ids.contains(capability.capability_id) {
@@ -1291,13 +1278,13 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             &prepared.capability_id,
             &normalized_tool_call,
         );
-        if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID {
-            self.record_provider_tool_call_effective_capability_ids(
-                &input_ref,
-                prepared.effective_capability_ids.iter().cloned().collect(),
-            )?;
-        }
-        let activity_id = self.activity_id_for_provider_tool_call(&input_ref)?;
+        let registered_effective_capability_ids = (prepared.capability_id.as_str()
+            == crate::capability_info::CAPABILITY_ID)
+            .then(|| prepared.effective_capability_ids.iter().cloned().collect());
+        let activity_id = self.record_provider_tool_call_registration(
+            &input_ref,
+            registered_effective_capability_ids,
+        )?;
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
             activity_id,
             surface_version: prepared.surface_version,
@@ -1459,8 +1446,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         };
         let idempotency_key =
             invocation_idempotency_key(&self.run_context, &request, effective_input_ref)?;
+        let requested_invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
         loop {
-            match self.reserve_dispatch(&idempotency_key)? {
+            match self.reserve_dispatch(&idempotency_key, requested_invocation_id)? {
                 DispatchReservation::Reserved => break,
                 DispatchReservation::Wait(notify) => {
                     self.wait_for_dispatch_completion(&idempotency_key, notify)
@@ -1504,12 +1492,21 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         },
                     )
                     .await;
-                    self.record_loop_completed(&idempotency_key, result.clone())?;
+                    self.record_loop_completed(&idempotency_key, invocation_id, result.clone())?;
                     return result;
                 }
-                DispatchReservation::TerminalMilestonePending { result, milestone } => {
+                DispatchReservation::TerminalMilestonePending {
+                    invocation_id,
+                    result,
+                    milestone,
+                } => {
                     return self
-                        .complete_terminal_milestone(&idempotency_key, result, Some(milestone))
+                        .complete_terminal_milestone(
+                            &idempotency_key,
+                            invocation_id,
+                            result,
+                            Some(milestone),
+                        )
                         .await;
                 }
                 DispatchReservation::LoopCompleted(result) => return result,
@@ -1530,7 +1527,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     .await;
                 if result.is_ok() {
                     guard.commit();
-                    self.record_loop_completed(&idempotency_key, result.clone())?;
+                    self.record_loop_completed(
+                        &idempotency_key,
+                        requested_invocation_id,
+                        result.clone(),
+                    )?;
                 }
                 return result;
             }
@@ -1592,7 +1593,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         detail: error.detail,
                     }));
                     guard.commit();
-                    self.record_loop_completed(&idempotency_key, result.clone())?;
+                    self.record_loop_completed(
+                        &idempotency_key,
+                        requested_invocation_id,
+                        result.clone(),
+                    )?;
                     return result;
                 }
                 Err(error) => return Err(error.error),
@@ -1743,6 +1748,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 return self
                     .complete_terminal_milestone(
                         &idempotency_key,
+                        invocation_id,
                         Err(host_error),
                         Some(terminal_milestone),
                     )
@@ -4717,6 +4723,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_tool_call_registration_reuses_activity_after_many_other_calls() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-provider-activity-after-many-calls",
+        )
+        .await;
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let provider_call = provider_tool_call();
+        let first = port
+            .register_provider_tool_call(provider_call.clone())
+            .await
+            .expect("first provider tool call registers");
+        let first_outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: first.activity_id,
+                surface_version: surface.version.clone(),
+                capability_id: first.capability_id.clone(),
+                input_ref: first.input_ref.clone(),
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("first invocation succeeds");
+
+        for index in 0..160 {
+            let mut call = provider_tool_call();
+            call.id = format!("call_distinct_{index}");
+            call.arguments = serde_json::json!({ "message": format!("distinct-{index}") });
+            port.register_provider_tool_call(call)
+                .await
+                .expect("distinct provider tool call registers");
+        }
+
+        let second = port
+            .register_provider_tool_call(provider_call)
+            .await
+            .expect("original provider tool call registers again");
+
+        assert_eq!(
+            second.input_ref, first.input_ref,
+            "duplicate provider calls canonicalize to the same staged input"
+        );
+        assert_eq!(
+            second.activity_id, first.activity_id,
+            "duplicate provider calls must reuse the activity id from their registration record"
+        );
+
+        let replayed_outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: second.activity_id,
+                surface_version: surface.version,
+                capability_id: second.capability_id,
+                input_ref: second.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("duplicate invocation replays cached outcome");
+
+        assert!(matches!(first_outcome, CapabilityOutcome::Completed(_)));
+        assert!(matches!(replayed_outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(
+            runtime.take_requests().len(),
+            1,
+            "cached replay for the duplicate provider call must not dispatch again"
+        );
+    }
+
+    #[tokio::test]
     async fn capability_info_accepts_visible_provider_tool_name() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -5037,7 +5125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_info_output_requires_staged_effective_target_for_visible_target() {
+    async fn capability_info_output_requires_registered_effective_target_for_visible_target() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let context = execution_context("thread-capability-info-unstaged-target");
@@ -5103,7 +5191,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_info_output_rejects_visible_target_excluded_from_staged_effective_ids() {
+    async fn capability_info_output_rejects_visible_target_excluded_from_registered_effective_ids()
+    {
         let allowed_capability_id =
             CapabilityId::new("demo.allowed").expect("valid allowed capability id");
         let denied_capability_id =
@@ -5141,16 +5230,18 @@ mod tests {
 
         let input_ref = CapabilityInputRef::new("input:capability-info-excluded-target")
             .expect("test input ref");
-        port.record_provider_tool_call_effective_capability_ids(
+        port.record_provider_tool_call_registration(
             &input_ref,
-            [
-                CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
-                allowed_capability_id,
-            ]
-            .into_iter()
-            .collect(),
+            Some(
+                [
+                    CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
+                    allowed_capability_id,
+                ]
+                .into_iter()
+                .collect(),
+            ),
         )
-        .expect("staged effective capability ids");
+        .expect("staged provider tool call");
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
@@ -5184,23 +5275,25 @@ mod tests {
     }
 
     #[test]
-    fn provider_tool_call_effective_capability_id_store_returns_unavailable_when_full() {
-        let mut records = HashMap::new();
-        for index in 0..MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS {
-            records.insert(format!("input:staged-capability-{index}"), HashSet::new());
-        }
-        let mut store = ProviderToolCallEffectiveCapabilityIdStore {
-            records,
-            insertion_order: VecDeque::new(),
-        };
+    fn provider_tool_call_registration_store_keeps_activity_and_effective_ids_together() {
+        let mut store = ProviderToolCallRegistrationStore::default();
         let input_ref =
-            CapabilityInputRef::new("input:staged-capability-new").expect("valid input ref");
+            CapabilityInputRef::new("input:registered-capability").expect("valid input ref");
+        let effective_ids = [
+            CapabilityId::new("capability.info").expect("valid capability id"),
+            CapabilityId::new("demo.echo").expect("valid capability id"),
+        ]
+        .into_iter()
+        .collect::<HashSet<_>>();
 
-        let error = store
-            .record(&input_ref, HashSet::new())
-            .expect_err("full store with exhausted insertion order should fail closed");
+        let first_activity_id = store.record(&input_ref, Some(effective_ids.clone()));
+        let second_activity_id = store.record(&input_ref, None);
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(second_activity_id, first_activity_id);
+        assert_eq!(
+            store.registered_effective_capability_ids_for(&input_ref),
+            effective_ids
+        );
     }
 
     /// Regression: `capability_info` previously used `as_runtime()` for
