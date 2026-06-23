@@ -196,20 +196,20 @@ async fn hot_capability_catalog_fails_closed_for_missing_prompt_doc_file() {
 }
 
 #[tokio::test]
-async fn hot_capability_catalog_allows_model_visible_capability_without_prompt_doc_ref() {
+async fn hot_capability_catalog_skips_host_internal_capability_without_prompt_doc_ref() {
     let (_storage, fs, registry) = hot_catalog_fixture_with_manifest(
         Some(r#"{"type":"object"}"#),
         r#"{"type":"object"}"#,
         b"Prompt docs exist.",
-        manifest_without_prompt_doc_ref(),
+        host_internal_manifest_without_prompt_doc_ref(),
     );
 
     let catalog = publish_hot_capability_catalog(&fs, &registry)
         .await
         .unwrap();
 
-    let record = catalog.get(&capability_id("echo.say")).unwrap();
-    assert!(record.prompt_doc.is_none());
+    assert!(catalog.capabilities.is_empty());
+    assert!(catalog.get(&capability_id("echo.say")).is_none());
 }
 
 #[tokio::test]
@@ -417,6 +417,7 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/github/search.input.json"
 output_schema_ref = "schemas/github/search.output.json"
+prompt_doc_ref = "prompts/github/search_issues.md"
 
 [[capabilities]]
 id = "github.get_issue"
@@ -426,6 +427,7 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/github/get.input.json"
 output_schema_ref = "schemas/github/get.output.json"
+prompt_doc_ref = "prompts/github/get_issue.md"
 
 [[capabilities]]
 id = "github.comment_issue"
@@ -1843,13 +1845,14 @@ fn hot_catalog_fixture_with_manifest(
     (storage, fs, registry)
 }
 
-fn manifest_without_prompt_doc_ref() -> ExtensionManifest {
+fn host_internal_manifest_without_prompt_doc_ref() -> ExtensionManifest {
     let mut manifest = ExtensionManifest::parse(
         HOT_CAPABILITY_MANIFEST,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
     )
     .unwrap();
+    manifest.capabilities[0].visibility = CapabilityVisibility::HostInternal;
     manifest.capabilities[0].prompt_doc_ref = None;
     manifest
 }
@@ -1862,7 +1865,6 @@ fn manifest_with_visibility(visibility: CapabilityVisibility) -> ExtensionManife
     )
     .unwrap();
     manifest.capabilities[0].visibility = visibility;
-    manifest.capabilities[0].prompt_doc_ref = None;
     manifest
 }
 

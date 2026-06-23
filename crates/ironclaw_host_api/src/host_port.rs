@@ -18,6 +18,20 @@ use crate::{
 /// outbound HTTP through host policy, credential, and response-limit services.
 pub const HOST_RUNTIME_HTTP_EGRESS_PORT_ID: &str = "host.runtime.http_egress";
 
+/// Host-storage SQL transaction contract name required by first-party memory
+/// capability profiles.
+///
+/// This is validation vocabulary only. It does not grant access to storage or
+/// identify a concrete SQL transaction implementation.
+pub const HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID: &str =
+    "host.storage.sql_transaction.first_party";
+
+/// Host audit-event contract name required by memory capability profiles.
+///
+/// This is validation vocabulary only. It does not grant audit authority or
+/// identify a concrete audit-event implementation.
+pub const HOST_EVENTS_AUDIT_PORT_ID: &str = "host.events.audit";
+
 fn validate_dotted_host_port_id(value: &str) -> Result<(), HostApiError> {
     validate_dotted_id(
         "host_port",

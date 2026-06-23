@@ -44,6 +44,7 @@ mod first_party_tools;
 mod http_body;
 mod invocation_services;
 pub mod memory_context;
+mod memory_profile_binding;
 mod obligations;
 mod planner;
 mod process_aliases;
@@ -101,6 +102,12 @@ pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{
     InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
     InvocationServicesResolver, LocalInvocationServicesResolver, ToolCallHttpEgress,
+};
+pub use memory_profile_binding::{
+    MEMORY_DISABLED_EXTENSION_ID, MEMORY_NATIVE_EXTENSION_ID, MemoryProfileBindingConfig,
+    MemoryProfileBindingDeployment, MemoryProfileBindingError, MemoryProfileBindingOverride,
+    MemoryProfileBindingTarget, RequiredMemoryProfileId, ResolvedMemoryProfileBindings,
+    resolve_memory_profile_bindings,
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,

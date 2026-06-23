@@ -6,8 +6,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, HostPortCatalogEntry,
-    HostPortId, VirtualPath,
+    HOST_EVENTS_AUDIT_PORT_ID, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
+    HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID, HostApiError, HostPortCatalog,
+    HostPortCatalogEntry, HostPortId, VirtualPath,
 };
 use ironclaw_product_adapter_registry::ProductAdapterHostApiContract;
 
@@ -29,11 +30,15 @@ pub fn default_host_api_contract_registry() -> Result<HostApiContractRegistry, M
 /// Build the host-runtime default host-port validation catalog.
 ///
 /// The catalog is validation vocabulary only. It does not grant authority or
-/// construct the concrete runtime HTTP egress adapter.
+/// construct concrete runtime HTTP egress, storage, or audit adapters.
 pub fn default_host_port_catalog() -> Result<HostPortCatalog, HostApiError> {
-    HostPortCatalog::new(vec![HostPortCatalogEntry::new(HostPortId::new(
-        HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-    )?)])
+    HostPortCatalog::new(vec![
+        HostPortCatalogEntry::new(HostPortId::new(HOST_EVENTS_AUDIT_PORT_ID)?),
+        HostPortCatalogEntry::new(HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID)?),
+        HostPortCatalogEntry::new(HostPortId::new(
+            HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID,
+        )?),
+    ])
 }
 
 /// Discover installed extensions through host-runtime's default host API

@@ -48,6 +48,7 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/example/echo.input.v1.json"
 output_schema_ref = "schemas/example/echo.output.v1.json"
+prompt_doc_ref = "prompts/example/echo.md"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
         ext = extension_id,
@@ -71,7 +72,10 @@ fn parses_minimum_valid_v2_manifest_for_installed_third_party_extension() {
     let cap = &manifest.capabilities[0];
     assert_eq!(cap.visibility, CapabilityVisibility::Model);
     assert_eq!(cap.default_permission, PermissionMode::Allow);
-    assert!(cap.prompt_doc_ref.is_none());
+    assert_eq!(
+        cap.prompt_doc_ref.as_ref().map(|path| path.as_str()),
+        Some("prompts/example/echo.md")
+    );
 }
 
 #[test]
@@ -567,7 +571,7 @@ required_host_ports = ["host.does.not.exist"]
 }
 
 #[test]
-fn parses_model_visible_capability_without_prompt_doc_ref() {
+fn rejects_model_visible_capability_without_prompt_doc_ref() {
     let toml = format!(
         r#"
 schema_version = "{schema}"
@@ -591,9 +595,67 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    assert!(
+        matches!(err, ManifestV2Error::Invalid { ref reason }
+            if reason.contains("capability acme-tools.echo")
+                && reason.contains("model-visible")
+                && reason.contains("prompt_doc_ref")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn rejects_api_visible_capability_without_prompt_doc_ref() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo")
+        .replace(r#"visibility = "model""#, r#"visibility = "api""#)
+        .replace("prompt_doc_ref = \"prompts/example/echo.md\"\n", "");
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+
+    assert!(
+        matches!(err, ManifestV2Error::Invalid { ref reason }
+            if reason.contains("capability acme-tools.echo")
+                && reason.contains("api-visible")
+                && reason.contains("prompt_doc_ref")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn parses_model_visible_capability_with_prompt_doc_ref() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo");
     let manifest =
         ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+
     assert_eq!(manifest.capabilities.len(), 1);
+    assert_eq!(
+        manifest.capabilities[0].visibility,
+        CapabilityVisibility::Model
+    );
+    assert_eq!(
+        manifest.capabilities[0]
+            .prompt_doc_ref
+            .as_ref()
+            .map(|path| path.as_str()),
+        Some("prompts/example/echo.md")
+    );
+}
+
+#[test]
+fn parses_host_internal_capability_without_prompt_doc_ref() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo")
+        .replace(r#"visibility = "model""#, r#"visibility = "host_internal""#)
+        .replace("prompt_doc_ref = \"prompts/example/echo.md\"\n", "");
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+
+    assert_eq!(manifest.capabilities.len(), 1);
+    assert_eq!(
+        manifest.capabilities[0].visibility,
+        CapabilityVisibility::HostInternal
+    );
     assert!(manifest.capabilities[0].prompt_doc_ref.is_none());
 }
 

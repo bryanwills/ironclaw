@@ -591,11 +591,69 @@ fn capability_provider_host_api_reuses_capability_validation() {
 }
 
 #[test]
-fn capability_provider_host_api_allows_missing_prompt_doc_ref() {
+fn capability_provider_host_api_rejects_model_visible_missing_prompt_doc_ref() {
     let manifest = CAPABILITY_PROVIDER_MANIFEST.replace(
         "prompt_doc_ref = \"prompts/telegram/send_message.md\"\n",
         "",
     );
+
+    let err = ExtensionManifest::parse_with_host_api_contracts(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
+                if reason.contains("telegram.send_message")
+                    && reason.contains("model-visible")
+                    && reason.contains("prompt_doc_ref")
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn capability_provider_host_api_rejects_api_visible_missing_prompt_doc_ref() {
+    let manifest = CAPABILITY_PROVIDER_MANIFEST
+        .replace("visibility = \"model\"", "visibility = \"api\"")
+        .replace(
+            "prompt_doc_ref = \"prompts/telegram/send_message.md\"\n",
+            "",
+        );
+
+    let err = ExtensionManifest::parse_with_host_api_contracts(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
+                if reason.contains("telegram.send_message")
+                    && reason.contains("api-visible")
+                    && reason.contains("prompt_doc_ref")
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn capability_provider_host_api_allows_host_internal_missing_prompt_doc_ref() {
+    let manifest = CAPABILITY_PROVIDER_MANIFEST
+        .replace("visibility = \"model\"", "visibility = \"host_internal\"")
+        .replace(
+            "prompt_doc_ref = \"prompts/telegram/send_message.md\"\n",
+            "",
+        );
 
     let manifest = ExtensionManifest::parse_with_host_api_contracts(
         &manifest,
@@ -603,8 +661,12 @@ fn capability_provider_host_api_allows_missing_prompt_doc_ref() {
         &HostPortCatalog::empty(),
         &capability_provider_contracts(),
     )
-    .expect("prompt_doc_ref is optional lazy help metadata");
+    .expect("host-internal capabilities may omit prompt_doc_ref");
 
+    assert_eq!(
+        manifest.capabilities[0].visibility,
+        CapabilityVisibility::HostInternal
+    );
     assert!(manifest.capabilities[0].prompt_doc_ref.is_none());
 }
 

@@ -18,6 +18,7 @@ mod repo;
 mod safety;
 mod schema;
 mod search;
+mod service;
 mod write_metadata;
 
 pub use backend::{
@@ -54,3 +55,11 @@ pub use safety::{
     PromptWriteSafetyPolicy, PromptWriteSafetyRequest, PromptWriteSource,
 };
 pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};
+pub use service::{
+    MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
+    MemoryServiceError, MemoryServiceErrorKind, MemoryServiceProfileSetRequest,
+    MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
+    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
+    MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
+    MemoryServiceWriteResponse, NativeMemoryService,
+};

@@ -1240,6 +1240,15 @@ fn host_port_ids_are_host_namespaced_and_serializable() {
     let http_egress = HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID).unwrap();
     assert_eq!(http_egress.as_str(), "host.runtime.http_egress");
 
+    let memory_storage = HostPortId::new(HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID).unwrap();
+    assert_eq!(
+        memory_storage.as_str(),
+        "host.storage.sql_transaction.first_party"
+    );
+
+    let memory_audit = HostPortId::new(HOST_EVENTS_AUDIT_PORT_ID).unwrap();
+    assert_eq!(memory_audit.as_str(), "host.events.audit");
+
     let id = HostPortId::new("host.storage.sql_transaction.first_party").unwrap();
     assert_eq!(id.as_str(), "host.storage.sql_transaction.first_party");
     assert_eq!(serde_json::to_value(&id).unwrap(), json!(id.as_str()));

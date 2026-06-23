@@ -349,11 +349,10 @@ where
         self
     }
 
-    pub fn with_prompt_write_safety_event_sink<S>(mut self, event_sink: Arc<S>) -> Self
-    where
-        S: PromptWriteSafetyEventSink + 'static,
-    {
-        let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
+    pub fn with_prompt_write_safety_event_sink(
+        mut self,
+        event_sink: Arc<dyn PromptWriteSafetyEventSink>,
+    ) -> Self {
         self.prompt_safety_event_sink = Some(event_sink);
         self
     }

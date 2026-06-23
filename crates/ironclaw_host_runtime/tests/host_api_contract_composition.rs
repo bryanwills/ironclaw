@@ -3,9 +3,12 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPath, HostPortId, VirtualPath,
+    CapabilityId, ExtensionId, HOST_EVENTS_AUDIT_PORT_ID, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
+    HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID, HostPath, HostPortId, VirtualPath,
 };
-use ironclaw_host_runtime::discover_extensions_with_default_host_api_contracts;
+use ironclaw_host_runtime::{
+    default_host_port_catalog, discover_extensions_with_default_host_api_contracts,
+};
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use tempfile::tempdir;
 
@@ -94,6 +97,15 @@ async fn default_host_port_catalog_rejects_unknown_required_port() {
         ),
         "unexpected error: {err:?}"
     );
+}
+
+#[test]
+fn default_host_port_catalog_recognizes_memory_profile_required_ports() {
+    let catalog = default_host_port_catalog().unwrap();
+    let storage = HostPortId::new(HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID).unwrap();
+    let audit = HostPortId::new(HOST_EVENTS_AUDIT_PORT_ID).unwrap();
+
+    catalog.validate_required([&storage, &audit]).unwrap();
 }
 
 fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFilesystem) {
