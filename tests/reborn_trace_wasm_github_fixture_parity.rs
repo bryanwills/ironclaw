@@ -171,7 +171,16 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.list_issues",
             "list-issues",
-            json!({"owner": "nearai", "repo": "ironclaw", "state": "closed", "limit": 7, "page": 2}),
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "state": "closed",
+                "labels": ["qa", "reborn"],
+                "assignee": "henry",
+                "milestone": "12",
+                "limit": 7,
+                "page": 2
+            }),
         ),
         call(
             "github.create_issue",
@@ -181,7 +190,8 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
                 "repo": "ironclaw",
                 "title": "matrix issue",
                 "body": "body",
-                "labels": ["qa", "reborn"]
+                "labels": ["qa", "reborn"],
+                "assignees": ["henry"]
             }),
         ),
         call(
@@ -209,7 +219,17 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.list_pull_requests",
             "list-prs",
-            json!({"owner": "nearai", "repo": "ironclaw", "state": "all", "limit": 9, "page": 4}),
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "state": "all",
+                "head": "henry:fix/github-tool-api-correctness",
+                "base": "main",
+                "sort": "updated",
+                "direction": "asc",
+                "limit": 9,
+                "page": 4
+            }),
         ),
         call(
             "github.create_pull_request",
@@ -232,7 +252,7 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.get_pull_request_files",
             "get-pr-files",
-            json!({"owner": "nearai", "repo": "ironclaw", "pr_number": 4280}),
+            json!({"owner": "nearai", "repo": "ironclaw", "pr_number": 4280, "limit": 10, "page": 2}),
         ),
         call(
             "github.create_pr_review",
@@ -280,7 +300,8 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
                 "pr_number": 4280,
                 "commit_title": "merge title",
                 "commit_message": "merge body",
-                "merge_method": "squash"
+                "merge_method": "squash",
+                "sha": "abc123def4567890abc123def4567890abc123de"
             }),
         ),
         call(
@@ -291,7 +312,7 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.list_repos",
             "list-repos",
-            json!({"username": "nearai", "limit": 11, "page": 2}),
+            json!({"username": "@me", "type": "member", "limit": 11, "page": 2}),
         ),
         call(
             "github.search_repositories",
@@ -313,7 +334,7 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.search_issues_pull_requests",
             "search-issues-prs",
-            json!({"query": "repo:nearai/ironclaw is:pr", "limit": 12, "page": 3, "sort": "updated", "order": "desc"}),
+            json!({"query": "repo:nearai/ironclaw is:pr", "limit": 12, "page": 3, "sort": "reactions-heart", "order": "desc"}),
         ),
         call(
             "github.list_branches",
@@ -423,12 +444,12 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             }),
         ),
         get(
-            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20state%3Aclosed%20is%3Aissue&per_page=7&page=2&sort=created&order=desc",
+            "https://api.github.com/repos/nearai/ironclaw/issues?state=closed&per_page=7&labels=qa%2Creborn&assignee=henry&milestone=12&page=2",
         ),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/issues",
-            json!({"title": "matrix issue", "body": "body", "labels": ["qa", "reborn"]}),
+            json!({"title": "matrix issue", "body": "body", "labels": ["qa", "reborn"], "assignees": ["henry"]}),
         ),
         get("https://api.github.com/repos/nearai/ironclaw/issues/42"),
         get("https://api.github.com/repos/nearai/ironclaw/issues/42/comments?per_page=5&page=3"),
@@ -443,7 +464,9 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             "https://api.github.com/repos/nearai/ironclaw/issues/77/comments",
             json!({"body": "alias comment"}),
         ),
-        get("https://api.github.com/repos/nearai/ironclaw/pulls?state=all&per_page=9&page=4"),
+        get(
+            "https://api.github.com/repos/nearai/ironclaw/pulls?state=all&per_page=9&head=henry%3Afix%2Fgithub-tool-api-correctness&base=main&sort=updated&direction=asc&page=4",
+        ),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/pulls",
@@ -456,7 +479,7 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             }),
         ),
         get("https://api.github.com/repos/nearai/ironclaw/pulls/4280"),
-        get("https://api.github.com/repos/nearai/ironclaw/pulls/4280/files"),
+        get("https://api.github.com/repos/nearai/ironclaw/pulls/4280/files?per_page=10&page=2"),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/pulls/4280/reviews",
@@ -476,11 +499,12 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             json!({
                 "merge_method": "squash",
                 "commit_title": "merge title",
-                "commit_message": "merge body"
+                "commit_message": "merge body",
+                "sha": "abc123def4567890abc123def4567890abc123de"
             }),
         ),
         get("https://api.github.com/user"),
-        get("https://api.github.com/users/nearai/repos?per_page=11&page=2"),
+        get("https://api.github.com/user/repos?per_page=11&type=member&page=2"),
         get(
             "https://api.github.com/search/repositories?q=org%3Anearai%20ironclaw&per_page=12&page=3&sort=updated&order=desc",
         ),
@@ -492,7 +516,7 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=12&page=3&sort=updated&order=desc",
         ),
         get(
-            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Apr&per_page=12&page=3&sort=updated&order=desc",
+            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Apr&per_page=12&page=3&sort=reactions-heart&order=desc",
         ),
         get(
             "https://api.github.com/repos/nearai/ironclaw/branches?per_page=13&protected=true&page=2",

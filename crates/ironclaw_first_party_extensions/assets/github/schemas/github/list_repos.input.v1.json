@@ -13,7 +13,6 @@
     "page": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 100,
       "default": 1
     },
     "limit": {
@@ -21,6 +20,17 @@
       "minimum": 1,
       "maximum": 100,
       "default": 30
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "all",
+        "owner",
+        "public",
+        "private",
+        "member"
+      ],
+      "description": "Repository visibility/affiliation filter for the GitHub API. For the authenticated user endpoint, all values are supported. For a named username, use only all, owner, or member."
     }
   },
   "required": []
