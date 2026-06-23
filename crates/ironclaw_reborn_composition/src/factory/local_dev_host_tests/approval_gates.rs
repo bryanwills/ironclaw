@@ -594,7 +594,7 @@ async fn pending_approval_count(
         .approval_requests
         .records_for_scope(&context.resource_scope)
         .await
-        .expect("approval store records")
+        .expect("approval store records") // safety: test-only helper reads in-memory approval records from a constructed local runtime.
         .into_iter()
         .filter(|record| record.status == ApprovalStatus::Pending)
         .count()
