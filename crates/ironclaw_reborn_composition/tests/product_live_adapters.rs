@@ -403,7 +403,7 @@ async fn visible_capability_request_preserves_custom_provider_trust_decision() {
 }
 
 #[tokio::test]
-async fn local_dev_adapter_invokes_builtin_echo_through_host_runtime_port() {
+async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() {
     let root = tempfile::tempdir().unwrap();
     let services = build_reborn_services(RebornBuildInput::local_dev(
         "builtin-echo-owner",
@@ -475,14 +475,16 @@ async fn local_dev_adapter_invokes_builtin_echo_through_host_runtime_port() {
         })
         .await
         .unwrap();
-    let CapabilityOutcome::Completed(completed) = outcome else {
-        panic!("expected completed builtin echo outcome, got {outcome:?}");
+    let CapabilityOutcome::ApprovalRequired {
+        approval_resume: Some(resume),
+        ..
+    } = outcome
+    else {
+        panic!("expected builtin echo approval gate, got {outcome:?}");
     };
-    assert_eq!(completed.safe_summary, "capability completed");
     assert_eq!(
-        io.result_for_ref(&run_context, &completed.result_ref)
-            .unwrap(),
-        serde_json::json!("hello product live")
+        resume.input,
+        serde_json::json!({ "message": "hello product live" })
     );
 }
 

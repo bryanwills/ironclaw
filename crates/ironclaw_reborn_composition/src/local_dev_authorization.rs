@@ -5,12 +5,13 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    AutoApproveSettingKey, AutoApproveSettingStore, ToolPermissionOverride,
+    AutoApproveSettingKey, AutoApproveSettingStore, PersistentApprovalAction,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
     ToolPermissionOverrideKey, ToolPermissionOverrideStore,
 };
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, InvocationId, ResourceScope,
+    CapabilityId, EffectKind, InvocationId, Principal, ResourceScope,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy, RuntimeProfile},
 };
 
@@ -48,6 +49,7 @@ const AUTO_APPROVE_INVOCATION_CACHE_MAX_ENTRIES: usize = 512;
 pub(crate) struct StoreApprovalSettingsProvider {
     overrides: Arc<dyn ToolPermissionOverrideStore>,
     auto_approve: Arc<dyn AutoApproveSettingStore>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
     auto_approve_cache: Mutex<AutoApproveInvocationCache>,
 }
 
@@ -55,10 +57,12 @@ impl StoreApprovalSettingsProvider {
     pub(crate) fn new(
         overrides: Arc<dyn ToolPermissionOverrideStore>,
         auto_approve: Arc<dyn AutoApproveSettingStore>,
+        persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
     ) -> Self {
         Self {
             overrides,
             auto_approve,
+            persistent_policies,
             auto_approve_cache: Mutex::new(AutoApproveInvocationCache::default()),
         }
     }
@@ -155,6 +159,32 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, enabled);
         enabled
+    }
+
+    async fn tool_always_allow(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        grantee: &Principal,
+    ) -> bool {
+        let key = PersistentApprovalPolicyKey::new(
+            &operator_tool_permission_scope(scope),
+            PersistentApprovalAction::Dispatch,
+            capability_id.clone(),
+            grantee.clone(),
+        );
+        match self.persistent_policies.lookup(&key).await {
+            Ok(policy) => policy.and_then(|policy| policy.active_grant()).is_some(),
+            Err(error) => {
+                // silent-ok: fail-safe to "ask" on store read error; logged for observability.
+                tracing::warn!(
+                    %error,
+                    capability = %capability_id,
+                    "settings always-allow lookup failed; defaulting to ask"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -518,6 +548,7 @@ mod tests {
         let settings = Arc::new(StoreApprovalSettingsProvider::new(
             overrides,
             auto_approve.clone(),
+            Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
         ));
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
         let authorizer = local_dev_authorizer(None, policy, settings);
@@ -556,6 +587,7 @@ mod tests {
         let settings = Arc::new(StoreApprovalSettingsProvider::new(
             Arc::new(InMemoryToolPermissionOverrideStore::new()),
             auto_approve.clone(),
+            Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
         ));
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
         let authorizer = local_dev_authorizer(None, policy, settings);
@@ -624,6 +656,7 @@ mod tests {
         let settings = Arc::new(StoreApprovalSettingsProvider::new(
             Arc::new(ErroringToolPermissionOverrideStore),
             auto_approve,
+            Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
         ));
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
         let authorizer = local_dev_authorizer(None, policy, settings);

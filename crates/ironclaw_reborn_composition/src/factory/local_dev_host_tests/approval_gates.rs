@@ -164,7 +164,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
 }
 
 #[tokio::test]
-async fn local_dev_yolo_shell_invocation_still_completes_without_approval_gate() {
+async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() {
     let dir = tempfile::tempdir().expect("tempdir");
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
@@ -196,29 +196,24 @@ async fn local_dev_yolo_shell_invocation_still_completes_without_approval_gate()
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
             context.clone(),
-            capability_id,
+            capability_id.clone(),
             ResourceEstimate::default(),
             serde_json::json!({"command": "echo yolo"}),
             trust_decision(shell_allowed_effects()),
         ))
         .await
-        .expect("local-dev-yolo shell invocation succeeds");
+        .expect("local-dev-yolo shell invocation resolves");
 
-    assert!(
-        matches!(outcome, RuntimeCapabilityOutcome::Completed(_)),
-        "local-dev-yolo should not gate shell through local-dev AskDestructive, got {outcome:?}"
-    );
-    assert!(
-        local_runtime
-            .approval_requests
-            .records_for_scope(&context.resource_scope)
-            .await
-            .expect("approval store records")
-            .into_iter()
-            .filter(|record| record.status == ApprovalStatus::Pending)
-            .count()
-            == 0,
-        "local-dev-yolo must not create a pending approval"
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
+        panic!(
+            "global auto-approve off should gate local-dev-yolo shell invocation, got {outcome:?}"
+        );
+    };
+    assert_eq!(gate.capability_id, capability_id);
+    assert_eq!(
+        pending_approval_count(local_runtime, &context).await,
+        1,
+        "local-dev-yolo with global auto-approve off must create a pending approval"
     );
 }
 
@@ -318,6 +313,71 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
         pending_approval_count(local_runtime, &context).await,
         1,
         "default-allow builtin.echo must create a pending approval when global auto-approve is off"
+    );
+}
+
+#[tokio::test]
+async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("local-dev-echo-legacy-grant", dir.path().join("local-dev"))
+            .with_runtime_policy(local_dev_policy()),
+    )
+    .await
+    .expect("local-dev services build");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate");
+    let host_runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("local-dev host runtime");
+    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
+    let context =
+        echo_spawn_execution_context("local-dev-echo-legacy-grant", "thread-echo-legacy-grant");
+
+    local_runtime
+        .persistent_approval_policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: context.resource_scope.clone(),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: capability_id.clone(),
+            grantee: Principal::Extension(context.extension_id.clone()),
+            approved_by: Principal::User(context.user_id.clone()),
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+            source_approval_request_id: Some(ironclaw_host_api::ApprovalRequestId::new()),
+        })
+        .await
+        .expect("legacy persistent approval policy");
+
+    let outcome = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability_id.clone(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "ask despite legacy grant"}),
+            trust_decision(echo_spawn_allowed_effects()),
+        ))
+        .await
+        .expect("echo invocation resolves");
+
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
+        panic!("legacy persistent grant must not override global off, got {outcome:?}");
+    };
+    assert_eq!(gate.capability_id, capability_id);
+    assert_eq!(
+        pending_approval_count(local_runtime, &context).await,
+        1,
+        "legacy persistent grant with global auto-approve off must create a pending approval"
     );
 }
 
@@ -705,11 +765,11 @@ fn local_dev_minimal_enterprise_policy() -> ironclaw_host_api::runtime_policy::E
     policy
 }
 
-/// Minimal approval policy must complete effectful capabilities without any approval gate.
-/// Verifies the runtime-profile policy allows Minimal bypass only for a yolo
-/// profile.
+/// Minimal approval policy still honors the operator global approval switch.
+/// With global auto-approve off, eligible tools ask even when the runtime
+/// profile would otherwise bypass approval gates.
 #[tokio::test]
-async fn local_dev_minimal_policy_shell_invocation_completes_without_approval_gate() {
+async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve_is_off() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-minimal-owner", dir.path().join("local-dev"))
@@ -717,6 +777,10 @@ async fn local_dev_minimal_policy_shell_invocation_completes_without_approval_ga
     )
     .await
     .expect("local-dev minimal services build"); // safety: test-only helper in #[cfg(test)] module.
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services
         .host_runtime
         .as_ref()
@@ -726,17 +790,24 @@ async fn local_dev_minimal_policy_shell_invocation_completes_without_approval_ga
 
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            capability_id,
+            context.clone(),
+            capability_id.clone(),
             ResourceEstimate::default(),
             serde_json::json!({"command": "echo minimal"}),
             trust_decision(shell_allowed_effects()),
         ))
         .await
-        .expect("minimal shell invocation completes"); // safety: test-only helper in #[cfg(test)] module.
+        .expect("minimal shell invocation resolves"); // safety: test-only helper in #[cfg(test)] module.
 
-    // Minimal policy must not create an approval gate.
-    assert!(matches!(outcome, RuntimeCapabilityOutcome::Completed(_))); // safety: test-only assertion in #[cfg(test)] module.
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
+        panic!("global auto-approve off should gate minimal shell invocation, got {outcome:?}");
+    };
+    assert_eq!(gate.capability_id, capability_id); // safety: test-only assertion in #[cfg(test)] module.
+    assert_eq!(
+        pending_approval_count(local_runtime, &context).await,
+        1,
+        "minimal policy with global auto-approve off must create a pending approval"
+    );
 }
 
 #[tokio::test]

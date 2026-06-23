@@ -1062,6 +1062,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let approval_settings_provider = Arc::new(StoreApprovalSettingsProvider::new(
         tool_permission_overrides,
         auto_approve_settings,
+        store_graph
+            .local_runtime
+            .persistent_approval_policies
+            .clone(),
     ));
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
