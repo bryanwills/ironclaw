@@ -8,9 +8,11 @@
 //! which case it must stop silently overwriting it and propose instead.
 //!
 //! The baseline is two parts because the registry's `content_hash` is
-//! **body-only** (`compute_hash(prompt_content)`): a human who hand-tunes
-//! frontmatter keywords (the highest-value activation edit) would otherwise be
-//! invisible. So we also snapshot the activation metadata.
+//! **body-only** (`compute_hash(prompt_content)`): a human who hand-tunes ANY
+//! frontmatter field (activation keywords, description, requirements,
+//! credentials, …) would otherwise be invisible. So we also hash the full
+//! canonicalized manifest (activation lists sorted, so a pure reorder is not
+//! treated as an edit).
 //!
 //! See `docs/plans/2026-06-19-skill-edit-preservation.md`.
 
@@ -18,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::validation::normalize_line_endings;
-use crate::{SkillParseError, parse_skill_md};
+use crate::{SkillManifest, SkillParseError, parse_skill_md};
 
 /// Sidecar filename written next to `SKILL.md`. The leading `.` keeps skill
 /// discovery (which skips hidden entries) from treating it as a bundle file.
@@ -26,28 +28,6 @@ pub const LEARNED_PROVENANCE_FILE_NAME: &str = ".ironclaw-learned.json";
 
 /// Generous cap for the provenance sidecar — it may carry a stashed proposal.
 pub const MAX_LEARNED_PROVENANCE_BYTES: usize = 64 * 1024;
-
-/// Snapshot of the activation metadata the machine last wrote. Each list is
-/// sorted so a pure reorder is not treated as a human edit; any added, removed,
-/// or changed entry is. Compared field-by-field against the live skill.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActivationSnapshot {
-    #[serde(default)]
-    pub keywords: Vec<String>,
-    #[serde(default)]
-    pub exclude_keywords: Vec<String>,
-    #[serde(default)]
-    pub patterns: Vec<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-impl ActivationSnapshot {
-    fn sorted(mut values: Vec<String>) -> Vec<String> {
-        values.sort();
-        values
-    }
-}
 
 /// Provenance sidecar for a machine-learned skill. Its mere PRESENCE marks the
 /// skill as written by the learning sink — the sink is the only writer of this
@@ -62,8 +42,11 @@ pub struct LearnedSkillProvenance {
     /// `LoadedSkill::content_hash` (`compute_hash` over the post-frontmatter
     /// prompt content).
     pub last_machine_body_hash: String,
-    /// Activation metadata the machine last wrote.
-    pub last_machine_activation: ActivationSnapshot,
+    /// SHA-256 of the full canonicalized frontmatter manifest the machine last
+    /// wrote (activation lists sorted). Covers every human-editable frontmatter
+    /// field, so an edit to `description`/`requires`/`credentials`/`origin`/
+    /// `auto_activate` — not just the activation arrays — counts as a human edit.
+    pub last_machine_manifest_hash: String,
     /// A distilled candidate stashed for human review when the live skill is
     /// human-owned (divergent) and must not be overwritten. `None` = no pending
     /// proposal. Phase 2 surfaces a diff/approve UI over this.
@@ -82,10 +65,10 @@ impl LearnedSkillProvenance {
     /// is writing. Line endings are normalized first so the baseline matches
     /// what `update_skill` persists and what the loader re-hashes.
     pub fn for_machine_content(content: &str) -> Result<Self, SkillParseError> {
-        let (body_hash, activation) = content_fingerprint(content)?;
+        let (body_hash, manifest_hash) = content_fingerprint(content)?;
         Ok(Self {
             last_machine_body_hash: body_hash,
-            last_machine_activation: activation,
+            last_machine_manifest_hash: manifest_hash,
             proposed_content: None,
             pending_review: false,
         })
@@ -96,9 +79,9 @@ impl LearnedSkillProvenance {
     /// as divergence (fail safe: do not overwrite).
     pub fn matches_live_content(&self, live_content: &str) -> bool {
         match content_fingerprint(live_content) {
-            Ok((body_hash, activation)) => {
+            Ok((body_hash, manifest_hash)) => {
                 body_hash == self.last_machine_body_hash
-                    && activation == self.last_machine_activation
+                    && manifest_hash == self.last_machine_manifest_hash
             }
             Err(_) => false,
         }
@@ -117,18 +100,34 @@ impl LearnedSkillProvenance {
 /// way the registry computes `content_hash` (body-only) plus a sorted snapshot
 /// of activation metadata. Shared by baseline-write and divergence-check so the
 /// two can never drift.
-fn content_fingerprint(content: &str) -> Result<(String, ActivationSnapshot), SkillParseError> {
+fn content_fingerprint(content: &str) -> Result<(String, String), SkillParseError> {
     let normalized = normalize_line_endings(content);
     let parsed = parse_skill_md(&normalized)?;
     let body_hash = hash_body(&parsed.prompt_content);
-    let activation = &parsed.manifest.activation;
-    let snapshot = ActivationSnapshot {
-        keywords: ActivationSnapshot::sorted(activation.keywords.clone()),
-        exclude_keywords: ActivationSnapshot::sorted(activation.exclude_keywords.clone()),
-        patterns: ActivationSnapshot::sorted(activation.patterns.clone()),
-        tags: ActivationSnapshot::sorted(activation.tags.clone()),
-    };
-    Ok((body_hash, snapshot))
+    let manifest_hash = hash_manifest(&parsed.manifest);
+    Ok((body_hash, manifest_hash))
+}
+
+/// SHA-256 over the full canonicalized manifest. The activation lists are sorted
+/// so a pure reorder is not treated as a human edit; every other frontmatter
+/// field is hashed as-is, so ANY edit (description, requires, credentials,
+/// origin, auto_activate, version, …) — not just the four activation arrays —
+/// shows up as divergence. Hashing the serialized manifest rather than
+/// enumerating fields keeps coverage complete as new manifest fields are added.
+fn hash_manifest(manifest: &SkillManifest) -> String {
+    let mut canonical = manifest.clone();
+    canonical.activation.keywords.sort();
+    canonical.activation.exclude_keywords.sort();
+    canonical.activation.patterns.sort();
+    canonical.activation.tags.sort();
+    // `SkillManifest` is a plain serde struct, so JSON serialization is
+    // effectively infallible; fall back to the Debug repr (which also captures
+    // every field) rather than silently hashing empty if it ever fails.
+    let serialized =
+        serde_json::to_vec(&canonical).unwrap_or_else(|_| format!("{canonical:?}").into_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(&serialized);
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 /// SHA-256 of the body, in the same `"sha256:<hex>"` shape as the registry's
@@ -217,5 +216,16 @@ mod tests {
         let prov = LearnedSkillProvenance::for_machine_content(&content).unwrap();
         let retagged = content.replace("[alpha]", "[alpha, beta]");
         assert!(!prov.matches_live_content(&retagged));
+    }
+
+    #[test]
+    fn non_activation_frontmatter_edit_is_detected() {
+        // The widened coverage: a human edit to a frontmatter field OUTSIDE the
+        // activation arrays (here `description`) must count as divergence so a
+        // learned evolution does not silently clobber it.
+        let content = skill_md("foo, bar", "do the thing");
+        let prov = LearnedSkillProvenance::for_machine_content(&content).unwrap();
+        let edited = content.replace("A test skill", "A human-tuned description");
+        assert!(!prov.matches_live_content(&edited));
     }
 }

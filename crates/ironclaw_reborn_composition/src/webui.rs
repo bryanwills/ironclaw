@@ -550,13 +550,16 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         // IS an approval. Capture the pending state BEFORE the write so we can
         // clear the marker after. Only an already-pending (hence machine-learned)
         // skill is promoted — never a human-built or already-approved one.
+        // Propagate (not .ok()) a provenance read failure: it runs BEFORE the
+        // content write, so failing here aborts the toggle atomically rather than
+        // updating the skill and then silently leaving `pending_review` set
+        // (active-but-still-pending) because the read was dropped.
         let approving_held = enabled
             && self
                 .skill_management
                 .read_provenance_for_scope(scope.clone(), &name)
                 .await
-                .ok()
-                .flatten()
+                .map_err(map_skill_management_error)?
                 .is_some_and(|provenance| provenance.pending_review);
         let result = self
             .skill_management

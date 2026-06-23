@@ -202,10 +202,11 @@ const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-maste
 const LOCAL_DEV_SKILL_LEARNING_SWITCHES_PATH: &str = ".reborn-skill-learning-switches.json";
 
 /// Persisted values of the three self-learning master switches, so an operator's
-/// Settings toggle survives a restart instead of fail-open resetting to ON. Each
-/// field defaults to `true` (the safe value): absence, a missing key, or an
-/// unreadable/corrupt file all yield "all ON", and only an explicit operator
-/// change persists a `false`.
+/// Settings toggle survives a restart instead of fail-open resetting to ON.
+/// First boot (no file) and a missing key default to `true` (all ON). An
+/// EXISTING file that is unreadable or corrupt instead fails CLOSED (see
+/// [`SkillLearningSwitches::fail_closed`]) so a disabled egress is never silently
+/// re-enabled; only an explicit operator change persists a value.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SkillLearningSwitches {
     #[serde(default = "skill_learning_switch_default")]
@@ -230,6 +231,21 @@ impl Default for SkillLearningSwitches {
     }
 }
 
+impl SkillLearningSwitches {
+    /// Fail-closed values for when an EXISTING switch file can't be read or
+    /// parsed (distinct from first boot, which uses [`Default`] = all ON):
+    /// self-learning OFF + hold-for-review ON + no learned auto-activation, so a
+    /// corrupt/unreadable file never silently re-enables transcript distillation
+    /// (and its provider egress) that the operator had turned off.
+    fn fail_closed() -> Self {
+        Self {
+            learning_enabled: false,
+            require_review: true,
+            auto_activate_learned: false,
+        }
+    }
+}
+
 /// Persists the three self-learning master switches to a small JSON file under
 /// the local-dev storage root (single-operator, process-global by design — the
 /// same scope as the in-memory flags). Mirrors the local-dev secrets-master-key
@@ -248,26 +264,28 @@ impl SkillLearningSwitchStore {
         }
     }
 
-    /// Read the persisted switches; fail SAFE to all-ON on absence/corruption.
+    /// Read the persisted switches. First boot (no file) → all-ON defaults; a
+    /// corrupt or unreadable EXISTING file → fail CLOSED (never silently
+    /// re-enable a disabled egress). debug! respects the REPL/TUI invariant.
     pub(crate) fn load(&self) -> SkillLearningSwitches {
         match std::fs::read_to_string(&self.path) {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|error| {
-                // silent-ok: a corrupt local-dev switch file falls back to the
-                // safe defaults (all ON); the operator re-toggles to recover.
-                tracing::debug!(%error, path = %self.path.display(), "skill-learning switch store: unreadable, using safe defaults");
-                SkillLearningSwitches::default()
+                // A corrupt EXISTING file fails CLOSED (not all-ON), so a
+                // previously-disabled distillation/egress is not silently
+                // re-enabled; the operator re-toggles to recover.
+                tracing::debug!(%error, path = %self.path.display(), "skill-learning switch store: corrupt file, failing closed");
+                SkillLearningSwitches::fail_closed()
             }),
-            // First boot: no file yet — use defaults silently.
+            // First boot: no file yet — use defaults (all ON) silently.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 SkillLearningSwitches::default()
             }
-            // A real IO failure (permission denied, EIO) on an existing file also
-            // falls back to all-ON, but unlike first boot it leaves a trail so an
-            // operator can see why an explicit toggle keeps reverting. debug!
-            // (not warn!/info!) respects the REPL/TUI logging invariant.
+            // A real IO failure (permission denied, EIO) on an existing file
+            // fails CLOSED and leaves a trail so an operator can see why a toggle
+            // keeps reverting.
             Err(error) => {
-                tracing::debug!(%error, path = %self.path.display(), "skill-learning switch store: read failed, using safe defaults");
-                SkillLearningSwitches::default()
+                tracing::debug!(%error, path = %self.path.display(), "skill-learning switch store: read failed on existing file, failing closed");
+                SkillLearningSwitches::fail_closed()
             }
         }
     }
@@ -284,14 +302,30 @@ impl SkillLearningSwitchStore {
         self.update(|switches| switches.auto_activate_learned = value)
     }
 
-    /// Load → mutate the one field → write, under a lock so concurrent toggles
+    /// Read → mutate the one field → write, under a lock so concurrent toggles
     /// don't clobber each other's other fields.
     fn update(&self, mutate: impl FnOnce(&mut SkillLearningSwitches)) -> Result<(), String> {
         let _guard = self
             .write_lock
             .lock()
             .map_err(|_| "skill-learning switch store lock poisoned".to_string())?;
-        let mut switches = self.load();
+        // Read the CURRENT switches directly (NOT via load(), which substitutes
+        // fallback values for the availability read). A corrupt/unreadable
+        // EXISTING file must abort the write rather than overwrite the operator's
+        // other switches with fallbacks; only first boot (NotFound) starts fresh.
+        let mut switches = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => serde_json::from_str(&raw).map_err(|error| {
+                format!(
+                    "skill-learning switch store: refusing to overwrite a corrupt file: {error}"
+                )
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                SkillLearningSwitches::default()
+            }
+            Err(error) => {
+                return Err(format!("skill-learning switch store: read failed: {error}"));
+            }
+        };
         mutate(&mut switches);
         let serialized = serde_json::to_vec_pretty(&switches).map_err(|error| error.to_string())?;
         std::fs::write(&self.path, serialized).map_err(|error| error.to_string())

@@ -64,8 +64,7 @@ pub use install_metadata::{
     MAX_INSTALL_METADATA_BYTES,
 };
 pub use learned_provenance::{
-    ActivationSnapshot, LEARNED_PROVENANCE_FILE_NAME, LearnedSkillProvenance,
-    MAX_LEARNED_PROVENANCE_BYTES,
+    LEARNED_PROVENANCE_FILE_NAME, LearnedSkillProvenance, MAX_LEARNED_PROVENANCE_BYTES,
 };
 pub use management::{
     MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,

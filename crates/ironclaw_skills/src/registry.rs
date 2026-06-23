@@ -1124,7 +1124,7 @@ async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, Sk
         use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
 
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)
@@ -1145,13 +1145,27 @@ async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, Sk
             });
         }
 
-        let mut content = String::new();
-        file.read_to_string(&mut content)
+        // Bounded read: cap at MAX_PROMPT_FILE_SIZE so a file grown between the
+        // identity check and this read can't OOM the host (restores the cap the
+        // previous read_file_bytes_limited helper enforced).
+        let mut bytes = Vec::new();
+        file.take(MAX_PROMPT_FILE_SIZE + 1)
+            .read_to_end(&mut bytes)
             .map_err(|error| SkillRegistryError::ReadError {
-                path: display_path,
+                path: display_path.clone(),
                 reason: error.to_string(),
             })?;
-        Ok(content)
+        if bytes.len() as u64 > MAX_PROMPT_FILE_SIZE {
+            return Err(SkillRegistryError::FileTooLarge {
+                name: display_path,
+                size: bytes.len() as u64,
+                max: MAX_PROMPT_FILE_SIZE,
+            });
+        }
+        String::from_utf8(bytes).map_err(|error| SkillRegistryError::ReadError {
+            path: display_path,
+            reason: format!("Invalid UTF-8: {error}"),
+        })
     })
     .await
     .map_err(|error| SkillRegistryError::ReadError {
@@ -1162,12 +1176,34 @@ async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, Sk
 
 #[cfg(not(unix))]
 async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, SkillRegistryError> {
-    tokio::fs::read_to_string(&checked.path)
+    use tokio::io::AsyncReadExt;
+    // Bounded read: cap at MAX_PROMPT_FILE_SIZE (mirrors the unix variant).
+    let mut file =
+        tokio::fs::File::open(&checked.path)
+            .await
+            .map_err(|e| SkillRegistryError::ReadError {
+                path: checked.path.display().to_string(),
+                reason: e.to_string(),
+            })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PROMPT_FILE_SIZE + 1)
+        .read_to_end(&mut bytes)
         .await
         .map_err(|e| SkillRegistryError::ReadError {
             path: checked.path.display().to_string(),
             reason: e.to_string(),
-        })
+        })?;
+    if bytes.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        return Err(SkillRegistryError::FileTooLarge {
+            name: checked.path.display().to_string(),
+            size: bytes.len() as u64,
+            max: MAX_PROMPT_FILE_SIZE,
+        });
+    }
+    String::from_utf8(bytes).map_err(|e| SkillRegistryError::ReadError {
+        path: checked.path.display().to_string(),
+        reason: format!("Invalid UTF-8: {e}"),
+    })
 }
 
 /// Load and validate a single SKILL.md file from disk.

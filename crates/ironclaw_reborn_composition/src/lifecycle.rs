@@ -155,9 +155,13 @@ impl RebornLocalSkillManagementPort {
         Ok(read_learned_provenance(&context, name).await?)
     }
 
-    /// Write the learning-sink provenance sidecar (origin + baseline). Called
-    /// ONLY by the machine learning path (`PortSkillWriter`), never the human
-    /// facade — so a human edit never refreshes the baseline.
+    /// Write the machine-baseline provenance sidecar (the body + manifest hash the
+    /// overwrite gate compares against). Intended for the machine learning path
+    /// (`PortSkillWriter`) and the approve path, which both legitimately
+    /// (re-)record the baseline. This is `pub(crate)` with no typed caller guard,
+    /// so it is an intent contract, not an enforced one: a plain human EDIT must
+    /// never route here, or it would refresh the baseline and hide itself from
+    /// the gate.
     pub(crate) async fn write_provenance_for_scope(
         &self,
         scope: ResourceScope,

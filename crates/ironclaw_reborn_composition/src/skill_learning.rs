@@ -523,12 +523,15 @@ mod learning {
             name: &str,
             content: &str,
         ) -> Result<SkillWriteOutcome, String> {
+            // Fail closed: a provenance read failure must NOT collapse to
+            // "not held -> evolve + activate" and bypass the review hold.
+            // Propagate the error so the caller treats it as a failed write
+            // (no overwrite) rather than approving on a boundary-read failure.
             let held = self
                 .port
                 .read_provenance_for_scope(scope.clone(), name)
                 .await
-                .ok()
-                .flatten()
+                .map_err(|error| error.to_string())?
                 .is_some_and(|provenance| provenance.pending_review);
             if held {
                 // Re-learning a held skill before the user has reviewed it must
@@ -546,16 +549,19 @@ mod learning {
                 // Preserve the live skill's activation state across evolution: an
                 // evolution improves CONTENT, it must NOT silently flip a skill the
                 // user turned off back on (the refined/consolidated doc defaults
-                // auto_activate to true). Read the current flag and re-apply it;
-                // default true on a read/parse miss, matching a brand-new install.
-                let keep_active = self
-                    .port
-                    .read_content_for_scope(scope.clone(), name)
-                    .await
-                    .ok()
-                    .and_then(|existing| parse_skill_md(&existing.content).ok())
-                    .map(|parsed| parsed.manifest.auto_activate)
-                    .unwrap_or(true);
+                // auto_activate to true). A read failure fails closed (propagate,
+                // do not evolve); a parse failure on the live content defaults the
+                // evolved skill to OFF rather than silently activating it.
+                let keep_active = parse_skill_md(
+                    &self
+                        .port
+                        .read_content_for_scope(scope.clone(), name)
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .content,
+                )
+                .map(|parsed| parsed.manifest.auto_activate)
+                .unwrap_or(false);
                 let evolved = mark_learned(&set_skill_auto_activate(content, keep_active));
                 self.port
                     .update_for_scope(scope.clone(), name, &evolved)
@@ -626,16 +632,18 @@ mod learning {
                 .install_for_scope(scope.clone(), Some(name), &staged)
                 .await
                 .map_err(|error| error.to_string())?;
-            if let Ok(mut provenance) = LearnedSkillProvenance::for_machine_content(&staged) {
-                provenance.pending_review = true;
-                if let Err(error) = self
-                    .port
-                    .write_provenance_for_scope(scope.clone(), &result.name, &provenance)
-                    .await
-                {
-                    tracing::debug!(skill = %result.name, %error, "skill-learning: failed to mark new skill pending review");
-                }
-            }
+            // The pending_review marker IS part of the pending install: without
+            // it, review/list/approve can't find the held skill, so the UI would
+            // announce a pending skill the approval API can't see. Make the
+            // sidecar write mandatory — propagate its failure rather than leave a
+            // saved-but-unmarked skill.
+            let mut provenance =
+                LearnedSkillProvenance::for_machine_content(&staged).map_err(|e| e.to_string())?;
+            provenance.pending_review = true;
+            self.port
+                .write_provenance_for_scope(scope.clone(), &result.name, &provenance)
+                .await
+                .map_err(|error| error.to_string())?;
             Ok(SkillWriteOutcome::Pending(result.name))
         }
     }

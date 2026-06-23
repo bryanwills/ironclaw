@@ -87,10 +87,19 @@ fn set_frontmatter_scalar(content: &str, key: &str, value: &str) -> String {
             out.push('\n');
             continue;
         }
-        if in_frontmatter && !wrote && line.starts_with(&key_prefix) {
-            out.push_str(&new_line);
-            out.push('\n');
-            wrote = true;
+        if in_frontmatter && line.starts_with(&key_prefix) {
+            // Replace the first top-level occurrence and DROP any later
+            // duplicates of the same key, so the stamped value is authoritative
+            // rather than left to YAML's duplicate-key resolution (a
+            // model-authored SKILL.md could otherwise smuggle a second
+            // `origin:`/`auto_activate:` line past the review/overwrite gate).
+            // `starts_with(key_prefix)` only matches column-0 (top-level) keys;
+            // indented nested keys are untouched.
+            if !wrote {
+                out.push_str(&new_line);
+                out.push('\n');
+                wrote = true;
+            }
             continue;
         }
         out.push_str(line);
@@ -559,6 +568,33 @@ metadata:
             1,
             "marker replaced, not duplicated"
         );
+    }
+
+    #[test]
+    fn set_frontmatter_scalar_drops_duplicate_top_level_keys() {
+        // A model-authored SKILL.md could smuggle a second top-level
+        // `origin:`/`auto_activate:` line; the setter must replace the first and
+        // DROP later duplicates so the stamped value is authoritative, not left
+        // to YAML duplicate-key resolution.
+        let dup = "---\nname: my-skill\nversion: 1\norigin: user\ndescription: x\norigin: user\nauto_activate: true\nauto_activate: true\n---\n\nBody.\n";
+        let stamped_origin = set_skill_origin(dup, SkillOrigin::Learned);
+        assert_eq!(
+            stamped_origin.matches("origin:").count(),
+            1,
+            "duplicate origin lines collapsed to one"
+        );
+        // De-dup the other key too, then parse: serde_yml rejects duplicate keys,
+        // so a surviving duplicate would have made the stamped doc unparseable —
+        // dropping duplicates is what keeps the stamped value authoritative.
+        let stamped_both = set_skill_auto_activate(&stamped_origin, false);
+        assert_eq!(
+            stamped_both.matches("auto_activate:").count(),
+            1,
+            "duplicate auto_activate lines collapsed to one"
+        );
+        let parsed = parse_skill_md(&stamped_both).expect("re-parses after de-duping both keys");
+        assert_eq!(parsed.manifest.origin, SkillOrigin::Learned);
+        assert!(!parsed.manifest.auto_activate);
     }
 
     #[test]

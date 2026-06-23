@@ -691,9 +691,14 @@ pub async fn skill_is_bundle(
         Err(FilesystemError::NotFound { .. }) => return Ok(false),
         Err(error) => return Err(filesystem_error(error)),
     };
-    Ok(entries
+    // Fail closed: a directory at the bounded-probe cap was truncated, so a
+    // bundle sibling could exist beyond the probe window. Treat a capped probe
+    // as a bundle so self-evolution never overwrites a `SKILL.md` whose sibling
+    // files it could not see.
+    let has_bundle_sibling = entries
         .iter()
-        .any(|entry| entry.name != SKILL_FILE_NAME && !entry.name.starts_with('.')))
+        .any(|entry| entry.name != SKILL_FILE_NAME && !entry.name.starts_with('.'));
+    Ok(has_bundle_sibling || entries.len() >= MAX_BUNDLE_PROBE_ENTRIES)
 }
 
 fn skill_mutation_lock(skill_name: &str) -> SkillMutationLock {
