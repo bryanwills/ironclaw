@@ -29,13 +29,12 @@ use ironclaw_turns::{
     },
 };
 
-/// Initial checkpoint payload schema reserved for the default Reborn loop.
+/// Checkpoint payload schema for the default Reborn loop.
 ///
-/// Reborn checkpoint persistence has not shipped yet, so this branch is still
-/// defining the v1 payload shape. Once persisted checkpoints are in use,
-/// changing this layout requires an explicit schema bump and migration plan.
-pub const CHECKPOINT_SCHEMA_ID: &str = "reborn:default-loop-v1";
-pub const CHECKPOINT_SCHEMA_VERSION: u64 = 1;
+/// Required parked-activity ids are part of the v2 payload shape. Older v1
+/// checkpoints are intentionally not migrated by this refactor.
+pub const CHECKPOINT_SCHEMA_ID: &str = "reborn:default-loop-v2";
+pub const CHECKPOINT_SCHEMA_VERSION: u64 = 2;
 
 /// Immutable execution state threaded through the loop.
 ///
