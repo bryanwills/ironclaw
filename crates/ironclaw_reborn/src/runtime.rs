@@ -104,7 +104,22 @@ pub enum ToolDisclosureMode {
 
 impl ToolDisclosureMode {
     pub fn from_env() -> Self {
-        Self::from_raw(std::env::var(REBORN_TOOL_DISCLOSURE_ENV).ok().as_deref())
+        match std::env::var(REBORN_TOOL_DISCLOSURE_ENV) {
+            Ok(value) => Self::from_raw(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::from_raw(None),
+            // Don't silently `.ok()`-drop a NotUnicode read: the var is set but
+            // unreadable (a misconfiguration). Surface it, then fall back to the
+            // unset default.
+            Err(error @ std::env::VarError::NotUnicode(_)) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    env = REBORN_TOOL_DISCLOSURE_ENV,
+                    error = %error,
+                    "REBORN_TOOL_DISCLOSURE is set but not valid UTF-8; using default"
+                );
+                Self::from_raw(None)
+            }
+        }
     }
 
     /// TEMPORARY (revert before GA — tracked in the context-management plan):

@@ -162,19 +162,24 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                     capability_id = target.definition.capability_id.as_str(),
                     "reborn tool disclosure resolving direct deferred provider tool call"
                 );
-                return Ok(ProviderToolCallCapabilityIds::single(
-                    target.definition.capability_id,
-                ));
+                // Resolve through the inner port with the synthesized target call so
+                // the real authority surface (effective_capability_ids / approval
+                // expansion) is preserved, exactly as for a directly-listed tool —
+                // not collapsed to a single capability id.
+                return self
+                    .inner
+                    .provider_tool_call_capability_ids(&target.target_call);
             }
             return self.inner.provider_tool_call_capability_ids(tool_call);
         }
         if tool_call.name == TOOL_CALL_NAME
             && let Some(target) = self.allowed_tool_call_target(tool_call)?
         {
-            return Ok(ProviderToolCallCapabilityIds {
-                provider_capability_id: target.definition.capability_id.clone(),
-                effective_capability_ids: vec![target.definition.capability_id],
-            });
+            // Same as the direct-deferred path: keep the inner port's full
+            // capability-id resolution for the bridge tool_call target.
+            return self
+                .inner
+                .provider_tool_call_capability_ids(&target.target_call);
         }
         let Some(definition) = bridge_tool_definitions()
             .into_iter()

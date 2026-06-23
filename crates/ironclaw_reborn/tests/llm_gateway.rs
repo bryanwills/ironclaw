@@ -395,9 +395,13 @@ async fn gateway_allows_unadvertised_tool_call_when_capability_port_resolves_it(
         panic!("expected capability calls");
     };
     assert_eq!(calls.len(), 1);
+    let hidden_capability_id = CapabilityId::new("demo.hidden").unwrap();
+    assert_eq!(calls[0].capability_id, hidden_capability_id);
+    // Guard the dispatch/authorization id set, not just the provider id, so the
+    // resolved hidden-tool path can't silently drop effective capability ids.
     assert_eq!(
-        calls[0].capability_id,
-        CapabilityId::new("demo.hidden").unwrap()
+        calls[0].effective_capability_ids,
+        vec![hidden_capability_id]
     );
     let registered = capabilities.registered.lock().unwrap();
     assert_eq!(registered.len(), 1);
