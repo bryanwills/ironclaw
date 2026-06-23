@@ -7840,13 +7840,14 @@ async fn get_operator_setup_returns_snapshot_from_llm_config() {
     assert_eq!(response.active_provider_id.as_deref(), Some("openai"));
     assert_eq!(response.active_model.as_deref(), Some("gpt-5-mini"));
     assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
-    assert!(response.diagnostics.iter().any(|diagnostic| {
-        diagnostic.reason_code == "operator_setup_profile_not_wired"
-            && diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Info
+    assert!(response.diagnostics.is_empty());
+    assert!(response.steps.iter().any(|step| {
+        step.name == "profile"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
     }));
-    assert!(response.diagnostics.iter().any(|diagnostic| {
-        diagnostic.reason_code == "operator_setup_webui_access_not_wired"
-            && diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Info
+    assert!(response.steps.iter().any(|step| {
+        step.name == "webui_access"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
     }));
 }
 
@@ -7887,6 +7888,14 @@ async fn setup_response_reflects_active_provider_and_model() {
     }));
     assert!(response.steps.iter().any(|step| {
         step.name == "model"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+    assert!(response.steps.iter().any(|step| {
+        step.name == "profile"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+    assert!(response.steps.iter().any(|step| {
+        step.name == "webui_access"
             && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
     }));
 }
@@ -8019,6 +8028,133 @@ async fn run_operator_setup_rejects_internal_base_url_before_upsert() {
 
     assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
     assert_eq!(llm_config.upsert_provider_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_blank_profile_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("   ".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("blank profile id is rejected");
+
+    assert_setup_validation(err, "profile_id", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_oversized_profile_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("x".repeat(129)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("oversized profile id is rejected");
+
+    assert_setup_validation(err, "profile_id", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_short_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from("too-short".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("short WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_serve_weak_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from("x".repeat(16))),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("16-byte WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_oversized_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from("x".repeat(4097))),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("oversized WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
 }
 
 #[tokio::test]
@@ -8159,6 +8295,126 @@ async fn run_operator_setup_upserts_and_activates_provider_config() {
             model: Some("gpt-5-mini".to_string()),
         }]
     );
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_ignores_redacted_webui_access_token_sentinel() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                model: Some("gpt-5-mini".to_string()),
+                webui_access_token: Some(SecretString::from("••••••••".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    let webui_step = response
+        .steps
+        .iter()
+        .find(|step| step.name == "webui_access")
+        .expect("webui access step");
+    assert_eq!(
+        webui_step.status,
+        ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    );
+    assert_eq!(
+        llm_config.set_active_calls.lock().expect("lock").as_slice(),
+        [SetupSetActiveCall {
+            provider_id: "openai".to_string(),
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+    let serialized = serde_json::to_string(&response).expect("serialize setup response");
+    assert!(!serialized.contains("••••••••"));
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_unwired_host_mutations_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("production".to_string()),
+                webui_access_token: Some(SecretString::from(
+                    "webui-secret-token-value-32-bytes".to_string(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unwired host mutations fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_profile_only_host_mutation_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("production".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unwired profile mutation fails closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_token_only_host_mutation_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from(
+                    "webui-secret-token-value-32-bytes".to_string(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unwired WebUI token mutation fails closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
     assert_eq!(llm_config.set_active_count(), 0);
 }
 
