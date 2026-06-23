@@ -117,7 +117,15 @@ impl ToolDisclosureMode {
         match raw {
             Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
             Some(value) if value.eq_ignore_ascii_case("bridged") => Self::Bridged,
-            // unset / empty / unrecognized -> temporarily ON for benchmarking.
+            Some(value) if !value.is_empty() => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    value,
+                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to temporary default Bridged"
+                );
+                Self::Bridged
+            }
+            // unset / empty -> temporarily ON for benchmarking.
             _ => Self::Bridged,
         }
     }
@@ -783,7 +791,10 @@ mod tests {
             "unset must temporarily default ON for the remote benchmark"
         );
         assert!(ToolDisclosureMode::from_raw(Some("")).is_bridged());
-        assert!(ToolDisclosureMode::from_raw(Some("garbage")).is_bridged());
+        assert!(
+            ToolDisclosureMode::from_raw(Some("garbage")).is_bridged(),
+            "unrecognized values must still use the temporary Bridged default"
+        );
         assert!(ToolDisclosureMode::from_raw(Some("bridged")).is_bridged());
         assert!(
             !ToolDisclosureMode::from_raw(Some("off")).is_bridged(),

@@ -24,15 +24,15 @@ use tracing::debug;
 
 use crate::tool_disclosure::{
     ActiveSet, CapabilityCatalog, DisclosureCaps, PromotedSet, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME,
-    TOOL_SEARCH_NAME, bridge_tool_definitions, is_bridge_capability_id, is_bridge_name,
-    select_active_set, tool_search_rank,
+    TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json, is_bridge_capability_id,
+    is_bridge_name, select_active_set, tool_search_rank,
 };
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 
 pub(crate) struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    promoted_by_thread: Arc<Mutex<HashMap<String, PromotedSet>>>,
+    promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
 }
 
@@ -40,7 +40,7 @@ impl ToolDisclosureCapabilityDecorator {
     pub(crate) fn new(result_writer: Arc<dyn LoopCapabilityResultWriter>) -> Self {
         Self {
             result_writer,
-            promoted_by_thread: Arc::new(Mutex::new(HashMap::new())),
+            promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
         }
     }
@@ -56,7 +56,7 @@ impl LoopCapabilityPortDecorator for ToolDisclosureCapabilityDecorator {
             inner,
             run_context: run_context.clone(),
             result_writer: Arc::clone(&self.result_writer),
-            promoted_by_thread: Arc::clone(&self.promoted_by_thread),
+            promoted_by_scope: Arc::clone(&self.promoted_by_scope),
             caps: self.caps,
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
@@ -69,7 +69,7 @@ struct ToolDisclosureCapabilityPort {
     inner: Arc<dyn LoopCapabilityPort>,
     run_context: LoopRunContext,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    promoted_by_thread: Arc<Mutex<HashMap<String, PromotedSet>>>,
+    promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
@@ -89,6 +89,26 @@ struct ToolDisclosureTurnState {
 struct BridgeInvocation {
     name: String,
     arguments: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PromotionScopeKey {
+    tenant_id: String,
+    agent_id: Option<String>,
+    project_id: Option<String>,
+    thread_id: String,
+}
+
+impl PromotionScopeKey {
+    fn from_run_context(run_context: &LoopRunContext) -> Self {
+        let scope = &run_context.scope;
+        Self {
+            tenant_id: scope.tenant_id.as_str().to_string(),
+            agent_id: scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
+            project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
+            thread_id: scope.thread_id.as_str().to_string(),
+        }
+    }
 }
 
 #[async_trait]
@@ -116,7 +136,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             return self.inner.provider_tool_call_capability_ids(tool_call);
         }
         if tool_call.name == TOOL_CALL_NAME
-            && let Ok(Some(target)) = self.allowed_tool_call_target(tool_call)
+            && let Some(target) = self.allowed_tool_call_target(tool_call)?
         {
             return Ok(ProviderToolCallCapabilityIds {
                 provider_capability_id: target.capability_id.clone(),
@@ -148,7 +168,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             return Ok(());
         }
         if tool_call.name == TOOL_CALL_NAME
-            && let Ok(Some(target_call)) = self.synthetic_target_call(tool_call)
+            && let Some(target_call) = self.synthetic_target_call(tool_call)?
         {
             return self.inner.validate_provider_tool_call(&target_call);
         }
@@ -163,13 +183,15 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             return self.inner.register_provider_tool_call(tool_call).await;
         }
         if tool_call.name == TOOL_CALL_NAME
-            && let Ok(Some(target_call)) = self.synthetic_target_call(&tool_call)
+            && let Some(target_call) = self.synthetic_target_call(&tool_call)?
         {
             let mut candidate = self.inner.register_provider_tool_call(target_call).await?;
             candidate.provider_replay = Some(provider_replay_for(&tool_call));
             self.tool_call_target_inputs
                 .lock()
-                .map_err(|_| invalid_invocation("tool_call target store lock is poisoned"))?
+                .map_err(|e| {
+                    invalid_invocation(format!("tool_call target store lock is poisoned: {e}"))
+                })?
                 .insert(
                     candidate.input_ref.as_str().to_string(),
                     candidate.capability_id.clone(),
@@ -189,17 +211,31 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             return Ok(surface);
         };
         state.surface_version = Some(surface.version.clone());
-        let mut descriptors = state
+        let active_or_disclosed_descriptors = state
             .catalog
             .active_or_disclosed_descriptors(&state.active, &state.disclosed_names);
-        descriptors.retain(|descriptor| {
-            surface
-                .descriptors
-                .iter()
-                .any(|inner| inner.capability_id == descriptor.capability_id)
+        let active_or_disclosed_ids: BTreeSet<CapabilityId> = active_or_disclosed_descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.clone())
+            .collect();
+        let bridge_descriptors: Vec<_> = active_or_disclosed_descriptors
+            .into_iter()
+            .filter(|descriptor| is_bridge_capability_id(&descriptor.capability_id))
+            .collect();
+        surface.descriptors.retain(|descriptor| {
+            active_or_disclosed_ids.contains(&descriptor.capability_id)
                 || is_bridge_capability_id(&descriptor.capability_id)
         });
-        surface.descriptors = descriptors;
+        let mut advertised_ids: BTreeSet<CapabilityId> = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.clone())
+            .collect();
+        for descriptor in bridge_descriptors {
+            if advertised_ids.insert(descriptor.capability_id.clone()) {
+                surface.descriptors.push(descriptor);
+            }
+        }
         Ok(surface)
     }
 
@@ -211,7 +247,9 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             let target_capability_id = self
                 .tool_call_target_inputs
                 .lock()
-                .map_err(|_| invalid_invocation("tool_call target store lock is poisoned"))?
+                .map_err(|e| {
+                    invalid_invocation(format!("tool_call target store lock is poisoned: {e}"))
+                })?
                 .get(request.input_ref.as_str())
                 .cloned();
             let outcome = self.inner.invoke_capability(request).await?;
@@ -251,10 +289,10 @@ impl ToolDisclosureCapabilityPort {
     fn turn_state(
         &self,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
-        let mut guard = self.turn_state.lock().map_err(|_| {
+        let mut guard = self.turn_state.lock().map_err(|e| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
-                "tool disclosure turn state lock is poisoned",
+                format!("tool disclosure turn state lock is poisoned: {e}"),
             )
         })?;
         let rebuild = guard
@@ -264,7 +302,7 @@ impl ToolDisclosureCapabilityPort {
         if rebuild {
             let definitions = self.inner.tool_definitions()?;
             let catalog = CapabilityCatalog::new(&definitions, &[]);
-            let promoted = self.promoted_for_thread()?;
+            let promoted = self.promoted_for_scope()?;
             let active = select_active_set(&catalog, &promoted, self.caps);
             *guard = Some(ToolDisclosureTurnState {
                 turn_id: self.run_context.turn_id,
@@ -277,12 +315,12 @@ impl ToolDisclosureCapabilityPort {
         Ok(guard)
     }
 
-    fn promoted_for_thread(&self) -> Result<PromotedSet, AgentLoopHostError> {
-        let key = self.run_context.thread_id.to_string();
-        let guard = self.promoted_by_thread.lock().map_err(|_| {
+    fn promoted_for_scope(&self) -> Result<PromotedSet, AgentLoopHostError> {
+        let key = PromotionScopeKey::from_run_context(&self.run_context);
+        let guard = self.promoted_by_scope.lock().map_err(|e| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
-                "tool disclosure promoted set lock is poisoned",
+                format!("tool disclosure promoted set lock is poisoned: {e}"),
             )
         })?;
         Ok(guard.get(&key).cloned().unwrap_or_default())
@@ -302,11 +340,11 @@ impl ToolDisclosureCapabilityPort {
         let Some(name) = name else {
             return Ok(());
         };
-        let key = self.run_context.thread_id.to_string();
-        let mut guard = self.promoted_by_thread.lock().map_err(|_| {
+        let key = PromotionScopeKey::from_run_context(&self.run_context);
+        let mut guard = self.promoted_by_scope.lock().map_err(|e| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
-                "tool disclosure promoted set lock is poisoned",
+                format!("tool disclosure promoted set lock is poisoned: {e}"),
             )
         })?;
         guard.entry(key).or_default().push(name);
@@ -323,13 +361,16 @@ impl ToolDisclosureCapabilityPort {
         else {
             return Err(invalid_invocation("bridge tool definition is unavailable"));
         };
-        let digest_input = tool_call.arguments.to_string();
+        let digest_input =
+            provider_call_digest_input(&tool_call.id, &tool_call.name, &tool_call.arguments);
         let digest = ironclaw_host_api::sha256_digest_token(digest_input.as_bytes());
         let input_ref = CapabilityInputRef::new(format!("{DISCLOSURE_INPUT_PREFIX}{digest}"))
-            .map_err(|_| invalid_invocation("bridge input ref could not be represented"))?;
+            .map_err(|e| {
+                invalid_invocation(format!("bridge input ref could not be represented: {e}"))
+            })?;
         self.bridge_inputs
             .lock()
-            .map_err(|_| invalid_invocation("bridge input store lock is poisoned"))?
+            .map_err(|e| invalid_invocation(format!("bridge input store lock is poisoned: {e}")))?
             .insert(
                 input_ref.as_str().to_string(),
                 BridgeInvocation {
@@ -362,7 +403,7 @@ impl ToolDisclosureCapabilityPort {
         let bridge = self
             .bridge_inputs
             .lock()
-            .map_err(|_| invalid_invocation("bridge input store lock is poisoned"))?
+            .map_err(|e| invalid_invocation(format!("bridge input store lock is poisoned: {e}")))?
             .get(request.input_ref.as_str())
             .cloned()
             .ok_or_else(|| invalid_invocation("bridge input is unavailable"))?;
@@ -381,11 +422,13 @@ impl ToolDisclosureCapabilityPort {
         request: &CapabilityInvocation,
         bridge: &BridgeInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        let query = bridge
-            .arguments
-            .get("query")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let Some(query) = bridge.arguments.get("query").and_then(Value::as_str) else {
+            return Ok(failed_invalid_input("tool_search requires query"));
+        };
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(failed_invalid_input("tool_search requires query"));
+        }
         let limit = bridge
             .arguments
             .get("limit")
@@ -493,7 +536,7 @@ impl ToolDisclosureCapabilityPort {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let digest_input = format!("{}\0{}", tool_call.id, target.name);
+        let digest_input = provider_call_digest_input(&tool_call.id, &target.name, &arguments);
         let target_id = ironclaw_host_api::sha256_digest_token(digest_input.as_bytes());
         Ok(Some(ProviderToolCall {
             provider_id: tool_call.provider_id.clone(),
@@ -569,6 +612,15 @@ fn provider_replay_for(tool_call: &ProviderToolCall) -> ProviderToolCallReplay {
     }
 }
 
+fn provider_call_digest_input(provider_call_id: &str, name: &str, arguments: &Value) -> String {
+    json!({
+        "provider_call_id": provider_call_id,
+        "name": name,
+        "arguments": canonicalize_json(arguments),
+    })
+    .to_string()
+}
+
 fn failed_invalid_input(summary: &'static str) -> CapabilityOutcome {
     CapabilityOutcome::Failed(CapabilityFailure {
         error_kind: CapabilityFailureKind::InvalidInput,
@@ -577,7 +629,7 @@ fn failed_invalid_input(summary: &'static str) -> CapabilityOutcome {
     })
 }
 
-fn invalid_invocation(summary: &'static str) -> AgentLoopHostError {
+fn invalid_invocation(summary: impl Into<String>) -> AgentLoopHostError {
     AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, summary)
 }
 
@@ -713,6 +765,10 @@ mod tests {
                 "hidden_tool",
                 "Hidden workspace operation",
             ),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
         ];
         let inner = Arc::new(SpyPort {
             definitions,
@@ -721,12 +777,12 @@ mod tests {
             registered_calls: Mutex::new(Vec::new()),
             invocations: Mutex::new(Vec::new()),
         });
-        let promoted_by_thread = Arc::new(Mutex::new(HashMap::new()));
+        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
         let first_run_context = run_context(TurnId::new()).await;
         let port = disclosure_port(
             Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
             first_run_context,
-            Arc::clone(&promoted_by_thread),
+            Arc::clone(&promoted_by_scope),
         );
 
         let surface = port
@@ -739,6 +795,16 @@ mod tests {
                 .iter()
                 .any(|descriptor| descriptor.safe_name == "hidden_tool"),
             "deferred tool should not be model-visible before discovery"
+        );
+        assert_eq!(
+            surface
+                .descriptors
+                .iter()
+                .find(|descriptor| descriptor.safe_name == "file_read")
+                .expect("file_read descriptor")
+                .concurrency_hint,
+            ConcurrencyHint::SafeForParallel,
+            "visible surface must preserve inner descriptor metadata"
         );
         let advertised = port.tool_definitions().expect("tool definitions");
         assert!(
@@ -870,7 +936,7 @@ mod tests {
         let next_turn = disclosure_port(
             inner as Arc<dyn LoopCapabilityPort>,
             run_context(TurnId::new()).await,
-            promoted_by_thread,
+            promoted_by_scope,
         );
         next_turn
             .visible_capabilities(VisibleCapabilityRequest)
@@ -1035,19 +1101,176 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn promotions_are_scoped_by_full_turn_scope_not_thread_only() {
+        let inner = Arc::new(SpyPort {
+            definitions: vec![
+                provider_definition("fixture.file_read", "file_read", "Read a file"),
+                provider_definition(
+                    "fixture.hidden",
+                    "hidden_tool",
+                    "Hidden workspace operation",
+                ),
+                provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+                provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+                provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+                provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+            ],
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
+        let tenant_a_first_turn = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context_for(
+                "tenant-a",
+                "agent-tool-disclosure",
+                "project-tool-disclosure",
+                "shared-thread",
+                TurnId::new(),
+            )
+            .await,
+            Arc::clone(&promoted_by_scope),
+        );
+        tenant_a_first_turn
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+        let search = tenant_a_first_turn
+            .register_provider_tool_call(provider_call(
+                TOOL_SEARCH_NAME,
+                json!({"query": "hidden", "limit": 5}),
+            ))
+            .await
+            .expect("search registers");
+        assert!(matches!(
+            tenant_a_first_turn
+                .invoke_capability(CapabilityInvocation {
+                    surface_version: search.surface_version,
+                    capability_id: search.capability_id,
+                    input_ref: search.input_ref,
+                    approval_resume: None,
+                    auth_resume: None,
+                })
+                .await
+                .expect("search invokes"),
+            CapabilityOutcome::Completed(_)
+        ));
+        let target = tenant_a_first_turn
+            .register_provider_tool_call(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
+            ))
+            .await
+            .expect("target registers");
+        assert!(matches!(
+            tenant_a_first_turn
+                .invoke_capability(CapabilityInvocation {
+                    surface_version: target.surface_version,
+                    capability_id: target.capability_id,
+                    input_ref: target.input_ref,
+                    approval_resume: None,
+                    auth_resume: None,
+                })
+                .await
+                .expect("target invokes"),
+            CapabilityOutcome::Completed(_)
+        ));
+
+        let tenant_b_next_turn = disclosure_port(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context_for(
+                "tenant-b",
+                "agent-tool-disclosure",
+                "project-tool-disclosure",
+                "shared-thread",
+                TurnId::new(),
+            )
+            .await,
+            promoted_by_scope,
+        );
+        tenant_b_next_turn
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("tenant B surface builds");
+        let tenant_b_advertised = tenant_b_next_turn
+            .tool_definitions()
+            .expect("tenant B tool definitions");
+        assert!(
+            !tenant_b_advertised
+                .iter()
+                .any(|definition| definition.name == "hidden_tool"),
+            "promotion from tenant A must not leak to tenant B with the same thread id"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_search_rejects_missing_non_string_or_blank_query() {
+        let inner = Arc::new(SpyPort {
+            definitions: vec![provider_definition(
+                "fixture.file_read",
+                "file_read",
+                "Read a file",
+            )],
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        for arguments in [
+            json!({}),
+            json!({"query": 42}),
+            json!({"query": ""}),
+            json!({"query": "   "}),
+        ] {
+            let candidate = port
+                .register_provider_tool_call(provider_call(TOOL_SEARCH_NAME, arguments))
+                .await
+                .expect("tool_search registers");
+            let outcome = port
+                .invoke_capability(CapabilityInvocation {
+                    surface_version: candidate.surface_version,
+                    capability_id: candidate.capability_id,
+                    input_ref: candidate.input_ref,
+                    approval_resume: None,
+                    auth_resume: None,
+                })
+                .await
+                .expect("tool_search invokes");
+            assert!(matches!(
+                outcome,
+                CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    ..
+                })
+            ));
+        }
+    }
+
     fn disclosure_port(
         inner: Arc<dyn LoopCapabilityPort>,
         run_context: LoopRunContext,
-        promoted_by_thread: Arc<Mutex<HashMap<String, PromotedSet>>>,
+        promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     ) -> ToolDisclosureCapabilityPort {
         ToolDisclosureCapabilityPort {
             inner,
             run_context,
             result_writer: Arc::new(TestWriter),
-            promoted_by_thread,
+            promoted_by_scope,
             caps: DisclosureCaps {
-                max_tokens: 1,
-                max_tools: 1,
+                max_tokens: u32::MAX,
+                max_tools: 5,
                 ctx_limit: None,
             },
             turn_state: Mutex::new(None),
@@ -1057,10 +1280,27 @@ mod tests {
     }
 
     async fn run_context(turn_id: TurnId) -> LoopRunContext {
-        let tenant_id = TenantId::new("tenant-tool-disclosure").expect("valid tenant");
-        let agent_id = AgentId::new("agent-tool-disclosure").expect("valid agent");
-        let project_id = ProjectId::new("project-tool-disclosure").expect("valid project");
-        let thread_id = ThreadId::new("thread-tool-disclosure").expect("valid thread");
+        run_context_for(
+            "tenant-tool-disclosure",
+            "agent-tool-disclosure",
+            "project-tool-disclosure",
+            "thread-tool-disclosure",
+            turn_id,
+        )
+        .await
+    }
+
+    async fn run_context_for(
+        tenant: &str,
+        agent: &str,
+        project: &str,
+        thread: &str,
+        turn_id: TurnId,
+    ) -> LoopRunContext {
+        let tenant_id = TenantId::new(tenant).expect("valid tenant");
+        let agent_id = AgentId::new(agent).expect("valid agent");
+        let project_id = ProjectId::new(project).expect("valid project");
+        let thread_id = ThreadId::new(thread).expect("valid thread");
         let turn_scope = TurnScope::new(tenant_id, Some(agent_id), Some(project_id), thread_id);
         let resolved: ResolvedRunProfile = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())

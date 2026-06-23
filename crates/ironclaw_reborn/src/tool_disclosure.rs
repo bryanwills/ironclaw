@@ -1,6 +1,9 @@
 //! Pure progressive tool-disclosure catalog and selector.
 //!
-use std::collections::{BTreeSet, HashSet};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::LazyLock,
+};
 
 use ironclaw_host_api::{CapabilityId, RuntimeKind};
 use ironclaw_turns::run_profile::{
@@ -46,6 +49,7 @@ pub(crate) struct CatalogEntry {
     definition: ProviderToolDefinition,
     est_schema_tokens: u32,
     search_blob: String,
+    search_terms: HashSet<String>,
     tier: ToolTier,
 }
 
@@ -76,10 +80,12 @@ impl CapabilityCatalog {
         let pinned_names: HashSet<&str> = profile_pins.iter().map(String::as_str).collect();
         let mut entries: Vec<CatalogEntry> = definitions
             .iter()
+            .filter(|definition| !is_bridge_name(&definition.name))
             .map(|definition| {
                 let est_schema_tokens = estimate_definition_tokens(definition);
                 let search_blob =
                     format!("{} {}", definition.name, definition.description).to_lowercase();
+                let search_terms = search_terms(&search_blob);
                 let tier = if CORE_TOOL_NAMES.contains(&definition.name.as_str())
                     || pinned_names.contains(definition.name.as_str())
                 {
@@ -91,6 +97,7 @@ impl CapabilityCatalog {
                     definition: definition.clone(),
                     est_schema_tokens,
                     search_blob,
+                    search_terms,
                     tier,
                 }
             })
@@ -203,65 +210,87 @@ impl DisclosureCaps {
     }
 }
 
+static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> =
+    LazyLock::new(|| {
+        let definitions = vec![
+            bridge_tool_definition(
+                TOOL_SEARCH_NAME,
+                "Search the deferred tool catalog by name and description.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query for the deferred tool catalog."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of matching tool names to return.",
+                            "default": 10,
+                            "minimum": 1
+                        }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }),
+            ),
+            bridge_tool_definition(
+                TOOL_DESCRIBE_NAME,
+                "Return the full schema for one named deferred tool.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Provider-facing tool name to describe."
+                        }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }),
+            ),
+            bridge_tool_definition(
+                TOOL_CALL_NAME,
+                "Invoke one named tool through the normal dispatcher path.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Provider-facing tool name to invoke."
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments for the named tool.",
+                            "additionalProperties": true
+                        }
+                    },
+                    "required": ["name", "arguments"],
+                    "additionalProperties": false
+                }),
+            ),
+        ];
+        definitions
+            .into_iter()
+            .map(|definition| {
+                let est_schema_tokens = estimate_definition_tokens(&definition);
+                (definition, est_schema_tokens)
+            })
+            .collect()
+    });
+
+type BridgeDefinitionWithTokens = (&'static ProviderToolDefinition, u32);
+
 pub(crate) fn bridge_tool_definitions() -> Vec<ProviderToolDefinition> {
-    vec![
-        bridge_tool_definition(
-            TOOL_SEARCH_NAME,
-            "Search the deferred tool catalog by name and description.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query for the deferred tool catalog."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of matching tool names to return.",
-                        "default": 10,
-                        "minimum": 1
-                    }
-                },
-                "required": ["query"],
-                "additionalProperties": false
-            }),
-        ),
-        bridge_tool_definition(
-            TOOL_DESCRIBE_NAME,
-            "Return the full schema for one named deferred tool.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Provider-facing tool name to describe."
-                    }
-                },
-                "required": ["name"],
-                "additionalProperties": false
-            }),
-        ),
-        bridge_tool_definition(
-            TOOL_CALL_NAME,
-            "Invoke one named tool through the normal dispatcher path.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Provider-facing tool name to invoke."
-                    },
-                    "arguments": {
-                        "type": "object",
-                        "description": "Arguments for the named tool.",
-                        "additionalProperties": true
-                    }
-                },
-                "required": ["name", "arguments"],
-                "additionalProperties": false
-            }),
-        ),
-    ]
+    bridge_tool_definitions_with_tokens()
+        .map(|(definition, _)| definition.clone())
+        .collect()
+}
+
+fn bridge_tool_definitions_with_tokens() -> impl Iterator<Item = BridgeDefinitionWithTokens> {
+    BRIDGE_TOOL_DEFINITIONS
+        .iter()
+        .map(|(definition, est_schema_tokens)| (definition, *est_schema_tokens))
 }
 
 pub(crate) fn is_bridge_name(name: &str) -> bool {
@@ -269,16 +298,14 @@ pub(crate) fn is_bridge_name(name: &str) -> bool {
 }
 
 pub(crate) fn is_bridge_capability_id(capability_id: &CapabilityId) -> bool {
-    bridge_tool_definitions()
-        .iter()
-        .any(|definition| &definition.capability_id == capability_id)
+    bridge_tool_definitions_with_tokens()
+        .any(|(definition, _)| &definition.capability_id == capability_id)
 }
 
 /// Selects the active wire surface for a turn.
 ///
-/// TODO(next pass): enforce the 24-tool / 12k advertised cap once promotion is
-/// live; if eviction is required, start a deliberate prompt-surface epoch reset
-/// rather than silently reordering the promoted suffix.
+/// TODO(next pass): if promoted tools are truncated by caps, start a deliberate
+/// prompt-surface epoch reset rather than silently carrying old prompt context.
 pub(crate) fn select_active_set(
     catalog: &CapabilityCatalog,
     promoted: &PromotedSet,
@@ -316,19 +343,28 @@ pub(crate) fn select_active_set(
         );
     }
 
-    for definition in bridge_tool_definitions() {
-        let est_schema_tokens = estimate_definition_tokens(&definition);
+    for (definition, est_schema_tokens) in bridge_tool_definitions_with_tokens() {
         append_definition(
             &mut definitions,
             &mut advertised_tokens,
             &mut included_names,
-            definition,
+            definition.clone(),
             est_schema_tokens,
         );
     }
 
+    let threshold_tokens = caps.defer_threshold_tokens();
     for name in promoted.iter() {
         if let Some(entry) = catalog.entry_by_name(name) {
+            if included_names.contains(name) {
+                continue;
+            }
+            if definitions.len() >= caps.max_tools {
+                break;
+            }
+            if advertised_tokens.saturating_add(entry.est_schema_tokens) > threshold_tokens {
+                break;
+            }
             append_definition(
                 &mut definitions,
                 &mut advertised_tokens,
@@ -460,21 +496,24 @@ fn append_definition(
 }
 
 fn score_tool_entry(entry: &CatalogEntry, query_terms: &[&str]) -> u32 {
-    let blob_terms: HashSet<&str> = entry
-        .search_blob
-        .split_whitespace()
-        .map(|term| term.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
-        .filter(|term| !term.is_empty())
-        .collect();
     let mut keyword_score = 0_u32;
     for term in query_terms {
-        if entry.definition.name.eq_ignore_ascii_case(term) || blob_terms.contains(term) {
+        if entry.definition.name.eq_ignore_ascii_case(term) || entry.search_terms.contains(*term) {
             keyword_score = keyword_score.saturating_add(10);
         } else if entry.search_blob.contains(term) {
             keyword_score = keyword_score.saturating_add(5);
         }
     }
     keyword_score.min(MAX_KEYWORD_SCORE)
+}
+
+fn search_terms(search_blob: &str) -> HashSet<String> {
+    search_blob
+        .split_whitespace()
+        .map(|term| term.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+        .filter(|term| !term.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn bridge_tool_definition(
@@ -554,7 +593,7 @@ fn canonical_tool_schema_value(definition: &ProviderToolDefinition) -> Value {
     Value::Object(object)
 }
 
-fn canonicalize_json(value: &Value) -> Value {
+pub(crate) fn canonicalize_json(value: &Value) -> Value {
     match value {
         Value::Array(values) => Value::Array(values.iter().map(canonicalize_json).collect()),
         Value::Object(object) => {
@@ -607,6 +646,46 @@ mod tests {
             catalog.entry_by_name("alpha_tool").map(|entry| entry.tier),
             Some(ToolTier::Discoverable)
         );
+    }
+
+    #[test]
+    fn catalog_reserves_bridge_names_for_synthetic_definitions() {
+        let definitions = vec![
+            fixture_tool(
+                TOOL_SEARCH_NAME,
+                "Conflicting real tool",
+                small_no_arg_schema(),
+            ),
+            fixture_tool(
+                "file_read",
+                "Read files from the workspace.",
+                medium_schema(0),
+            ),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog.definition_by_name(TOOL_SEARCH_NAME).is_none());
+
+        let active = select_active_set(
+            &catalog,
+            &PromotedSet::default(),
+            DisclosureCaps {
+                max_tokens: 1,
+                max_tools: 0,
+                ctx_limit: None,
+            },
+        );
+        let bridge = bridge_tool_definitions()
+            .into_iter()
+            .find(|definition| definition.name == TOOL_SEARCH_NAME)
+            .expect("tool_search bridge definition");
+        let advertised = active
+            .definitions
+            .iter()
+            .find(|definition| definition.name == TOOL_SEARCH_NAME)
+            .expect("tool_search advertised");
+        assert_eq!(advertised.capability_id, bridge.capability_id);
     }
 
     #[test]
@@ -704,17 +783,35 @@ mod tests {
             fixture_tool("aaa_promoted", "Promoted", medium_schema(4)),
             fixture_tool("other_tool", "Other", medium_schema(5)),
         ];
+        let mut definitions = definitions;
+        for index in 0..8 {
+            definitions.push(fixture_tool(
+                format!("large_unpromoted_{index}"),
+                "Large unpromoted",
+                large_nested_schema(index + 6),
+            ));
+        }
         let catalog = CapabilityCatalog::new(&definitions, &[]);
         let mut promoted = PromotedSet::default();
         promoted.push("zzz_promoted");
         promoted.push("aaa_promoted");
         promoted.push("file_read");
+        let bridge_tokens = bridge_tool_definitions_with_tokens()
+            .fold(0_u32, |total, (_definition, est_schema_tokens)| {
+                total.saturating_add(est_schema_tokens)
+            });
+        let active_budget = ["file_read", "memory_search", "zzz_promoted", "aaa_promoted"]
+            .into_iter()
+            .filter_map(|name| catalog.entry_by_name(name))
+            .fold(bridge_tokens, |total, entry| {
+                total.saturating_add(entry.est_schema_tokens)
+            });
 
         let active = select_active_set(
             &catalog,
             &promoted,
             DisclosureCaps {
-                max_tokens: 1,
+                max_tokens: active_budget,
                 max_tools: 32,
                 ctx_limit: None,
             },
@@ -738,6 +835,96 @@ mod tests {
                 "aaa_promoted"
             ]
         );
+    }
+
+    #[test]
+    fn select_active_set_caps_promoted_suffix_without_dropping_core_or_bridges() {
+        let mut definitions = vec![fixture_tool(
+            "file_read",
+            "Read files from the workspace.",
+            medium_schema(0),
+        )];
+        for index in 0..12 {
+            definitions.push(fixture_tool(
+                format!("promoted_{index:02}"),
+                format!("Promoted operation {index}"),
+                large_nested_schema(index),
+            ));
+        }
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let mut promoted = PromotedSet::default();
+        for index in 0..12 {
+            promoted.push(format!("promoted_{index:02}"));
+        }
+
+        let base_count = bridge_tool_definitions().len() + 1;
+        let by_count = select_active_set(
+            &catalog,
+            &promoted,
+            DisclosureCaps {
+                max_tokens: u32::MAX,
+                max_tools: base_count + 1,
+                ctx_limit: None,
+            },
+        );
+        let by_count_names: Vec<&str> = by_count
+            .definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
+        assert!(by_count.deferred);
+        assert!(by_count.definitions.len() <= base_count + 1);
+        assert!(by_count_names.contains(&"file_read"));
+        assert!(by_count_names.contains(&TOOL_SEARCH_NAME));
+        assert!(by_count_names.contains(&TOOL_DESCRIBE_NAME));
+        assert!(by_count_names.contains(&TOOL_CALL_NAME));
+        assert!(by_count_names.contains(&"promoted_00"));
+        assert!(!by_count_names.contains(&"promoted_01"));
+
+        let bridge_tokens = bridge_tool_definitions_with_tokens()
+            .fold(0_u32, |total, (_definition, est_schema_tokens)| {
+                total.saturating_add(est_schema_tokens)
+            });
+        let token_threshold = bridge_tokens
+            .saturating_add(
+                catalog
+                    .entry_by_name("file_read")
+                    .expect("file_read entry")
+                    .est_schema_tokens,
+            )
+            .saturating_add(
+                catalog
+                    .entry_by_name("promoted_00")
+                    .expect("promoted entry")
+                    .est_schema_tokens,
+            );
+        assert!(
+            catalog.total_schema_tokens() > token_threshold,
+            "fixture must force deferred mode by token budget"
+        );
+        let by_tokens = select_active_set(
+            &catalog,
+            &promoted,
+            DisclosureCaps {
+                max_tokens: token_threshold,
+                max_tools: 32,
+                ctx_limit: None,
+            },
+        );
+        let by_token_names: Vec<&str> = by_tokens
+            .definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
+        assert!(by_tokens.deferred);
+        assert!(by_tokens.definitions.len() <= 32);
+        assert!(by_tokens.advertised_tokens <= token_threshold);
+        assert!(by_token_names.contains(&"file_read"));
+        assert!(by_token_names.contains(&TOOL_SEARCH_NAME));
+        assert!(by_token_names.contains(&TOOL_DESCRIBE_NAME));
+        assert!(by_token_names.contains(&TOOL_CALL_NAME));
+        assert!(by_token_names.contains(&"promoted_00"));
+        assert!(!by_token_names.contains(&"promoted_01"));
     }
 
     #[test]
