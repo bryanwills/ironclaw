@@ -1337,6 +1337,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_provider_encoded_non_builtin_extension_tool_dispatches_and_promotes() {
+        // Generality guard: the forgiving direct-deferred path must resolve ANY
+        // deferred tool by its provider-encoded wire name, not just `builtin__*`.
+        // Production sets `ProviderToolDefinition.name` to the encoded wire name
+        // (`capability.provider_tool_name`, see capability_port surface_snapshot)
+        // for every provider, and the catalog matches it by exact name. This
+        // fixture mirrors that for a NON-builtin extension tool
+        // (`gmail.send_message` -> wire `gmail__send_message`), so the resolution
+        // cannot lean on the builtin-specific `strip_prefix("builtin__")` leniency
+        // — if it did, this tool would fail "unresolved unadvertised" exactly like
+        // the long tail of extension/MCP tools would in production.
+        let definitions = vec![
+            provider_definition("builtin.read_file", "builtin__read_file", "Read a file"),
+            provider_definition(
+                "gmail.send_message",
+                "gmail__send_message",
+                "Send an email via Gmail",
+            ),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
+        let first_run_context = run_context(TurnId::new()).await;
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            first_run_context,
+            Arc::clone(&promoted_by_scope),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+        let advertised = port.tool_definitions().expect("tool definitions");
+        assert!(
+            !advertised
+                .iter()
+                .any(|definition| definition.name == "gmail__send_message"),
+            "gmail__send_message starts deferred"
+        );
+
+        let direct_call = provider_call("gmail__send_message", json!({"path": "demo"}));
+        let capability_ids = port
+            .provider_tool_call_capability_ids(&direct_call)
+            .expect("provider-encoded non-builtin direct deferred call resolves");
+        assert_eq!(
+            capability_ids.provider_capability_id.as_str(),
+            "gmail.send_message"
+        );
+        assert_eq!(
+            capability_ids
+                .effective_capability_ids
+                .iter()
+                .map(CapabilityId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["gmail.send_message"]
+        );
+        port.validate_provider_tool_call(&direct_call)
+            .expect("provider-encoded non-builtin direct deferred call validates against target");
+        let target = port
+            .register_provider_tool_call(direct_call)
+            .await
+            .expect("provider-encoded non-builtin direct deferred call registers as target");
+        assert_eq!(target.capability_id.as_str(), "gmail.send_message");
+        assert_eq!(
+            target
+                .provider_replay
+                .as_ref()
+                .expect("provider replay")
+                .provider_tool_name,
+            "gmail__send_message"
+        );
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: target.surface_version,
+                capability_id: target.capability_id,
+                input_ref: target.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("target invokes");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(
+            inner
+                .registered_calls
+                .lock()
+                .expect("registered calls lock")
+                .last()
+                .expect("target call")
+                .name,
+            "gmail__send_message",
+            "inner registration must receive the catalog target name"
+        );
+        assert_eq!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .last()
+                .expect("target invocation")
+                .capability_id
+                .as_str(),
+            "gmail.send_message"
+        );
+
+        let next_turn = disclosure_port(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            promoted_by_scope,
+        );
+        next_turn
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("next visible surface");
+        let next_advertised = next_turn.tool_definitions().expect("next tool definitions");
+        assert!(
+            next_advertised
+                .iter()
+                .any(|definition| definition.name == "gmail__send_message"),
+            "successful non-builtin direct deferred call should promote the target next turn"
+        );
+    }
+
+    #[tokio::test]
     async fn tool_call_targeting_a_bridge_is_rejected_without_dispatch() {
         // Recursion guard: tool_call(name = a bridge) must NOT re-enter the
         // bridge or dispatch anything — it is a model-recoverable failure.
