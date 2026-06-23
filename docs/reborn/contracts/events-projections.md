@@ -117,7 +117,10 @@ Reducer rules:
   instead of creating a separate synthetic UI row. Product projections represent
   auth/approval refusal as terminal `failed` activity with sanitized
   `error_kind = gate_declined`; run-level `cancelled` remains reserved for
-  whole-run cancellation.
+  whole-run cancellation. Display-preview projections derived from failed
+  capability activity must carry the same sanitized `error_kind` so refresh and
+  replay paths can render refusal as a neutral declined state instead of a
+  generic failure.
 - product-facing gate projection rows must carry the run identity and gate kind
   needed to resolve the gate. Clients must not infer gate run identity from the
   latest active run or from tool name/order heuristics.

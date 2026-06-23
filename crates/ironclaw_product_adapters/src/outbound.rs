@@ -412,6 +412,7 @@ pub struct CapabilityDisplayPreviewView {
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
+    pub error_kind: Option<String>,
     pub title: String,
     pub subtitle: Option<String>,
     pub input_summary: Option<String>,
@@ -434,6 +435,7 @@ impl CapabilityDisplayPreviewView {
             thread_id: input.thread_id,
             capability_id: input.capability_id,
             status: input.status,
+            error_kind: input.error_kind,
             title: input.title,
             subtitle: input.subtitle,
             input_summary: input.input_summary,
@@ -473,6 +475,9 @@ impl CapabilityDisplayPreviewView {
         )?;
         validate_display_preview(self.output_preview.as_deref())?;
         validate_display_kind(self.output_kind.as_deref())?;
+        if let Some(error_kind) = self.error_kind.as_deref() {
+            validate_error_kind("capability_display_error_kind", error_kind)?;
+        }
         validate_optional_display_text(
             "capability_display_timeline_message_id",
             self.timeline_message_id.as_deref(),
@@ -503,6 +508,8 @@ impl Serialize for CapabilityDisplayPreviewView {
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
             status: CapabilityActivityStatusView,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error_kind: &'a Option<String>,
             title: &'a str,
             subtitle: &'a Option<String>,
             input_summary: &'a Option<String>,
@@ -524,6 +531,7 @@ impl Serialize for CapabilityDisplayPreviewView {
             thread_id: &self.thread_id,
             capability_id: &self.capability_id,
             status: self.status,
+            error_kind: &self.error_kind,
             title: &self.title,
             subtitle: &self.subtitle,
             input_summary: &self.input_summary,
@@ -548,6 +556,7 @@ pub struct CapabilityDisplayPreviewViewInput {
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
+    pub error_kind: Option<String>,
     pub title: String,
     pub subtitle: Option<String>,
     pub input_summary: Option<String>,
@@ -576,6 +585,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             thread_id: Option<ThreadId>,
             capability_id: CapabilityId,
             status: CapabilityActivityStatusView,
+            error_kind: Option<String>,
             title: String,
             subtitle: Option<String>,
             input_summary: Option<String>,
@@ -596,6 +606,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             thread_id: wire.thread_id,
             capability_id: wire.capability_id,
             status: wire.status,
+            error_kind: wire.error_kind,
             title: wire.title,
             subtitle: wire.subtitle,
             input_summary: wire.input_summary,
@@ -1813,6 +1824,7 @@ mod tests {
             thread_id: Some(ThreadId::new("thread-tool-preview").expect("thread id")),
             capability_id: CapabilityId::new("builtin.read_file").expect("capability id"),
             status: CapabilityActivityStatusView::Completed,
+            error_kind: None,
             title: "read_file".to_string(),
             subtitle: Some("src/main.rs".to_string()),
             input_summary: Some("path: src/main.rs".to_string()),
@@ -1832,6 +1844,29 @@ mod tests {
         assert_eq!(json["turn_run_id"], run_id.to_string());
         assert_eq!(json["subtitle"], "src/main.rs");
         assert_eq!(json["output_kind"], "text");
+    }
+
+    #[test]
+    fn capability_display_preview_view_round_trips_error_kind() {
+        let json = serde_json::json!({
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-preview",
+            "capability_id": "builtin.extension_activate",
+            "status": "failed",
+            "error_kind": "gate_declined",
+            "title": "extension_activate",
+            "output_summary": "tool failed: gate_declined",
+            "output_preview": "tool failed: gate_declined",
+            "output_kind": "text",
+            "truncated": false,
+            "updated_at": Utc::now(),
+        });
+
+        let view = serde_json::from_value::<CapabilityDisplayPreviewView>(json)
+            .expect("preview error kind is valid");
+        assert_eq!(view.error_kind.as_deref(), Some("gate_declined"));
+        let serialized = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(serialized["error_kind"], "gate_declined");
     }
 
     #[test]

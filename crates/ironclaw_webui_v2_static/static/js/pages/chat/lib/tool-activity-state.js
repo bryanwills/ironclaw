@@ -23,10 +23,10 @@ export function failGateToolActivity(
   setMessages,
   gate,
   stateRef,
-  toolError = "Declined by user.",
+  toolError = "gate_declined",
 ) {
   const card = toolCardFromGate(gate, {
-    toolStatus: "error",
+    toolStatus: "declined",
     toolError,
     toolErrorKind: "gate_declined",
   });

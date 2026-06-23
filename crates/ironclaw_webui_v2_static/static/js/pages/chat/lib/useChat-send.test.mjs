@@ -461,7 +461,7 @@ test("useChat clears transient run and gate state during thread switch render", 
   ]);
 });
 
-test("useChat.approve deny marks the current gated tool failed before resume", async () => {
+test("useChat.approve deny marks the current gated tool declined before resume", async () => {
   const threadId = "thread-1";
   const runId = "run-1";
   const gateRef = "gate-1";
@@ -554,8 +554,8 @@ test("useChat.approve deny marks the current gated tool failed before resume", a
     always: false,
   });
   assert.equal(renderedMessages.length, 1);
-  assert.equal(renderedMessages[0].toolStatus, "error");
-  assert.equal(renderedMessages[0].toolError, "Declined by user.");
+  assert.equal(renderedMessages[0].toolStatus, "declined");
+  assert.equal(renderedMessages[0].toolError, "gate_declined");
   assert.equal(renderedMessages[0].toolErrorKind, "gate_declined");
   assert.equal(renderedMessages[0].gateRef, gateRef);
   assert.deepEqual(JSON.parse(JSON.stringify(stateUpdates.slice(-3))), [

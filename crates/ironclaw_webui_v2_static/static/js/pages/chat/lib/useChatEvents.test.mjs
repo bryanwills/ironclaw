@@ -758,7 +758,7 @@ test("useChatEvents: failed parent terminal after resumed auth cancel clears typ
   );
 });
 
-test("useChatEvents: late started activity cannot downgrade remembered failed tool", () => {
+test("useChatEvents: late started activity cannot downgrade remembered declined tool", () => {
   const runId = "run-terminal-tool";
   const invocationId = "invocation-terminal-tool";
   const harness = createUseChatEventsHarness();
@@ -775,7 +775,7 @@ test("useChatEvents: late started activity cannot downgrade remembered failed to
       },
     },
   });
-  assert.equal(harness.messages[0].toolStatus, "error");
+  assert.equal(harness.messages[0].toolStatus, "declined");
 
   // A full history refresh can temporarily rebuild messages from the
   // transcript, which does not include capability_display_preview records for
@@ -803,8 +803,8 @@ test("useChatEvents: late started activity cannot downgrade remembered failed to
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, `tool-${invocationId}`);
   assert.equal(harness.messages[0].toolName, "web_search");
-  assert.equal(harness.messages[0].toolStatus, "error");
-  assert.equal(harness.messages[0].toolError, "Declined by user.");
+  assert.equal(harness.messages[0].toolStatus, "declined");
+  assert.equal(harness.messages[0].toolError, "gate_declined");
   assert.equal(harness.messages[0].toolErrorKind, "gate_declined");
 });
 

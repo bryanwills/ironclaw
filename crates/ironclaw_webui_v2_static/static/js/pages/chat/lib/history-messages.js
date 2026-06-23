@@ -169,18 +169,21 @@ function toolCardFromPreviewRecord(record) {
   return toolCardFromPreview(envelope);
 }
 
+const GATE_DECLINED_ERROR_KIND = "gate_declined";
+
 // Map a `CapabilityDisplayPreviewEnvelope` (timeline) or
 // `CapabilityDisplayPreviewView` (SSE) into the field set
 // `ToolActivityCard` destructures.
 export function toolCardFromPreview(preview) {
   const failed = preview.status === "failed" || preview.status === "killed";
+  const errorKind = preview.error_kind || null;
   const activityOrder = numericActivityOrder(preview.activity_order);
   return {
     invocationId: preview.invocation_id,
     callId: preview.invocation_id,
     capabilityId: preview.capability_id || null,
     toolName: toolDisplayName(preview.title || preview.capability_id) || "tool",
-    toolStatus: toolStatusFromActivityStatus(preview.status),
+    toolStatus: toolStatusFromActivityStatus(preview.status, errorKind),
     toolDetail: preview.subtitle || null,
     toolParameters: preview.input_summary || null,
     // On failure the output fields carry the error text — surface it
@@ -190,12 +193,13 @@ export function toolCardFromPreview(preview) {
       ? null
       : preview.output_preview || preview.output_summary || null,
     toolError: failed
-      ? preview.output_summary ||
+      ? toolErrorText(errorKind) ||
+        preview.output_summary ||
         preview.output_preview ||
         preview.result_ref ||
         null
       : null,
-    toolErrorKind: null,
+    toolErrorKind: errorKind,
     toolDurationMs: null,
     updatedAt: preview.updated_at || null,
     resultRef: preview.result_ref || null,
@@ -222,7 +226,7 @@ export function toolCardFromActivity(activity) {
     callId: activity.invocation_id,
     capabilityId: activity.capability_id || null,
     toolName: toolDisplayName(activity.capability_id) || "tool",
-    toolStatus: toolStatusFromActivityStatus(activity.status),
+    toolStatus: toolStatusFromActivityStatus(activity.status, errorKind),
     toolDetail: activity.subtitle || null,
     toolParameters: activity.input_summary || null,
     toolResultPreview: null,
@@ -242,12 +246,11 @@ export function toolCardFromActivity(activity) {
 
 function toolErrorText(errorKind) {
   if (!errorKind) return null;
-  if (errorKind === "gate_declined") return "Declined by user.";
   return errorKind;
 }
 
 export function isTerminalToolStatus(status) {
-  return status === "success" || status === "error";
+  return status === "success" || status === "error" || status === "declined";
 }
 
 export function toolDisplayName(name) {
@@ -257,7 +260,8 @@ export function toolDisplayName(name) {
   return parts[parts.length - 1] || value;
 }
 
-function toolStatusFromActivityStatus(status) {
+function toolStatusFromActivityStatus(status, errorKind = null) {
+  if (errorKind === GATE_DECLINED_ERROR_KIND) return "declined";
   switch (status) {
     case "completed":
       return "success";

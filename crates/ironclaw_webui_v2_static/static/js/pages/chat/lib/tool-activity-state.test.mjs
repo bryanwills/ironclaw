@@ -76,7 +76,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       [
         "tool-invocation-web",
         "search",
-        "error",
+        "declined",
         "gate:web",
       ],
       [
@@ -99,7 +99,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
     stateRef,
   );
 
-  assert.equal(messages[0].toolStatus, "error");
+  assert.equal(messages[0].toolStatus, "declined");
 
   upsertToolActivityMessage(
     setMessages,
@@ -134,13 +134,13 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       [
         "tool-invocation-web",
         "search",
-        "error",
+        "declined",
         "gate:web",
       ],
       [
         "tool-invocation-nearai",
         "web_search",
-        "error",
+        "declined",
         "gate:nearai",
       ],
     ],
@@ -178,19 +178,19 @@ test("tool activity state keeps repeated same-tool approval gates separate", () 
       [
         "tool-invocation-install-1",
         "extension_install",
-        "error",
+        "declined",
         "gate:extension-install:1",
       ],
       [
         "tool-invocation-install-2",
         "extension_install",
-        "error",
+        "declined",
         "gate:extension-install:2",
       ],
       [
         "tool-invocation-install-3",
         "extension_install",
-        "error",
+        "declined",
         "gate:extension-install:3",
       ],
     ],
@@ -244,6 +244,34 @@ test("tool activity cards use unprefixed display names", () => {
     }).toolName,
     "web_search",
   );
+});
+
+test("tool activity cards map gate-declined lifecycle frames to declined status", () => {
+  const card = toolCardFromActivity({
+    invocation_id: "invocation-declined",
+    capability_id: "builtin.extension_activate",
+    status: "failed",
+    error_kind: "gate_declined",
+  });
+
+  assert.equal(card.toolStatus, "declined");
+  assert.equal(card.toolError, "gate_declined");
+  assert.equal(card.toolErrorKind, "gate_declined");
+});
+
+test("tool preview cards preserve gate-declined error kind as declined status", () => {
+  const card = toolCardFromPreview({
+    invocation_id: "invocation-preview-declined",
+    capability_id: "builtin.extension_activate",
+    title: "extension_activate",
+    status: "failed",
+    error_kind: "gate_declined",
+    output_summary: "gate_declined",
+  });
+
+  assert.equal(card.toolStatus, "declined");
+  assert.equal(card.toolError, "gate_declined");
+  assert.equal(card.toolErrorKind, "gate_declined");
 });
 
 test("tool activity state leaves pending gates unnumbered after existing timeline activity", () => {
@@ -318,7 +346,7 @@ test("tool activity state preserves existing order when a gate is denied", () =>
   failGateToolActivity(setMessages, gate, stateRef);
 
   assert.equal(messages.length, 1);
-  assert.equal(messages[0].toolStatus, "error");
+  assert.equal(messages[0].toolStatus, "declined");
   assert.equal(messages[0].activityOrder, 4);
 });
 
