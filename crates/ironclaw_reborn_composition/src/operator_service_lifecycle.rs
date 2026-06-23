@@ -116,7 +116,9 @@ impl ServiceCommandRunner for SystemCommandRunner {
                 None if started.elapsed() >= SERVICE_COMMAND_TIMEOUT => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = stdout_reader.join();
+                    if stdout_reader.is_finished() {
+                        let _ = stdout_reader.join();
+                    }
                     return Err(ServiceCommandError::Timeout);
                 }
                 None => std::thread::sleep(Duration::from_millis(25)),
@@ -638,11 +640,16 @@ impl RebornLocalServiceLifecycle {
     ) -> Result<String, RebornServiceLifecycleResponse> {
         let executable = self.executable_path_for_action(action)?;
         let boot_env = self.webui_boot_env_for_action(action)?;
-        let exe = systemd_exec_escape(executable.to_string_lossy().as_ref());
-        let token_env_name = systemd_environment_escape(&boot_env.token_env_name);
-        let token = systemd_environment_escape(&boot_env.token);
-        let user_id_env_name = systemd_environment_escape(&boot_env.user_id_env_name);
-        let user_id = systemd_environment_escape(boot_env.user_id.as_str());
+        let exe = systemd_exec_escape(executable.to_string_lossy().as_ref())
+            .map_err(|message| Self::failed_response(action, message))?;
+        let token_env_name = systemd_environment_escape(&boot_env.token_env_name)
+            .map_err(|message| Self::failed_response(action, message))?;
+        let token = systemd_environment_escape(&boot_env.token)
+            .map_err(|message| Self::failed_response(action, message))?;
+        let user_id_env_name = systemd_environment_escape(&boot_env.user_id_env_name)
+            .map_err(|message| Self::failed_response(action, message))?;
+        let user_id = systemd_environment_escape(boot_env.user_id.as_str())
+            .map_err(|message| Self::failed_response(action, message))?;
         Ok(format!(
             "[Unit]\n\
              Description=IronClaw Reborn WebUI service\n\
@@ -760,19 +767,28 @@ impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
     }
 }
 
-fn systemd_exec_escape(value: &str) -> String {
-    value
+fn systemd_exec_escape(value: &str) -> Result<String, &'static str> {
+    reject_systemd_line_breaks(value)?;
+    Ok(value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('%', "%%")
-        .replace('$', "$$")
+        .replace('$', "$$"))
 }
 
-fn systemd_environment_escape(value: &str) -> String {
-    value
+fn systemd_environment_escape(value: &str) -> Result<String, &'static str> {
+    reject_systemd_line_breaks(value)?;
+    Ok(value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
-        .replace('%', "%%")
+        .replace('%', "%%"))
+}
+
+fn reject_systemd_line_breaks(value: &str) -> Result<(), &'static str> {
+    if value.chars().any(|ch| matches!(ch, '\r' | '\n')) {
+        return Err("local service unit values must not contain line breaks");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1228,6 +1244,36 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         let unit = std::fs::read_to_string(unit_path).expect("unit file");
         assert!(unit.contains("Environment=\"IRONCLAW_REBORN_WEBUI_TOKEN=test$webui%%token\""));
         assert!(!unit.contains("test$$webui"));
+    }
+
+    #[tokio::test]
+    async fn linux_install_rejects_systemd_environment_line_breaks_before_writing_unit() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new("inactive"));
+        let service = linux_service(&temp, runner).with_webui_boot_env(
+            WEBUI_TOKEN_ENV,
+            "test-webui-token\nEnvironment=\"INJECTED=value\"",
+            WEBUI_USER_ID_ENV,
+            "user-test",
+        );
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Install,
+                },
+            )
+            .await
+            .expect("install response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Failed);
+        assert_eq!(
+            response.message,
+            "local service unit values must not contain line breaks"
+        );
+        let unit_path = temp.path().join(".config/systemd/user").join(SYSTEMD_UNIT);
+        assert!(!unit_path.exists());
     }
 
     #[tokio::test]
