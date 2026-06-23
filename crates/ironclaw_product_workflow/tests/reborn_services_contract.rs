@@ -7591,6 +7591,76 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
 }
 
 #[tokio::test]
+async fn operator_config_is_scoped_by_tenant_and_user() {
+    let services = services_with_operator_approval_config();
+    let alice_tenant_a = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("alice").expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+    let bob_tenant_a = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("bob").expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+    let alice_tenant_b = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-beta").expect("tenant"),
+        UserId::new("alice").expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+
+    services
+        .set_operator_config_key(
+            alice_tenant_a.clone(),
+            "agent.auto_approve_tools".to_string(),
+            RebornOperatorConfigSetRequest { value: json!(true) },
+        )
+        .await
+        .expect("alice enables auto approve in tenant alpha");
+    services
+        .set_operator_config_key(
+            alice_tenant_a.clone(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "disabled" }),
+            },
+        )
+        .await
+        .expect("alice disables tool in tenant alpha");
+
+    let alice_alpha = services
+        .get_operator_config_key(alice_tenant_a, "tool.tool.alpha".to_string())
+        .await
+        .expect("alice alpha tool config");
+    assert_eq!(alice_alpha.entry.value["state"], "disabled");
+    assert_eq!(alice_alpha.entry.value["effective_source"], "override");
+
+    for caller in [bob_tenant_a, alice_tenant_b] {
+        let config = services
+            .list_operator_config(caller)
+            .await
+            .expect("isolated operator config");
+        assert_eq!(
+            operator_config_entry_value(&config, "agent.auto_approve_tools"),
+            &json!(false),
+            "auto-approve must not leak across user or tenant"
+        );
+        assert_eq!(
+            operator_config_entry_value(&config, "tool.tool.alpha")["state"],
+            "ask_each_time",
+            "tool override must not leak across user or tenant"
+        );
+        assert_eq!(
+            operator_config_entry_value(&config, "tool.tool.alpha")["effective_source"],
+            "default"
+        );
+    }
+}
+
+#[tokio::test]
 async fn get_operator_setup_returns_snapshot_from_llm_config() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     llm_config.use_active_snapshot("openai", "gpt-5-mini");
