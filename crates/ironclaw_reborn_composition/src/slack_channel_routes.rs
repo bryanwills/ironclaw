@@ -501,11 +501,11 @@ impl SlackChannelRouteAdminRouteConfig {
     }
 
     pub(crate) fn dynamic(
-        tenant_id: TenantId,
-        operator_user_id: UserId,
         store: Arc<dyn SlackChannelRouteStore>,
         setup_service: Arc<SlackSetupService>,
     ) -> Self {
+        let tenant_id = setup_service.tenant_id().clone();
+        let operator_user_id = setup_service.operator_user_id().clone();
         Self {
             scope: SlackChannelRouteAdminScope::Dynamic {
                 tenant_id,
@@ -1857,19 +1857,15 @@ mod tests {
         route_store: Arc<dyn SlackChannelRouteStore>,
         setup_store: Arc<dyn SlackInstallationSetupStore>,
     ) -> SlackChannelRouteAdminRouteConfig {
-        SlackChannelRouteAdminRouteConfig::dynamic(
+        let setup_service = Arc::new(SlackSetupService::new(
             TenantId::new(TENANT).expect("tenant"),
+            AgentId::new("agent:slack-routes").expect("agent"),
+            None,
             UserId::new("user:admin").expect("operator user"),
-            route_store,
-            Arc::new(SlackSetupService::new(
-                TenantId::new(TENANT).expect("tenant"),
-                AgentId::new("agent:slack-routes").expect("agent"),
-                None,
-                UserId::new("user:admin").expect("operator user"),
-                setup_store,
-                Arc::new(InMemorySecretStore::new()),
-            )),
-        )
+            setup_store,
+            Arc::new(InMemorySecretStore::new()),
+        ));
+        SlackChannelRouteAdminRouteConfig::dynamic(route_store, setup_service)
     }
 
     fn request(method: &str, body: &str, tenant_id: &str) -> Request<Body> {

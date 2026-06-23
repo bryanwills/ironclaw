@@ -719,19 +719,15 @@ fn dynamic_route_config(
     route_store: Arc<dyn SlackChannelRouteStore>,
     setup_store: Arc<dyn SlackInstallationSetupStore>,
 ) -> SlackChannelRouteAdminRouteConfig {
-    SlackChannelRouteAdminRouteConfig::dynamic(
+    let setup_service = Arc::new(SlackSetupService::new(
         TenantId::new(TENANT).expect("tenant"),
+        AgentId::new("agent:slack-routes").expect("agent"),
+        None,
         UserId::new("user:admin").expect("operator user"),
-        route_store,
-        Arc::new(SlackSetupService::new(
-            TenantId::new(TENANT).expect("tenant"),
-            AgentId::new("agent:slack-routes").expect("agent"),
-            None,
-            UserId::new("user:admin").expect("operator user"),
-            setup_store,
-            Arc::new(InMemorySecretStore::new()),
-        )),
-    )
+        setup_store,
+        Arc::new(InMemorySecretStore::new()),
+    ));
+    SlackChannelRouteAdminRouteConfig::dynamic(route_store, setup_service)
 }
 
 fn setup_record(user_id: &str, shared_subject_user_id: Option<&str>) -> SlackInstallationSetup {

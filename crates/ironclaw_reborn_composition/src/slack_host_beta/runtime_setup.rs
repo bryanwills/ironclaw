@@ -121,8 +121,6 @@ pub(super) async fn build_runtime_mounts(
         Arc::clone(&channel_route_store),
     );
     let channel_routes = SlackChannelRouteAdminRouteConfig::dynamic(
-        config.tenant_id.clone(),
-        config.operator_user_id.clone(),
         Arc::clone(&channel_route_store),
         Arc::clone(&setup_service),
     );

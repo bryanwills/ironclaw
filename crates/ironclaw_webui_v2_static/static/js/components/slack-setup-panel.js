@@ -224,6 +224,9 @@ function secretInput(label, value, onChange, configured, help = null) {
       <span className="mb-1 block text-[11px] text-iron-500">${label}</span>
       <input
         type="password"
+        autoComplete="off"
+        autoCapitalize="none"
+        spellCheck=${false}
         value=${value}
         onChange=${onChange}
         placeholder=${configured ? "Configured; leave blank to keep" : ""}

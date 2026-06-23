@@ -4735,6 +4735,9 @@ ${$e}`;if(X.current.gateKey!==He&&(X.current={gateKey:He,credentialRef:null,inFl
       <span className="mb-1 block text-[11px] text-iron-500">${e}</span>
       <input
         type="password"
+        autoComplete="off"
+        autoCapitalize="none"
+        spellCheck=${!1}
         value=${t}
         onChange=${a}
         placeholder=${n?"Configured; leave blank to keep":""}

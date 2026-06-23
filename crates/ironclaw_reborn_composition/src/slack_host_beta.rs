@@ -1112,10 +1112,10 @@ mod tests {
         }
     }
 
-    struct NonOperatorTokenAuthenticator;
+    struct HiddenOperatorRouteAuthenticator;
 
     #[async_trait]
-    impl WebuiAuthenticator for NonOperatorTokenAuthenticator {
+    impl WebuiAuthenticator for HiddenOperatorRouteAuthenticator {
         async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == "operator-token" {
                 Some(WebuiAuthentication::operator(
@@ -2006,7 +2006,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_channel_routes_not_mounted_for_non_operator_config_authenticator() {
+    async fn slack_channel_routes_not_mounted_when_operator_route_visibility_is_hidden() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
@@ -2021,7 +2021,7 @@ mod tests {
             bundle,
             WebuiServeConfig::new(
                 TenantId::new(TENANT).expect("tenant"),
-                Arc::new(NonOperatorTokenAuthenticator),
+                Arc::new(HiddenOperatorRouteAuthenticator),
                 Vec::new(),
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))

@@ -165,6 +165,10 @@ impl SlackSetupService {
         self.project_id.as_ref()
     }
 
+    pub(crate) fn operator_user_id(&self) -> &UserId {
+        &self.operator_user_id
+    }
+
     pub(crate) async fn current_setup(
         &self,
     ) -> Result<Option<SlackInstallationSetup>, SlackSetupError> {
@@ -221,6 +225,15 @@ impl SlackSetupService {
             .map(|setup| setup.revision.saturating_add(1))
             .unwrap_or(1);
         let setup = self.validated_setup(update, previous.as_ref(), revision)?;
+
+        if setup.pending_bot_token.is_none() {
+            self.ensure_existing_secret("bot_token", &setup.record.bot_token_handle)
+                .await?;
+        }
+        if setup.pending_signing_secret.is_none() {
+            self.ensure_existing_secret("signing_secret", &setup.record.signing_secret_handle)
+                .await?;
+        }
 
         if let Some(bot_token) = setup.pending_bot_token.as_ref() {
             self.put_secret(setup.record.bot_token_handle.clone(), bot_token.clone())
@@ -350,6 +363,23 @@ impl SlackSetupService {
             )
             .await
             .map_err(map_secret_error)?;
+        Ok(())
+    }
+
+    async fn ensure_existing_secret(
+        &self,
+        field: &'static str,
+        handle: &SecretHandle,
+    ) -> Result<(), SlackSetupError> {
+        if self
+            .secret_store
+            .metadata(&self.secret_scope(), handle)
+            .await
+            .map_err(map_secret_error)?
+            .is_none()
+        {
+            return Err(SlackSetupError::MissingField { field });
+        }
         Ok(())
     }
 
@@ -788,5 +818,88 @@ mod tests {
             updated.shared_subject_user_id.as_deref(),
             Some("user:shared-agent")
         );
+    }
+
+    #[tokio::test]
+    async fn save_rejects_reusing_missing_secret_handles() {
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            secret_store.clone(),
+        );
+        let original = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-original")),
+                signing_secret: Some(SecretString::from("slack-signing-original")),
+            })
+            .await
+            .expect("save original");
+        let scope = service.secret_scope();
+
+        assert!(
+            secret_store
+                .delete(&scope, &original.bot_token_handle)
+                .await
+                .expect("delete bot token")
+        );
+        let error = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: None,
+                signing_secret: None,
+            })
+            .await
+            .expect_err("missing bot token prevents handle reuse");
+        assert!(matches!(
+            error,
+            SlackSetupError::MissingField { field: "bot_token" }
+        ));
+
+        secret_store
+            .put(
+                scope.clone(),
+                original.bot_token_handle.clone(),
+                SecretMaterial::from("xoxb-original".to_string()),
+                None,
+            )
+            .await
+            .expect("restore bot token");
+        assert!(
+            secret_store
+                .delete(&scope, &original.signing_secret_handle)
+                .await
+                .expect("delete signing secret")
+        );
+        let error = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: None,
+                signing_secret: None,
+            })
+            .await
+            .expect_err("missing signing secret prevents handle reuse");
+        assert!(matches!(
+            error,
+            SlackSetupError::MissingField {
+                field: "signing_secret"
+            }
+        ));
     }
 }

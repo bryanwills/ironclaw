@@ -702,15 +702,10 @@ where
             .map_err(map_setup_fs_error)?
             .map(|(_, version)| CasExpectation::Version(version))
             .unwrap_or(CasExpectation::Absent);
-        match self.write_record(&path, setup, cas).await {
-            Ok(_) => Ok(()),
-            Err(error) if is_unsupported_version_cas_error(&error) => self
-                .write_record(&path, setup, CasExpectation::Any)
-                .await
-                .map(|_| ())
-                .map_err(map_setup_fs_error),
-            Err(error) => Err(map_setup_fs_error(error)),
-        }
+        self.write_record(&path, setup, cas)
+            .await
+            .map(|_| ())
+            .map_err(map_setup_fs_error)
     }
 }
 
@@ -1713,16 +1708,6 @@ fn is_unsupported_delete_error(error: &FilesystemError) -> bool {
         } => true,
         _ => false,
     }
-}
-
-fn is_unsupported_version_cas_error(error: &FilesystemError) -> bool {
-    matches!(
-        error,
-        FilesystemError::Unsupported {
-            operation: FilesystemOperation::WriteFile,
-            ..
-        }
-    )
 }
 
 #[cfg(test)]
