@@ -50,6 +50,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     let es = null;
     let reconnectTimer = null;
     let reconnectAttempts = 0;
+    let terminalError = false;
     const maxReconnectDelay = 30_000;
 
     function connect() {
@@ -71,7 +72,9 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
       es.onerror = () => {
         if (es) es.close();
+        es = null;
         setStatus("disconnected");
+        if (terminalError) return;
         reconnectAttempts++;
         const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
         reconnectTimer = setTimeout(connect, delay);
@@ -88,15 +91,25 @@ export function useSSE({ threadId, onEvent, enabled }) {
         if (event.lastEventId) {
           lastEventIdRef.current = event.lastEventId;
         }
+        const frameType = frame.type || fallbackType;
+        const stopAfterEvent = frameType === "error" && frame.retryable === false;
+        if (stopAfterEvent) {
+          terminalError = true;
+        }
         onEventRef.current?.({
           // The frame's own `type` field is the canonical source;
           // `event.type` (from the SSE `event:` line) is the
           // fallback for forwards-compatibility if Rust adds an
           // event without setting `type` in the body.
-          type: frame.type || fallbackType,
+          type: frameType,
           frame,
           lastEventId: event.lastEventId || null,
         });
+        if (stopAfterEvent && es) {
+          es.close();
+          es = null;
+          setStatus("disconnected");
+        }
       };
 
       // Cover anything emitted without an `event:` field — defensive
