@@ -2,12 +2,14 @@ import { Badge } from "../../../design-system/badge.js";
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
 import { React, html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 
 // One learned skill awaiting review: a held new skill, or a proposed update to a
 // skill the user has since edited. The browser previews the content (or, for an
 // update, the user's current version next to the proposal) and approves or
 // discards by name.
 export function PendingSkillCard({ skill, onApprove, onDiscard, isApproving, isDiscarding }) {
+  const t = useT();
   const [expanded, setExpanded] = React.useState(false);
   const isEvolution = skill.kind === "evolution";
   const name = skill.name;
@@ -21,7 +23,9 @@ export function PendingSkillCard({ skill, onApprove, onDiscard, isApproving, isD
             <span className="text-sm font-medium text-[var(--v2-text)]">${name}</span>
             <${Badge}
               tone=${isEvolution ? "muted" : "positive"}
-              label=${isEvolution ? "Proposed update" : "New skill"}
+              label=${isEvolution
+                ? t("skills.learning.review.proposedBadge")
+                : t("skills.learning.review.newBadge")}
               size="sm"
             />
           </div>
@@ -29,8 +33,8 @@ export function PendingSkillCard({ skill, onApprove, onDiscard, isApproving, isD
           html`<div className="mt-1 text-xs text-[var(--v2-text-muted)]">${skill.description}</div>`}
           <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
             ${isEvolution
-              ? "The assistant wants to update this skill, but you've edited it — review the change before it replaces your version."
-              : "Learned from a task and held for review — it won't auto-activate until you approve it."}
+              ? t("skills.learning.review.evolutionDescription")
+              : t("skills.learning.review.newDescription")}
           </div>
         </div>
 
@@ -42,7 +46,7 @@ export function PendingSkillCard({ skill, onApprove, onDiscard, isApproving, isD
             onClick=${() => setExpanded((value) => !value)}
           >
             <${Icon} name="file" className="h-4 w-4" />
-            ${expanded ? "Hide" : "Preview"}
+            ${expanded ? t("skills.learning.review.hide") : t("skills.learning.review.preview")}
           <//>
           <${Button}
             type="button"
@@ -52,7 +56,9 @@ export function PendingSkillCard({ skill, onApprove, onDiscard, isApproving, isD
             onClick=${() => onApprove(name)}
           >
             <${Icon} name="check" className="h-4 w-4" />
-            ${isEvolution ? "Apply update" : "Approve"}
+            ${isEvolution
+              ? t("skills.learning.review.applyUpdate")
+              : t("skills.learning.review.approve")}
           <//>
           <${Button}
             type="button"
@@ -62,7 +68,7 @@ export function PendingSkillCard({ skill, onApprove, onDiscard, isApproving, isD
             onClick=${() => onDiscard(name)}
           >
             <${Icon} name="trash" className="h-4 w-4" />
-            Discard
+            ${t("skills.learning.review.discard")}
           <//>
         </div>
       </div>
@@ -72,10 +78,19 @@ export function PendingSkillCard({ skill, onApprove, onDiscard, isApproving, isD
         <div className="mt-3 space-y-3">
           ${isEvolution
             ? html`
-                <${PreviewBlock} label="Your current version" value=${skill.current_content} />
-                <${PreviewBlock} label="Proposed update" value=${skill.proposed_content || ""} />
+                <${PreviewBlock}
+                  label=${t("skills.learning.review.yourVersion")}
+                  value=${skill.current_content}
+                />
+                <${PreviewBlock}
+                  label=${t("skills.learning.review.proposedVersion")}
+                  value=${skill.proposed_content || ""}
+                />
               `
-            : html`<${PreviewBlock} label="Skill content" value=${skill.current_content} />`}
+            : html`<${PreviewBlock}
+                label=${t("skills.learning.review.skillContent")}
+                value=${skill.current_content}
+              />`}
         </div>
       `}
     </div>

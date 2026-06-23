@@ -144,7 +144,7 @@ export function SkillsTab({ searchQuery = "" }) {
   }, [approvePendingSkill, t]);
 
   const handleDiscardPending = React.useCallback(async (name) => {
-    if (!window.confirm(`Discard the pending skill "${name}"? A held new skill is deleted; a proposed update is dropped and your version is kept.`)) {
+    if (!window.confirm(t("skills.confirmDiscardPending", { name }))) {
       return;
     }
     setActionError("");
@@ -354,14 +354,15 @@ function SkillSwitchCard({
 }
 
 function PendingReviewSection({ pending, onApprove, onDiscard, isApproving, isDiscarding }) {
+  const t = useT();
   if (!pending || pending.length === 0) return null;
   return html`
     <${Card} padding="md">
       <h3 className="mb-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
-        Pending review (${pending.length})
+        ${t("skills.learning.review.pendingTitle", { count: pending.length })}
       </h3>
       <p className="mb-3 text-xs text-[var(--v2-text-muted)]">
-        Skills IronClaw learned or wants to update, waiting for you to approve or discard.
+        ${t("skills.learning.review.pendingDescription")}
       </p>
       ${pending.map(
         (skill) => html`

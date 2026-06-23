@@ -517,7 +517,7 @@ registerPack("en", {
   "skills.autoActivate.onPaused": "Auto-activate: On (paused)",
   "skills.autoActivate.off": "Auto-activate: Off",
   "skills.autoActivate.titlePaused":
-    "Learned-skill auto-activation is off — learned skills don't auto-fire until you turn it back on at the top of this page. This setting is saved for then.",
+    "Learned-skill auto-activation is off — learned skills don't auto-fire until you turn it back on at the top of this page. This setting is saved for later.",
   "skills.autoActivate.titleOn":
     "Auto-activation on — runs on matching requests. Click to make it explicit-only (/name).",
   "skills.autoActivate.titleOff":
@@ -536,6 +536,23 @@ registerPack("en", {
     "Used right away — turn on to review new skills first.",
   "skills.learning.review.labelOn": "Hold for review",
   "skills.learning.review.labelOff": "Use right away",
+  "skills.learning.review.pendingTitle": "Pending review ({count})",
+  "skills.learning.review.pendingDescription":
+    "Skills IronClaw learned or wants to update, waiting for you to approve or discard.",
+  "skills.learning.review.newBadge": "New skill",
+  "skills.learning.review.proposedBadge": "Proposed update",
+  "skills.learning.review.newDescription":
+    "Learned from a task and held for review — it won't auto-activate until you approve it.",
+  "skills.learning.review.evolutionDescription":
+    "The assistant wants to update this skill, but you've edited it — review the change before it replaces your version.",
+  "skills.learning.review.preview": "Preview",
+  "skills.learning.review.hide": "Hide",
+  "skills.learning.review.approve": "Approve",
+  "skills.learning.review.applyUpdate": "Apply update",
+  "skills.learning.review.discard": "Discard",
+  "skills.learning.review.yourVersion": "Your current version",
+  "skills.learning.review.proposedVersion": "Proposed update",
+  "skills.learning.review.skillContent": "Skill content",
   "skills.learning.activation.title":
     "When a learned skill matches your request",
   "skills.learning.activation.summaryOn":
@@ -575,6 +592,8 @@ registerPack("en", {
   "skills.cancel": "Cancel",
   "skills.confirmRemove": "Remove skill \"{name}\"?",
   "skills.confirmDelete": "Delete skill \"{name}\"?",
+  "skills.confirmDiscardPending":
+    "Discard the pending skill \"{name}\"? A held new skill is deleted; a proposed update is dropped and your version is kept.",
   "skills.removeFailed": "Remove failed.",
   "skills.removed": "Removed skill \"{name}\"",
   "skills.contentLoadFailed": "Failed to load SKILL.md content.",

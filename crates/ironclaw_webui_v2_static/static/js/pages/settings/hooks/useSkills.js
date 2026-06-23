@@ -86,8 +86,10 @@ export function useSkills() {
   // for older backends that predate the flag.
   const autoActivateLearned = query.data?.auto_activate_learned !== false;
   const learningEnabled = query.data?.learning_enabled !== false;
-  // Default false: holding new skills for review is opt-in.
-  const requireReview = query.data?.require_review === true;
+  // Fail closed: default hold-for-review ON until the backend says otherwise
+  // (matches the server default), so the UI never shows new skills as
+  // auto-applied before the first load resolves.
+  const requireReview = query.data?.require_review !== false;
   const pendingSkills = pendingQuery.data?.pending || [];
 
   return {
