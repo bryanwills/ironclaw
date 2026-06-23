@@ -2,6 +2,7 @@ use crate::request::github_request;
 use crate::types::IssueState;
 use crate::validation::*;
 
+// arch-exempt: too_many_args, issue listing keeps GitHub filter args explicit, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn list_issues(
     owner: &str,
@@ -42,8 +43,10 @@ pub(crate) fn list_issues(
         limit
     );
     if let Some(labels) = labels {
-        path.push_str("&labels=");
-        path.push_str(&url_encode_query(&labels.join(",")));
+        if !labels.is_empty() {
+            path.push_str("&labels=");
+            path.push_str(&url_encode_query(&labels.join(",")));
+        }
     }
     if let Some(assignee) = assignee {
         path.push_str("&assignee=");
@@ -108,6 +111,7 @@ pub(crate) fn create_issue(
     github_request("POST", &path, Some(req_body.to_string()))
 }
 
+// arch-exempt: too_many_args, issue update mirrors GitHub's patchable fields, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_issue(
     owner: &str,
@@ -116,7 +120,7 @@ pub(crate) fn update_issue(
     title: Option<&str>,
     body: Option<&str>,
     state: Option<IssueState>,
-    milestone: Option<u32>,
+    milestone: Option<Option<u32>>,
     labels: Option<Vec<String>>,
     assignees: Option<Vec<String>>,
 ) -> Result<String, String> {
@@ -131,7 +135,7 @@ pub(crate) fn update_issue(
     }
     validate_name_list(labels.as_deref(), "labels")?;
     validate_name_list(assignees.as_deref(), "assignees")?;
-    if let Some(milestone) = milestone {
+    if let Some(Some(milestone)) = milestone {
         validate_positive_number(milestone, "milestone")?;
     }
 
@@ -333,6 +337,8 @@ pub(crate) fn list_issue_comments(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
+    validate_page(page)?;
+    validate_limit(limit)?;
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let limit = limit.unwrap_or(30).min(100);

@@ -9,6 +9,8 @@ pub(crate) fn search_repositories(
     order: Option<&str>,
 ) -> Result<String, String> {
     validate_input_length(query, "query")?;
+    validate_page(page)?;
+    validate_limit(limit)?;
     let limit = limit.unwrap_or(30).min(100);
     let mut path = format!(
         "/search/repositories?q={}&per_page={}",
@@ -27,6 +29,8 @@ pub(crate) fn search_code(
     order: Option<&str>,
 ) -> Result<String, String> {
     validate_input_length(query, "query")?;
+    validate_page(page)?;
+    validate_limit(limit)?;
     let limit = limit.unwrap_or(30).min(100);
     let mut path = format!(
         "/search/code?q={}&per_page={}",
@@ -37,6 +41,7 @@ pub(crate) fn search_code(
     github_request("GET", &path, None)
 }
 
+// arch-exempt: too_many_args, issue search exposes the full GitHub query surface, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_issues_pull_requests(
     query: Option<&str>,

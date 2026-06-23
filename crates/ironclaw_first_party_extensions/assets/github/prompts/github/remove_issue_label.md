@@ -2,4 +2,6 @@ Use `github.remove_issue_label` to remove one label from an issue or pull reques
 
 Provide `owner`, `repo`, `issue_number`, and the label `name`.
 
-This capability writes to the GitHub API through host HTTP egress and requires a configured GitHub product-auth account.
+Use the exact JSON field names from this capability schema. If the user provides a GitHub URL, extract the owner and repo fields plus the schema-specific number, path, or ref key; for pull-request tools, use `pr_number`; for issue tools, use `issue_number`.
+
+This capability performs an external write through the GitHub API using host HTTP egress. It requires approval and a configured GitHub product-auth account.

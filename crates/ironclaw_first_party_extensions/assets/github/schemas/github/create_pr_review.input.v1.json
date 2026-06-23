@@ -93,6 +93,75 @@
         "required": [
           "path",
           "body"
+        ],
+        "oneOf": [
+          {
+            "required": [
+              "position"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "line"
+                  ]
+                },
+                {
+                  "required": [
+                    "side"
+                  ]
+                },
+                {
+                  "required": [
+                    "start_line"
+                  ]
+                },
+                {
+                  "required": [
+                    "start_side"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "required": [
+              "line",
+              "side"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "position"
+                  ]
+                },
+                {
+                  "required": [
+                    "start_line"
+                  ]
+                },
+                {
+                  "required": [
+                    "start_side"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "required": [
+              "line",
+              "side",
+              "start_line",
+              "start_side"
+            ],
+            "not": {
+              "required": [
+                "position"
+              ]
+            }
+          }
         ]
       },
       "description": "Optional inline file comments to include with the review."

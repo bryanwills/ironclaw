@@ -39,7 +39,10 @@
       "enum": ["open", "closed"]
     },
     "milestone": {
-      "type": "integer",
+      "type": [
+        "integer",
+        "null"
+      ],
       "minimum": 1
     },
     "labels": {

@@ -87,6 +87,7 @@ fn guest_error_kind(code: &str) -> &'static str {
         | "Unsupported from_ref: use a branch or tag ref, not a raw commit SHA"
         | "Unsupported from_ref: only refs/heads/* and refs/tags/* are supported"
         | "Source ref response missing object.sha" => "input",
+        code if is_string_validation_input_error(code) => "input",
         "github_api_body_limit" => "output_too_large",
         "github_api_timeout" => "executor",
         "github_api_egress_denied" | "github_api_redirect_denied" => "network_denied",
@@ -96,10 +97,17 @@ fn guest_error_kind(code: &str) -> &'static str {
     }
 }
 
+fn is_string_validation_input_error(code: &str) -> bool {
+    code.starts_with("Invalid labels:")
+        || code.starts_with("Invalid assignees:")
+        || code.starts_with("invalid_comments:")
+}
+
 export!(GitHubTool);
 
 #[cfg(test)]
 mod tests {
+    use super::guest_error_kind;
     use super::GitHubTool;
     use crate::dispatch::{action_from_context, execute_inner};
     use crate::exports::near::agent::tool::Guest;
@@ -277,6 +285,18 @@ mod tests {
     }
 
     #[test]
+    fn guest_error_kind_classifies_string_validation_errors_as_input() {
+        for code in [
+            "Invalid labels: values cannot be empty",
+            "Invalid assignees: values cannot be empty",
+            "Invalid assignees: at most 100 values are allowed",
+            "invalid_comments: comments serialization failed",
+        ] {
+            assert_eq!(guest_error_kind(code), "input", "{code}");
+        }
+    }
+
+    #[test]
     fn list_issues_uses_native_repo_endpoint_with_filters() {
         test_support::set_response(Ok(json!([
             {
@@ -355,6 +375,39 @@ mod tests {
             test_support::requests().is_empty(),
             "invalid milestone title should be rejected before egress"
         );
+    }
+
+    #[test]
+    fn review_threads_reject_invalid_first_and_blank_thread_id_before_egress() {
+        for (capability, input, expected_error) in [
+            (
+                "github.list_pull_request_review_threads",
+                r#"{"owner":"nearai","repo":"ironclaw","pr_number":12,"first":0}"#,
+                "invalid_limit",
+            ),
+            (
+                "github.list_pull_request_review_threads",
+                r#"{"owner":"nearai","repo":"ironclaw","pr_number":12,"first":101}"#,
+                "invalid_limit",
+            ),
+            (
+                "github.resolve_review_thread",
+                r#"{"thread_id":""}"#,
+                "invalid_thread_id",
+            ),
+        ] {
+            test_support::set_response(Ok(json!({"data": {}}).to_string()));
+
+            assert_eq!(
+                execute_inner(input, Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
+                    .unwrap_err(),
+                expected_error
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "validation error {expected_error} should happen before egress"
+            );
+        }
     }
 
     #[test]
@@ -473,6 +526,23 @@ mod tests {
     }
 
     #[test]
+    fn list_issues_omits_empty_labels_filter() {
+        test_support::set_response(Ok(json!([]).to_string()));
+
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","labels":[],"limit":2}"#,
+            Some(r#"{"capability_id":"github.list_issues"}"#),
+        )
+        .expect("github.list_issues should accept empty label filters");
+
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/issues?state=open&per_page=2"
+        );
+    }
+
+    #[test]
     fn issue_mutation_tools_use_native_endpoints() {
         for (capability, input, expected_method, expected_path, expected_body) in [
             (
@@ -530,6 +600,17 @@ mod tests {
             "/repos/nearai/ironclaw/issues/42/labels/needs%20review"
         );
         assert!(requests[0].body.is_none());
+
+        test_support::set_response(Ok(json!({}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","issue_number":42,"milestone":null}"#,
+            Some(r#"{"capability_id":"github.update_issue"}"#),
+        )
+        .expect("update issue should allow clearing milestone");
+        let requests = test_support::requests();
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, json!({"milestone": null}));
     }
 
     #[test]
@@ -579,6 +660,30 @@ mod tests {
         assert_eq!(body["commit_id"], "abc123");
         assert_eq!(body["comments"][0]["path"], "src/lib.rs");
         assert_eq!(body["comments"][0]["line"], 10);
+
+        for invalid_comments in [
+            r#"[{"path":"src/lib.rs","body":"inline"}]"#,
+            r#"[{"path":"src/lib.rs","body":"inline","line":10}]"#,
+            r#"[{"path":"src/lib.rs","body":"inline","position":1,"line":10,"side":"RIGHT"}]"#,
+            r#"[{"path":"src/lib.rs","body":"inline","line":10,"side":"RIGHT","start_line":9}]"#,
+        ] {
+            test_support::set_response(Ok(json!({"id": 1}).to_string()));
+            let input = format!(
+                r#"{{"owner":"nearai","repo":"ironclaw","pr_number":12,"body":"review","event":"COMMENT","comments":{invalid_comments}}}"#
+            );
+            assert_eq!(
+                execute_inner(
+                    &input,
+                    Some(r#"{"capability_id":"github.create_pr_review"}"#)
+                )
+                .unwrap_err(),
+                "invalid_comments"
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "invalid inline review comments should fail before egress"
+            );
+        }
 
         test_support::set_response(Ok(json!([]).to_string()));
         execute_inner(
@@ -696,6 +801,97 @@ mod tests {
     }
 
     #[test]
+    fn workflow_run_jobs_and_artifacts_reject_invalid_page_or_limit_before_egress() {
+        for (capability, input, expected_error) in [
+            (
+                "github.get_workflow_run_jobs",
+                r#"{"owner":"nearai","repo":"ironclaw","run_id":123,"page":0}"#,
+                "invalid_page",
+            ),
+            (
+                "github.get_workflow_run_jobs",
+                r#"{"owner":"nearai","repo":"ironclaw","run_id":123,"limit":0}"#,
+                "invalid_limit",
+            ),
+            (
+                "github.get_workflow_run_artifacts",
+                r#"{"owner":"nearai","repo":"ironclaw","run_id":123,"page":0}"#,
+                "invalid_page",
+            ),
+            (
+                "github.get_workflow_run_artifacts",
+                r#"{"owner":"nearai","repo":"ironclaw","run_id":123,"limit":101}"#,
+                "invalid_limit",
+            ),
+        ] {
+            test_support::set_response(Ok(json!({}).to_string()));
+
+            assert_eq!(
+                execute_inner(input, Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
+                    .unwrap_err(),
+                expected_error
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "validation error {expected_error} should happen before egress"
+            );
+        }
+    }
+
+    #[test]
+    fn paginated_repo_issue_and_pull_tools_reject_invalid_page_or_limit_before_egress() {
+        for (capability, input, expected_error) in [
+            (
+                "github.list_issue_comments",
+                r#"{"owner":"nearai","repo":"ironclaw","issue_number":42,"page":0}"#,
+                "invalid_page",
+            ),
+            (
+                "github.list_pull_request_comments",
+                r#"{"owner":"nearai","repo":"ironclaw","pr_number":42,"limit":0}"#,
+                "invalid_limit",
+            ),
+            (
+                "github.get_pull_request_reviews",
+                r#"{"owner":"nearai","repo":"ironclaw","pr_number":42,"page":0}"#,
+                "invalid_page",
+            ),
+            (
+                "github.list_branches",
+                r#"{"owner":"nearai","repo":"ironclaw","limit":0}"#,
+                "invalid_limit",
+            ),
+            (
+                "github.list_releases",
+                r#"{"owner":"nearai","repo":"ironclaw","page":0}"#,
+                "invalid_page",
+            ),
+            (
+                "github.search_code",
+                r#"{"query":"repo:nearai/ironclaw","limit":0}"#,
+                "invalid_limit",
+            ),
+            (
+                "github.search_issues_pull_requests",
+                r#"{"query":"repo:nearai/ironclaw","page":0}"#,
+                "invalid_page",
+            ),
+        ] {
+            test_support::set_response(Ok(json!({}).to_string()));
+
+            assert_eq!(
+                execute_inner(input, Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
+                    .unwrap_err(),
+                expected_error
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "validation error {expected_error} should happen before egress"
+            );
+        }
+    }
+
+    #[test]
     fn create_issue_rejects_empty_or_too_many_labels_and_assignees() {
         let too_many_assignees: Vec<String> =
             (0..101).map(|index| format!("user-{index}")).collect();
@@ -780,6 +976,35 @@ mod tests {
 
             assert_eq!(
                 execute_inner(input, Some(r#"{"capability_id":"github.list_repos"}"#)).unwrap_err(),
+                expected_error
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "validation error {expected_error} should happen before egress"
+            );
+        }
+    }
+
+    #[test]
+    fn search_repositories_rejects_invalid_page_or_limit_before_egress() {
+        for (input, expected_error) in [
+            (
+                r#"{"query":"repo:nearai/ironclaw","page":0}"#,
+                "invalid_page",
+            ),
+            (
+                r#"{"query":"repo:nearai/ironclaw","limit":0}"#,
+                "invalid_limit",
+            ),
+        ] {
+            test_support::set_response(Ok(json!([]).to_string()));
+
+            assert_eq!(
+                execute_inner(
+                    input,
+                    Some(r#"{"capability_id":"github.search_repositories"}"#)
+                )
+                .unwrap_err(),
                 expected_error
             );
             assert!(

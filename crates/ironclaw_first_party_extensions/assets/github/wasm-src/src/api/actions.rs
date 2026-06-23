@@ -39,6 +39,7 @@ pub(crate) fn trigger_workflow(
     github_request("POST", &path, Some(req_body.to_string()))
 }
 
+// arch-exempt: too_many_args, action-run query fans out across many optional filters, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn get_workflow_runs(
     owner: &str,

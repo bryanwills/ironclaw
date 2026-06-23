@@ -5,6 +5,7 @@ use crate::types::{
 };
 use crate::validation::*;
 
+// arch-exempt: too_many_args, pull listing keeps GitHub filters separate for callers, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn list_pull_requests(
     owner: &str,
@@ -67,6 +68,7 @@ pub(crate) fn list_pull_requests(
     github_request("GET", &path, None)
 }
 
+// arch-exempt: too_many_args, pull create mirrors GitHub's create-pr payload fields, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_pull_request(
     owner: &str,
@@ -126,6 +128,7 @@ pub(crate) fn create_pull_request(
     github_request("POST", &path, Some(req_body.to_string()))
 }
 
+// arch-exempt: too_many_args, pull update exposes GitHub's patchable fields directly, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_pull_request(
     owner: &str,
@@ -255,12 +258,13 @@ pub(crate) fn create_pr_review(
         req_body["commit_id"] = serde_json::json!(commit_id);
     }
     if let Some(comments) = comments {
-        req_body["comments"] =
-            serde_json::to_value(comments).map_err(|_| "invalid_parameters".to_string())?;
+        req_body["comments"] = serde_json::to_value(comments)
+            .map_err(|e| format!("invalid_comments: {e}"))?;
     }
     github_request("POST", &path, Some(req_body.to_string()))
 }
 
+// arch-exempt: too_many_args, pull comment listing keeps sort and paging parameters explicit, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn list_pull_request_comments(
     owner: &str,
@@ -275,6 +279,8 @@ pub(crate) fn list_pull_request_comments(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
+    validate_page(page)?;
+    validate_limit(limit)?;
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let limit = limit.unwrap_or(30).min(100);
@@ -311,6 +317,23 @@ fn validate_review_comments(comments: &[PrReviewCommentInput]) -> Result<(), Str
         if comment.body.is_empty() {
             return Err("invalid_comments".to_string());
         }
+        let has_position = comment.position.is_some();
+        let has_line = comment.line.is_some();
+        let has_side = comment.side.is_some();
+        let has_start_line = comment.start_line.is_some();
+        let has_start_side = comment.start_side.is_some();
+        if has_position {
+            if has_line || has_side || has_start_line || has_start_side {
+                return Err("invalid_comments".to_string());
+            }
+        } else {
+            if !(has_line && has_side) {
+                return Err("invalid_comments".to_string());
+            }
+            if has_start_line ^ has_start_side {
+                return Err("invalid_comments".to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -346,6 +369,8 @@ pub(crate) fn get_pull_request_reviews(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
+    validate_page(page)?;
+    validate_limit(limit)?;
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let limit = limit.unwrap_or(30).min(100);

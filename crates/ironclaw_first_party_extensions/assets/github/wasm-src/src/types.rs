@@ -1,6 +1,13 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_nullable_u32<'de, D>(deserializer: D) -> Result<Option<Option<u32>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<u32>::deserialize(deserializer).map(Some)
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct GitCommitIdentity {
@@ -52,7 +59,8 @@ pub(crate) enum GitHubAction {
         title: Option<String>,
         body: Option<String>,
         state: Option<IssueState>,
-        milestone: Option<u32>,
+        #[serde(default, deserialize_with = "deserialize_nullable_u32")]
+        milestone: Option<Option<u32>>,
         labels: Option<Vec<String>>,
         assignees: Option<Vec<String>>,
     },

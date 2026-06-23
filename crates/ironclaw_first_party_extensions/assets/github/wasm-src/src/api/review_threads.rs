@@ -19,6 +19,10 @@ query($owner: String!, $repo: String!, $number: Int!, $first: Int!, $after: Stri
                 login
               }
             }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
           }
         }
         pageInfo {

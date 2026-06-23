@@ -38,6 +38,7 @@ pub(crate) fn get_file_content(
     github_request("GET", &url_path, None)
 }
 
+// arch-exempt: too_many_args, file write inputs stay split to mirror GitHub payload shape, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_or_update_file(
     owner: &str,
@@ -98,6 +99,7 @@ pub(crate) fn create_or_update_file(
     github_request("PUT", &path, Some(req_body.to_string()))
 }
 
+// arch-exempt: too_many_args, delete path needs the same GitHub file-write parameters, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn delete_file(
     owner: &str,

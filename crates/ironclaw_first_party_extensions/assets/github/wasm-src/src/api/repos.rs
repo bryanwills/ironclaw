@@ -162,6 +162,8 @@ pub(crate) fn list_branches(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
+    validate_page(page)?;
+    validate_limit(limit)?;
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let limit = limit.unwrap_or(30).min(100);
@@ -225,6 +227,8 @@ pub(crate) fn list_releases(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
+    validate_page(page)?;
+    validate_limit(limit)?;
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let limit = limit.unwrap_or(30).min(100);
@@ -238,6 +242,7 @@ pub(crate) fn list_releases(
     github_request("GET", &path, None)
 }
 
+// arch-exempt: too_many_args, release creation keeps GitHub's release knobs explicit, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_release(
     owner: &str,
