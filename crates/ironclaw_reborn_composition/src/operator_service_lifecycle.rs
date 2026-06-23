@@ -90,6 +90,7 @@ impl ServiceCommandRunner for SystemCommandRunner {
         let mut command = Command::new(program);
         command
             .args(args)
+            .stdin(Stdio::null())
             .stdout(Stdio::from(child_stdout))
             .stderr(Stdio::null());
         #[cfg(unix)]
@@ -125,17 +126,8 @@ fn terminate_service_command(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         let pgid = child.id();
-        let kill_result = Command::new("kill")
-            .arg("-KILL")
-            .arg(format!("-{pgid}"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if !matches!(kill_result, Ok(status) if status.success()) {
-            tracing::debug!(
-                ?kill_result,
-                "service manager command process group kill failed"
-            );
+        if let Err(error) = terminate_process_group_with_kill_command(pgid) {
+            tracing::debug!(%error, "service manager command process group kill failed");
             let _ = child.kill();
         }
     }
@@ -146,6 +138,38 @@ fn terminate_service_command(child: &mut std::process::Child) {
     }
 
     let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn terminate_process_group_with_kill_command(pgid: u32) -> std::io::Result<()> {
+    let mut kill = Command::new("/bin/kill")
+        .arg("-KILL")
+        .arg(format!("-{pgid}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = kill.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "/bin/kill exited with {status}"
+                )))
+            };
+        }
+        if started.elapsed() >= Duration::from_secs(1) {
+            let _ = kill.kill();
+            let _ = kill.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "/bin/kill did not finish within timeout",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn write_service_file(path: &Path, contents: &str) -> std::io::Result<()> {
