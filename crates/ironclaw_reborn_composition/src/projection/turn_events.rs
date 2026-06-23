@@ -11,7 +11,7 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, GatePromptView, ProductAdapterError,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProductGateKind, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
     ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_product_workflow::{
@@ -19,10 +19,10 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
-    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId,
-    TurnScope, TurnStatus,
+    GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnBlockedGateKind, TurnCoordinator,
+    TurnError, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
+    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventProjectionSource,
+    TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
@@ -233,7 +233,7 @@ async fn turn_event_payloads_for_page(
     let futures = events.into_iter().map(|event| {
         let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
         async move {
-            turn_event_payload(
+            turn_event_payloads(
                 caller_user_id,
                 coordinator,
                 failure_explainer,
@@ -243,19 +243,27 @@ async fn turn_event_payloads_for_page(
                 &event,
             )
             .await
-            .map(|payload| payload.map(|payload| TurnEventPayload { cursor, payload }))
+            .map(|payloads| {
+                payloads
+                    .into_iter()
+                    .map(|payload| TurnEventPayload {
+                        cursor: cursor.clone(),
+                        payload,
+                    })
+                    .collect::<Vec<_>>()
+            })
         }
     });
-    stream::iter(futures)
+    let payloads = stream::iter(futures)
         .buffered(16)
         .collect::<Vec<_>>()
         .await
         .into_iter()
-        .filter_map(Result::transpose)
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(payloads.into_iter().flatten().collect())
 }
 
-async fn turn_event_payload(
+async fn turn_event_payloads(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
@@ -263,7 +271,16 @@ async fn turn_event_payload(
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStore>,
     event: &TurnLifecycleEvent,
-) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
+) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
+    let mut payloads = Vec::new();
+    if projects_run_status(&event.kind) {
+        let failure_details =
+            failure_details_for_turn_event(failure_explainer, failure_explanation_cache, event)
+                .await;
+        payloads.push(ProductOutboundPayload::ProjectionUpdate {
+            state: turn_event_projection_state(event, failure_details)?,
+        });
+    }
     if matches!(event.kind, TurnEventKind::Blocked)
         && let Some(prompt) = blocked_prompt_payload(
             caller_user_id,
@@ -274,17 +291,9 @@ async fn turn_event_payload(
         )
         .await?
     {
-        return Ok(Some(prompt));
+        payloads.push(prompt);
     }
-    if projects_run_status(&event.kind) {
-        let failure_details =
-            failure_details_for_turn_event(failure_explainer, failure_explanation_cache, event)
-                .await;
-        return Ok(Some(ProductOutboundPayload::ProjectionUpdate {
-            state: turn_event_projection_state(event, failure_details)?,
-        }));
-    }
-    Ok(None)
+    Ok(payloads)
 }
 
 #[async_trait]
@@ -672,15 +681,50 @@ fn turn_event_projection_state(
     event: &TurnLifecycleEvent,
     failure_details: FailureProjectionDetails,
 ) -> Result<ProductProjectionState, ProductAdapterError> {
-    ProductProjectionState::new(
-        event.scope.thread_id.to_string(),
-        vec![ProductProjectionItem::RunStatus {
-            run_id: event.run_id,
-            status: turn_status_wire(event.status).to_string(),
-            failure_category: failure_details.category,
-            failure_summary: failure_details.summary,
-        }],
-    )
+    let mut items = vec![ProductProjectionItem::RunStatus {
+        run_id: event.run_id,
+        status: turn_status_wire(event.status).to_string(),
+        failure_category: failure_details.category,
+        failure_summary: failure_details.summary,
+    }];
+    if let Some(item) = gate_projection_item(event) {
+        items.push(item);
+    }
+    ProductProjectionState::new(event.scope.thread_id.to_string(), items)
+}
+
+fn gate_projection_item(event: &TurnLifecycleEvent) -> Option<ProductProjectionItem> {
+    if !matches!(event.kind, TurnEventKind::Blocked) {
+        return None;
+    }
+    let blocked_gate = event.blocked_gate.as_ref()?;
+    Some(ProductProjectionItem::Gate {
+        run_id: event.run_id,
+        gate_kind: product_gate_kind(blocked_gate.gate_kind),
+        gate_ref: blocked_gate.gate_ref.as_str().to_string(),
+        invocation_id: None,
+        headline: gate_projection_headline(blocked_gate.gate_kind).to_string(),
+        allow_always: matches!(blocked_gate.gate_kind, TurnBlockedGateKind::Approval)
+            && is_approval_gate_ref(blocked_gate.gate_ref.as_str()),
+    })
+}
+
+fn product_gate_kind(kind: TurnBlockedGateKind) -> ProductGateKind {
+    match kind {
+        TurnBlockedGateKind::Approval => ProductGateKind::Approval,
+        TurnBlockedGateKind::Auth => ProductGateKind::Auth,
+        TurnBlockedGateKind::Resource => ProductGateKind::Resource,
+        TurnBlockedGateKind::AwaitDependentRun => ProductGateKind::Generic,
+    }
+}
+
+fn gate_projection_headline(kind: TurnBlockedGateKind) -> &'static str {
+    match kind {
+        TurnBlockedGateKind::Approval => "Approval required",
+        TurnBlockedGateKind::Auth => "Authentication required",
+        TurnBlockedGateKind::Resource => "Resource unavailable",
+        TurnBlockedGateKind::AwaitDependentRun => "Waiting for dependent run",
+    }
 }
 
 #[derive(Debug, Clone, Default)]

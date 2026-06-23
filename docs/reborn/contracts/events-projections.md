@@ -124,6 +124,11 @@ Reducer rules:
 - product-facing gate projection rows must carry the run identity and gate kind
   needed to resolve the gate. Clients must not infer gate run identity from the
   latest active run or from tool name/order heuristics.
+  Product adapters may additionally emit rich `GatePrompt`/`AuthPrompt`
+  payloads for immediate UI affordances such as OAuth URLs or approval context,
+  but those prompt payloads are enrichments; replay/rebase reconstruction must
+  still work from the projection gate row's own `run_id`, `gate_kind`, and
+  `gate_ref`.
 - product-facing model reasoning projections must use model-visible-sanitized
   reasoning deltas only. They are live UI hints, not canonical transcript,
   checkpoint, audit, or replay state.

@@ -61,10 +61,10 @@ pub use outbound::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, FinalReplyView,
     GatePromptView, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
-    ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
-    ProjectionCursor,
+    PROJECTION_SKILL_NAME_MAX_BYTES, ProductGateKind, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+    ProductRenderOutcome, ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind,
+    ProgressUpdateView, ProjectionCursor,
 };
 pub use projection::{
     ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,

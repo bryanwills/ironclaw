@@ -121,13 +121,28 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
         .await
         .unwrap();
 
-    assert_eq!(first.len(), 2);
+    assert_eq!(first.len(), 3);
     assert!(matches!(
         first[0].payload(),
         ProductOutboundPayload::ProjectionSnapshot { .. }
     ));
     assert!(matches!(
         first[1].payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref,
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Auth
+                    && gate_ref == "gate:auth-required"
+            ))
+    ));
+    assert!(matches!(
+        first[2].payload(),
         ProductOutboundPayload::AuthPrompt(_)
     ));
 
@@ -141,9 +156,24 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
         .await
         .unwrap();
 
-    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed.len(), 2);
     assert!(matches!(
         resumed[0].payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref,
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Auth
+                    && gate_ref == "gate:auth-required"
+            ))
+    ));
+    assert!(matches!(
+        resumed[1].payload(),
         ProductOutboundPayload::AuthPrompt(prompt)
             if prompt.turn_run_id == turn_run
                 && prompt.auth_request_ref == "gate:auth-required"
@@ -995,13 +1025,28 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
         .await
         .unwrap();
 
-    assert_eq!(events.len(), 1);
-    assert!(matches!(
-        events[0].payload(),
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id: projected_run_id,
+                    gate_kind,
+                    gate_ref,
+                    ..
+                } if *projected_run_id == run_id
+                    && *gate_kind == ProductGateKind::Auth
+                    && gate_ref == "gate:auth-required"
+            ))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
         ProductOutboundPayload::AuthPrompt(prompt)
             if prompt.turn_run_id == run_id
                 && prompt.body == "GitHub authentication required"
-    ));
+    )));
 }
 
 #[tokio::test]

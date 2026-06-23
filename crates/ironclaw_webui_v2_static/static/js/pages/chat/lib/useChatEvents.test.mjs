@@ -480,6 +480,52 @@ test("useChatEvents: projection gate visibility is independent of item order", (
   assert.equal(activity?.toolStatus, "running");
 });
 
+test("useChatEvents: gate-only projection rebuilds pending gate from gate identity", () => {
+  const runId = "run-gate-only";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            gate: {
+              run_id: runId,
+              gate_kind: "auth",
+              gate_ref: "gate:auth-only",
+              headline: "Authentication required",
+              allow_always: false,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.pendingGate), {
+    kind: "auth_required",
+    gateKind: "auth",
+    runId,
+    gateRef: "gate:auth-only",
+    invocationId: null,
+    headline: "Authentication required",
+    body: "",
+    allowAlways: false,
+    challengeKind: "other",
+    provider: null,
+    accountLabel: "",
+    authorizationUrl: null,
+    expiresAt: null,
+  });
+  assert.deepEqual(plain(harness.activeRun), {
+    runId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+  assert.equal(harness.isProcessing, false);
+});
+
 test("useChatEvents: failed terminal projection appends visible error", () => {
   const seenFailureInputs = [];
   const harness = createUseChatEventsHarness({

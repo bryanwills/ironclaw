@@ -12,12 +12,11 @@ import {
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
-// The current local-dev runtime ONLY emits `projection_snapshot` and
-// `projection_update` over the WebUI stream (the typed `accepted` /
-// `running` / `final_reply` / `gate` / `failed` variants are
-// scaffolded in the schema but never published by the runtime-owned
-// projection bridge today). The handler therefore drives the UI off
-// the projection items rather than the typed variants — see
+// The current local-dev runtime primarily emits `projection_snapshot` and
+// `projection_update` over the WebUI stream. Rich `gate` / `auth_required`
+// prompt payloads may also arrive for a blocked turn, but the projection gate
+// item is the rebuildable source of the pending gate identity. The handler
+// therefore drives long-lived UI state off projection items — see
 // `ironclaw_product_adapters::outbound::ProductProjectionItem` for
 // the item shapes.
 //
@@ -81,7 +80,7 @@ export function useChatEvents({
             latestRunIdRef.current = progress.turn_run_id;
             setActiveRun?.((current) =>
               current && current.runId === progress.turn_run_id
-                ? current
+                ? { ...current, status: "running" }
                 : { runId: progress.turn_run_id, threadId, status: "running" },
             );
             clearPendingNonAuthGateForRun(
@@ -246,6 +245,14 @@ const PROMPT_RUN_STATUSES = new Set([
   "blocked_auth",
   "blocked_approval",
   "blocked_resource",
+  "blocked_dependent_run",
+]);
+const GATE_ACTIVE_RUN_STATUSES = new Set([
+  "awaiting_gate",
+  "blocked_auth",
+  "blocked_approval",
+  "blocked_resource",
+  "blocked_dependent_run",
 ]);
 
 function clearPendingGateForRun(setPendingGate, runId, promptRunIdRef) {
@@ -269,22 +276,11 @@ function clearPendingNonAuthGateForRun(setPendingGate, runId, promptRunIdRef) {
   });
 }
 
-function promptRunIdsFromProjectionItems(items) {
-  const runIds = new Set();
-  for (const item of items) {
-    const runStatus = item.run_status;
-    if (runStatus?.run_id && PROMPT_RUN_STATUSES.has(runStatus.status)) {
-      runIds.add(runStatus.run_id);
-    }
-  }
-  return runIds;
-}
-
 function pendingGateFromProjectionGate(gate) {
   if (!gate?.run_id || !gate.gate_ref) return null;
-  return {
-    kind: "gate",
-    gateKind: gate.gate_kind || "generic",
+  const gateKind = gate.gate_kind || "generic";
+  const base = {
+    gateKind,
     runId: gate.run_id,
     gateRef: gate.gate_ref,
     invocationId: gate.invocation_id || null,
@@ -292,6 +288,28 @@ function pendingGateFromProjectionGate(gate) {
     body: "",
     allowAlways: gate.allow_always === true,
   };
+  if (gateKind === "auth") {
+    return {
+      ...base,
+      kind: "auth_required",
+      challengeKind: "other",
+      provider: null,
+      accountLabel: "",
+      authorizationUrl: null,
+      expiresAt: null,
+    };
+  }
+  return {
+    ...base,
+    kind: "gate",
+  };
+}
+
+function isObsoleteProjectionGate(activeRunRef, pendingGate) {
+  const activeRun = activeRunRef?.current;
+  if (!activeRun?.runId || activeRun.runId !== pendingGate?.runId) return false;
+  if (!activeRun.status) return false;
+  return !GATE_ACTIVE_RUN_STATUSES.has(activeRun.status);
 }
 
 function applyProjectionItems({
@@ -312,7 +330,6 @@ function applyProjectionItems({
   // Snapshot the most recent run id so stale terminal run_status frames can
   // be filtered while a locally resolved gate is resuming a newer run.
   let activeRunId = latestRunIdRef?.current ?? null;
-  const promptRunIdsInFrame = promptRunIdsFromProjectionItems(items);
   for (const item of items) {
     if (item.run_status) {
       const {
@@ -512,11 +529,22 @@ function applyProjectionItems({
       const runId = pendingGate?.runId || null;
       if (
         runId &&
-        (promptRunIdRef?.current === runId || promptRunIdsInFrame.has(runId)) &&
+        !isObsoleteProjectionGate(activeRunRef, pendingGate) &&
         !isLocallyResolvedGate(locallyResolvedGatesRef, runId, pendingGate.gateRef)
       ) {
         ensureGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
         setPendingGate((current) => current || pendingGate);
+        setActiveRun?.((current) =>
+          current && current.runId === runId
+            ? {
+                ...current,
+                status: GATE_ACTIVE_RUN_STATUSES.has(current.status)
+                  ? current.status
+                  : "awaiting_gate",
+              }
+            : { runId, threadId, status: "awaiting_gate" },
+        );
+        if (promptRunIdRef) promptRunIdRef.current = runId;
         setIsProcessing(false);
       }
     }

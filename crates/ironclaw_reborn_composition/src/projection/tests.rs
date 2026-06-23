@@ -18,8 +18,8 @@ use ironclaw_host_api::{
     RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
-    AuthPromptChallengeKind, CapabilityActivityStatusView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionItem,
+    AuthPromptChallengeKind, CapabilityActivityStatusView, ProductGateKind,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
 };
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, RunStateError,

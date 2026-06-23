@@ -119,11 +119,14 @@ impl TurnLifecycleEvent {
 
     /// Return the transport-facing lifecycle event view.
     ///
-    /// Internal projection consumers may need gate and owner metadata to
-    /// materialize read models, but public lifecycle snapshots must not expose
-    /// resolution refs or owner identity.
+    /// Internal projection consumers need gate metadata to materialize
+    /// product-facing pending-gate rows. Public lifecycle snapshots still strip
+    /// owner identity; gate refs are metadata-safe opaque resolver ids and are
+    /// required for replayable gate projections.
     pub fn into_public_projection_entry(mut self) -> Self {
-        self.blocked_gate = None;
+        if let Some(gate) = &mut self.blocked_gate {
+            gate.credential_requirements.clear();
+        }
         self.owner_user_id = None;
         self
     }
@@ -413,7 +416,10 @@ pub(crate) fn project_turn_events(
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::{
+        AgentId, ExtensionId, ProjectId, RuntimeCredentialAccountProviderId,
+        RuntimeCredentialAuthRequirement, TenantId, ThreadId, UserId,
+    };
 
     use crate::{
         AcceptedMessageRef, GateRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
@@ -447,7 +453,12 @@ mod tests {
             blocked_gate: Some(TurnBlockedGateMetadata {
                 gate_ref: GateRef::new("gate:approval-a").expect("gate ref"),
                 gate_kind: TurnBlockedGateKind::Approval,
-                credential_requirements: Vec::new(),
+                credential_requirements: vec![RuntimeCredentialAuthRequirement {
+                    provider: RuntimeCredentialAccountProviderId::new("github").expect("provider"),
+                    setup: Default::default(),
+                    requester_extension: ExtensionId::new("github").expect("extension"),
+                    provider_scopes: vec!["repo".to_string()],
+                }],
             }),
             sanitized_reason: Some("approval_required".to_string()),
         }
@@ -529,12 +540,18 @@ mod tests {
     }
 
     #[test]
-    fn public_projection_entry_strips_internal_projection_metadata() {
+    fn public_projection_entry_strips_owner_but_preserves_gate_metadata() {
         let event = blocked_event(1, scope("thread-a"));
 
         let public = event.into_public_projection_entry();
 
-        assert_eq!(public.blocked_gate, None);
+        let public_gate = public.blocked_gate.expect("gate metadata");
+        assert_eq!(
+            public_gate.gate_ref,
+            GateRef::new("gate:approval-a").expect("gate ref")
+        );
+        assert_eq!(public_gate.gate_kind, TurnBlockedGateKind::Approval);
+        assert!(public_gate.credential_requirements.is_empty());
         assert_eq!(public.owner_user_id, None);
         assert_eq!(
             public.sanitized_reason.as_deref(),
@@ -562,7 +579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projection_service_strips_internal_projection_metadata_from_snapshot() {
+    async fn projection_service_preserves_gate_metadata_in_snapshot() {
         let scope = scope("thread-a");
         let source = MemoryProjectionSource {
             events: vec![blocked_event(1, scope.clone())],
@@ -580,7 +597,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(snapshot.entries.len(), 1);
-        assert_eq!(snapshot.entries[0].blocked_gate, None);
+        assert!(snapshot.entries[0].blocked_gate.is_some());
         assert_eq!(snapshot.entries[0].owner_user_id, None);
     }
 }
