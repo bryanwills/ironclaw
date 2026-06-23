@@ -5,11 +5,15 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
-    CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
-    CapabilityOutcome, LoopCapabilityPort, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+use ironclaw_turns::{
+    CapabilityActivityId,
+    run_profile::{
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
+        CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
+        ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
+    },
 };
 
 use crate::{CapabilityAllowSet, capability_info};
@@ -105,6 +109,29 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         Ok(candidate)
     }
 
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        validate_provider_tool_call_capability_scope(
+            self.inner.provider_tool_call_capability_ids(&tool_call)?,
+            |capability_id| self.permits(capability_id),
+            "provider tool call is outside the model-visible capability view",
+        )?;
+        let candidate = self
+            .inner
+            .register_provider_tool_call_for_activity(tool_call, activity_id)
+            .await?;
+        validate_provider_tool_call_capability_scope(
+            candidate_capability_ids(&candidate),
+            |capability_id| self.permits(capability_id),
+            "provider tool call is outside the model-visible capability view",
+        )?;
+        record_staged_invocation(&self.staged_invocations, &candidate)?;
+        Ok(candidate)
+    }
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
@@ -187,6 +214,31 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
             )?;
         }
         let candidate = self.inner.register_provider_tool_call(tool_call).await?;
+        validate_provider_tool_call_capability_scope(
+            candidate_capability_ids(&candidate),
+            |capability_id| self.allow_set.permits(capability_id),
+            "provider tool call is outside the run-profile surface",
+        )?;
+        record_staged_invocation(&self.staged_invocations, &candidate)?;
+        Ok(candidate)
+    }
+
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
+            validate_provider_tool_call_capability_scope(
+                self.inner.provider_tool_call_capability_ids(&tool_call)?,
+                |capability_id| self.allow_set.permits(capability_id),
+                "provider tool call is outside the run-profile surface",
+            )?;
+        }
+        let candidate = self
+            .inner
+            .register_provider_tool_call_for_activity(tool_call, activity_id)
+            .await?;
         validate_provider_tool_call_capability_scope(
             candidate_capability_ids(&candidate),
             |capability_id| self.allow_set.permits(capability_id),

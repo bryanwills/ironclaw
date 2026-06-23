@@ -4245,6 +4245,11 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         .expect("pending_auth_resume set in BeforeBlock checkpoint")
         .input_ref
         .clone();
+    let parked_activity_id = before_block_state
+        .pending_auth_resume
+        .as_ref()
+        .expect("pending_auth_resume set")
+        .activity_id_for_resume();
     assert!(
         before_block_state
             .pending_auth_resume
@@ -4284,6 +4289,14 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         batch_invocations.len(),
         2,
         "expected two batch invocations (phase 1 block + phase 2 re-dispatch)"
+    );
+    assert_eq!(
+        batch_invocations[0].invocations[0].activity_id, parked_activity_id,
+        "auth gate must park the original provider activity identity"
+    );
+    assert_eq!(
+        batch_invocations[1].invocations[0].activity_id, parked_activity_id,
+        "provider-backed auth resume must re-dispatch with the parked activity identity"
     );
 
     // The Phase 2 invocation must carry a freshly staged input_ref. The

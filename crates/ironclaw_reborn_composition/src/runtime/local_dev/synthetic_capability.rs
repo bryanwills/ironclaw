@@ -6,12 +6,16 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, RuntimeKind};
 use ironclaw_loop_support::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
-    CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInvocation, CapabilityOutcome,
-    CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRunContext,
-    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+use ironclaw_turns::{
+    CapabilityActivityId,
+    run_profile::{
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
+        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
+        LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
+    },
 };
 
 pub(super) fn wrap_local_dev_synthetic_capabilities(
@@ -204,6 +208,49 @@ impl LocalDevSyntheticCapabilityPort {
             .get(&tool_call.name)
             .and_then(|capability_id| self.capabilities_by_id.get_key_value(capability_id))
     }
+
+    async fn register_synthetic_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let Some((capability_id, _)) = self.synthetic_provider_call(&tool_call) else {
+            return self
+                .inner
+                .register_provider_tool_call_for_activity(tool_call, activity_id)
+                .await;
+        };
+        let capability_id = capability_id.clone();
+        self.validate_provider_tool_call(&tool_call)?;
+        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is missing a provider turn id",
+            )
+        })?;
+        let input_ref = self
+            .input_resolver
+            .register_provider_tool_call_input(&self.run_context, &tool_call)
+            .await?;
+        Ok(CapabilityCallCandidate {
+            activity_id,
+            surface_version: self.current_surface_version()?,
+            capability_id: capability_id.clone(),
+            input_ref,
+            effective_capability_ids: vec![capability_id.clone()],
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: tool_call.provider_id,
+                provider_model_id: tool_call.provider_model_id,
+                provider_turn_id,
+                provider_call_id: tool_call.id,
+                provider_tool_name: tool_call.name,
+                arguments: tool_call.arguments,
+                response_reasoning: tool_call.response_reasoning,
+                reasoning: tool_call.reasoning,
+                signature: tool_call.signature,
+            }),
+        })
+    }
 }
 
 #[async_trait]
@@ -268,39 +315,21 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        let Some((capability_id, _)) = self.synthetic_provider_call(&tool_call) else {
-            return self.inner.register_provider_tool_call(tool_call).await;
-        };
-        let capability_id = capability_id.clone();
-        self.validate_provider_tool_call(&tool_call)?;
-        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call is missing a provider turn id",
-            )
-        })?;
-        let input_ref = self
-            .input_resolver
-            .register_provider_tool_call_input(&self.run_context, &tool_call)
-            .await?;
-        Ok(CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
-            surface_version: self.current_surface_version()?,
-            capability_id: capability_id.clone(),
-            input_ref,
-            effective_capability_ids: vec![capability_id.clone()],
-            provider_replay: Some(ProviderToolCallReplay {
-                provider_id: tool_call.provider_id,
-                provider_model_id: tool_call.provider_model_id,
-                provider_turn_id,
-                provider_call_id: tool_call.id,
-                provider_tool_name: tool_call.name,
-                arguments: tool_call.arguments,
-                response_reasoning: tool_call.response_reasoning,
-                reasoning: tool_call.reasoning,
-                signature: tool_call.signature,
-            }),
-        })
+        if self.synthetic_provider_call(&tool_call).is_some() {
+            return self
+                .register_synthetic_provider_tool_call(tool_call, CapabilityActivityId::new())
+                .await;
+        }
+        self.inner.register_provider_tool_call(tool_call).await
+    }
+
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        self.register_synthetic_provider_tool_call(tool_call, activity_id)
+            .await
     }
 
     async fn visible_capabilities(

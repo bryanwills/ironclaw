@@ -727,6 +727,7 @@ impl ProviderToolCallRegistrationStore {
     fn record(
         &mut self,
         input_ref: &CapabilityInputRef,
+        activity_id: Option<CapabilityActivityId>,
         effective_capability_ids: Option<HashSet<CapabilityId>>,
     ) -> Result<CapabilityActivityId, AgentLoopHostError> {
         let key = input_ref.as_str().to_string();
@@ -734,9 +735,17 @@ impl ProviderToolCallRegistrationStore {
             self.records
                 .entry(key)
                 .or_insert_with(|| ProviderToolCallRegistrationRecord {
-                    activity_id: CapabilityActivityId::new(),
+                    activity_id: activity_id.unwrap_or_default(),
                     effective_capability_ids: None,
                 });
+        if let Some(activity_id) = activity_id
+            && record.activity_id != activity_id
+        {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool-call activity identity changed",
+            ));
+        }
         if let Some(next_effective_capability_ids) = effective_capability_ids {
             match &record.effective_capability_ids {
                 Some(existing) if existing != &next_effective_capability_ids => {
@@ -980,13 +989,14 @@ impl HostRuntimeLoopCapabilityPort {
     fn record_provider_tool_call_registration(
         &self,
         input_ref: &CapabilityInputRef,
+        activity_id: Option<CapabilityActivityId>,
         effective_capability_ids: Option<HashSet<CapabilityId>>,
     ) -> Result<CapabilityActivityId, AgentLoopHostError> {
         lock_mut(
             &self.provider_tool_call_registrations,
             "provider tool-call registration store",
         )?
-        .record(input_ref, effective_capability_ids)
+        .record(input_ref, activity_id, effective_capability_ids)
     }
 
     fn provider_tool_call_registration_for(
@@ -1238,6 +1248,56 @@ impl HostRuntimeLoopCapabilityPort {
             capability_info_target_missing: prepared.capability_info_target_missing,
         })
     }
+
+    async fn register_provider_tool_call_with_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: Option<CapabilityActivityId>,
+    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+        let prepared = self.prepare_provider_tool_call(&tool_call)?;
+        let mut normalized_tool_call = tool_call.clone();
+        normalized_tool_call.arguments = prepared.normalized_arguments;
+        let input_ref = self
+            .input_resolver
+            .register_provider_tool_call_input(&self.run_context, &normalized_tool_call)
+            .await?;
+        // Record the activity-card display input now that both the canonical
+        // `input_ref` and the resolved dotted `capability_id` are in hand, so
+        // the card shows `nearai.web_search   <query>` (not the lossy provider
+        // tool name `nearai__web_search`) and the per-tool summary matches.
+        self.input_resolver.record_provider_tool_call_display_input(
+            &self.run_context,
+            &input_ref,
+            &prepared.capability_id,
+            &normalized_tool_call,
+        );
+        let registered_effective_capability_ids = (prepared.capability_id.as_str()
+            == crate::capability_info::CAPABILITY_ID)
+            .then(|| prepared.effective_capability_ids.iter().cloned().collect());
+        let activity_id = self.record_provider_tool_call_registration(
+            &input_ref,
+            activity_id,
+            registered_effective_capability_ids,
+        )?;
+        Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id,
+            surface_version: prepared.surface_version,
+            capability_id: prepared.capability_id,
+            input_ref,
+            effective_capability_ids: prepared.effective_capability_ids,
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: tool_call.provider_id,
+                provider_model_id: tool_call.provider_model_id,
+                provider_turn_id: prepared.provider_turn_id,
+                provider_call_id: tool_call.id,
+                provider_tool_name: tool_call.name,
+                arguments: tool_call.arguments,
+                response_reasoning: tool_call.response_reasoning,
+                reasoning: tool_call.reasoning,
+                signature: tool_call.signature,
+            }),
+        })
+    }
 }
 
 #[async_trait]
@@ -1287,48 +1347,17 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        let prepared = self.prepare_provider_tool_call(&tool_call)?;
-        let mut normalized_tool_call = tool_call.clone();
-        normalized_tool_call.arguments = prepared.normalized_arguments;
-        let input_ref = self
-            .input_resolver
-            .register_provider_tool_call_input(&self.run_context, &normalized_tool_call)
-            .await?;
-        // Record the activity-card display input now that both the canonical
-        // `input_ref` and the resolved dotted `capability_id` are in hand, so
-        // the card shows `nearai.web_search   <query>` (not the lossy provider
-        // tool name `nearai__web_search`) and the per-tool summary matches.
-        self.input_resolver.record_provider_tool_call_display_input(
-            &self.run_context,
-            &input_ref,
-            &prepared.capability_id,
-            &normalized_tool_call,
-        );
-        let registered_effective_capability_ids = (prepared.capability_id.as_str()
-            == crate::capability_info::CAPABILITY_ID)
-            .then(|| prepared.effective_capability_ids.iter().cloned().collect());
-        let activity_id = self.record_provider_tool_call_registration(
-            &input_ref,
-            registered_effective_capability_ids,
-        )?;
-        Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id,
-            surface_version: prepared.surface_version,
-            capability_id: prepared.capability_id,
-            input_ref,
-            effective_capability_ids: prepared.effective_capability_ids,
-            provider_replay: Some(ProviderToolCallReplay {
-                provider_id: tool_call.provider_id,
-                provider_model_id: tool_call.provider_model_id,
-                provider_turn_id: prepared.provider_turn_id,
-                provider_call_id: tool_call.id,
-                provider_tool_name: tool_call.name,
-                arguments: tool_call.arguments,
-                response_reasoning: tool_call.response_reasoning,
-                reasoning: tool_call.reasoning,
-                signature: tool_call.signature,
-            }),
-        })
+        self.register_provider_tool_call_with_activity(tool_call, None)
+            .await
+    }
+
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+        self.register_provider_tool_call_with_activity(tool_call, Some(activity_id))
+            .await
     }
 
     async fn visible_capabilities(
@@ -4753,6 +4782,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_tool_call_registration_for_activity_records_requested_activity() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-provider-requested-activity",
+        )
+        .await;
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let provider_call = provider_tool_call();
+        let requested_activity_id = CapabilityActivityId::new();
+        let candidate = port
+            .register_provider_tool_call_for_activity(provider_call.clone(), requested_activity_id)
+            .await
+            .expect("provider tool call registers with requested activity");
+
+        assert_eq!(candidate.activity_id, requested_activity_id);
+
+        let duplicate = port
+            .register_provider_tool_call(provider_call)
+            .await
+            .expect("duplicate provider tool call registers");
+        assert_eq!(
+            duplicate.activity_id, requested_activity_id,
+            "ordinary duplicate registration must reuse the requested activity"
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: requested_activity_id,
+                surface_version: surface.version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("requested registered activity should dispatch");
+
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(runtime.take_requests().len(), 1);
+    }
+
+    #[tokio::test]
     async fn runtime_provider_call_rejects_registered_activity_mismatch_without_replay_poisoning() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -5333,6 +5417,7 @@ mod tests {
         let activity_id = port
             .record_provider_tool_call_registration(
                 &input_ref,
+                None,
                 Some(
                     [
                         CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
@@ -5406,6 +5491,7 @@ mod tests {
         let registered_activity_id = port
             .record_provider_tool_call_registration(
                 &input_ref,
+                None,
                 Some(
                     [
                         CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
@@ -5482,10 +5568,10 @@ mod tests {
         .collect::<HashSet<_>>();
 
         let first_activity_id = store
-            .record(&input_ref, Some(effective_ids.clone()))
+            .record(&input_ref, None, Some(effective_ids.clone()))
             .expect("first registration");
         let second_activity_id = store
-            .record(&input_ref, None)
+            .record(&input_ref, None, None)
             .expect("duplicate registration");
 
         assert_eq!(second_activity_id, first_activity_id);
@@ -5495,6 +5581,36 @@ mod tests {
                 .expect("registration")
                 .effective_capability_ids,
             Some(effective_ids)
+        );
+    }
+
+    #[test]
+    fn provider_tool_call_registration_store_rejects_activity_changes() {
+        let mut store = ProviderToolCallRegistrationStore::default();
+        let input_ref =
+            CapabilityInputRef::new("input:registered-activity-conflict").expect("input ref");
+        let first_activity_id = CapabilityActivityId::new();
+        let second_activity_id = loop {
+            let candidate = CapabilityActivityId::new();
+            if candidate != first_activity_id {
+                break candidate;
+            }
+        };
+
+        store
+            .record(&input_ref, Some(first_activity_id), None)
+            .expect("first registration");
+        let error = store
+            .record(&input_ref, Some(second_activity_id), None)
+            .expect_err("conflicting duplicate activity must fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            store
+                .registration_for(&input_ref)
+                .expect("registration")
+                .activity_id,
+            first_activity_id
         );
     }
 
@@ -5517,10 +5633,10 @@ mod tests {
         .collect::<HashSet<_>>();
 
         let activity_id = store
-            .record(&input_ref, Some(first_ids.clone()))
+            .record(&input_ref, None, Some(first_ids.clone()))
             .expect("first registration");
         let error = store
-            .record(&input_ref, Some(second_ids))
+            .record(&input_ref, None, Some(second_ids))
             .expect_err("conflicting duplicate registration must fail");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);

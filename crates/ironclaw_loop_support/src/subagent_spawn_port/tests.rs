@@ -11,7 +11,7 @@ use ironclaw_threads::{
     UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunResponse, EventCursor, GetRunStateRequest,
+    AcceptedMessageRef, CancelRunResponse, CapabilityActivityId, EventCursor, GetRunStateRequest,
     InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
     RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SpawnTreeReservation,
     SubmitTurnRequest, TurnId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnStateStore,
@@ -1521,6 +1521,29 @@ async fn spawn_provider_tool_call_is_registered_for_spawn_dispatch() {
             .unwrap()
             .contains(&candidate.input_ref)
     );
+    assert_eq!(*inner.visible_calls.lock().unwrap(), 1);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_registration_for_activity_uses_requested_activity() {
+    let context = test_run_context("spawn-register-for-activity").await;
+    let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
+    let port =
+        spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
+    let activity_id = CapabilityActivityId::new();
+
+    let candidate = port
+        .register_provider_tool_call_for_activity(spawn_provider_tool_call(), activity_id)
+        .await
+        .expect("provider tool call registration");
+
+    assert_eq!(candidate.activity_id, activity_id);
+    assert_eq!(
+        candidate.capability_id.as_str(),
+        DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+    );
+    assert_eq!(candidate.input_ref.as_str(), "input:spawn-provider");
     assert_eq!(*inner.visible_calls.lock().unwrap(), 1);
     assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
 }

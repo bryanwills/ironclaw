@@ -27,10 +27,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::TenantId;
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
-    CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+use ironclaw_turns::{
+    CapabilityActivityId,
+    run_profile::{
+        AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
+        CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
+        CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
+    },
 };
 
 use crate::dispatch::{BeforeCapabilityDispatchOutcome, HookDispatcher};
@@ -229,6 +234,41 @@ impl HookedLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for HookedLoopCapabilityPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.inner.tool_definitions()
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        self.inner.provider_tool_call_capability_ids(tool_call)
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner.validate_provider_tool_call(tool_call)
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        self.inner.register_provider_tool_call(tool_call).await
+    }
+
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        self.inner
+            .register_provider_tool_call_for_activity(tool_call, activity_id)
+            .await
+    }
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,

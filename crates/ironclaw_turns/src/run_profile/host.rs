@@ -1850,6 +1850,16 @@ pub trait LoopCapabilityPort: Send + Sync {
         Err(unsupported_host_method("register_provider_tool_call"))
     }
 
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        _tool_call: ProviderToolCall,
+        _activity_id: CapabilityActivityId,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        Err(unsupported_host_method(
+            "register_provider_tool_call_for_activity",
+        ))
+    }
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,

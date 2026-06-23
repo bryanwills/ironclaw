@@ -94,18 +94,21 @@ pub(super) async fn pending_auth_resume_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
     if let Some(replay) = resume.provider_replay.as_ref() {
-        let mut candidate = host
-            .register_provider_tool_call(ProviderToolCall {
-                provider_id: replay.provider_id.clone(),
-                provider_model_id: replay.provider_model_id.clone(),
-                turn_id: Some(replay.provider_turn_id.clone()),
-                id: replay.provider_call_id.clone(),
-                name: replay.provider_tool_name.clone(),
-                arguments: replay.arguments.clone(),
-                response_reasoning: replay.response_reasoning.clone(),
-                reasoning: replay.reasoning.clone(),
-                signature: replay.signature.clone(),
-            })
+        let candidate = host
+            .register_provider_tool_call_for_activity(
+                ProviderToolCall {
+                    provider_id: replay.provider_id.clone(),
+                    provider_model_id: replay.provider_model_id.clone(),
+                    turn_id: Some(replay.provider_turn_id.clone()),
+                    id: replay.provider_call_id.clone(),
+                    name: replay.provider_tool_name.clone(),
+                    arguments: replay.arguments.clone(),
+                    response_reasoning: replay.response_reasoning.clone(),
+                    reasoning: replay.reasoning.clone(),
+                    signature: replay.signature.clone(),
+                },
+                resume.activity_id_for_resume(),
+            )
             .await
             .map_err(capability_host_error)?;
         if candidate.capability_id != resume.capability_id
@@ -115,7 +118,6 @@ pub(super) async fn pending_auth_resume_candidate(
                 detail: "auth resume provider replay no longer matches blocked capability",
             });
         }
-        candidate.activity_id = resume.activity_id_for_resume();
         return Ok(candidate);
     }
     Ok(pending_auth_resume_staged_input_candidate(

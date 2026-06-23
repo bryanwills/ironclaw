@@ -660,6 +660,16 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         })
     }
 
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: ironclaw_turns::CapabilityActivityId,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let mut candidate = self.register_provider_tool_call(tool_call).await?;
+        candidate.activity_id = activity_id;
+        Ok(candidate)
+    }
+
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,

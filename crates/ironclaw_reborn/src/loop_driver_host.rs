@@ -55,9 +55,9 @@ const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 
 use ironclaw_turns::{
-    CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
-    TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnStateStore, TurnStatus,
+    CapabilityActivityId, CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore,
+    RunProfileId, TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
@@ -202,6 +202,16 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         tool_call: ProviderToolCall,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
         self.inner.register_provider_tool_call(tool_call).await
+    }
+
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+        self.inner
+            .register_provider_tool_call_for_activity(tool_call, activity_id)
+            .await
     }
 
     async fn visible_capabilities(
@@ -1873,6 +1883,16 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
         self.capabilities
             .register_provider_tool_call(tool_call)
+            .await
+    }
+
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+        self.capabilities
+            .register_provider_tool_call_for_activity(tool_call, activity_id)
             .await
     }
 

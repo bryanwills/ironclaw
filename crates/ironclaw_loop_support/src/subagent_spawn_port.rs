@@ -16,10 +16,10 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, GateRef, IdempotencyKey, LoopGateRef, LoopResultRef,
-    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
+    AcceptedMessageRef, CancelRunRequest, CapabilityActivityId, GateRef, IdempotencyKey,
+    LoopGateRef, LoopResultRef, ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason,
+    SourceBindingRef, SubmitChildRunRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
@@ -575,6 +575,56 @@ impl SubagentSpawnCapabilityPort {
             .map(|_: SpawnSubagentArgs| ())
     }
 
+    async fn register_spawn_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let surface = self
+            .inner
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await?;
+        self.validate_spawn_provider_tool_call(&tool_call)?;
+        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is missing a provider turn id",
+            )
+        })?;
+        let input_ref = self
+            .deps
+            .spawn_input_codec
+            .register_provider_tool_call_input(&self.run_context, &tool_call)
+            .await?;
+        self.auth_input_refs
+            .lock()
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "subagent spawn authorization input store is unavailable",
+                )
+            })?
+            .insert(input_ref.clone());
+        Ok(CapabilityCallCandidate {
+            activity_id,
+            surface_version: surface.version,
+            capability_id: self.spawn_id.clone(),
+            effective_capability_ids: vec![self.spawn_id.clone()],
+            input_ref,
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: tool_call.provider_id,
+                provider_model_id: tool_call.provider_model_id,
+                provider_turn_id,
+                provider_call_id: tool_call.id,
+                provider_tool_name: tool_call.name,
+                arguments: tool_call.arguments,
+                response_reasoning: tool_call.response_reasoning,
+                reasoning: tool_call.reasoning,
+                signature: tool_call.signature,
+            }),
+        })
+    }
+
     fn try_reserve_spawn_slot(&self) -> bool {
         self.spawned_this_turn
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -988,52 +1038,27 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         if self.is_spawn_provider_tool_name(&tool_call.name) {
-            let surface = self
-                .inner
-                .visible_capabilities(VisibleCapabilityRequest)
-                .await?;
-            self.validate_spawn_provider_tool_call(&tool_call)?;
-            let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "provider tool call is missing a provider turn id",
-                )
-            })?;
-            let input_ref = self
-                .deps
-                .spawn_input_codec
-                .register_provider_tool_call_input(&self.run_context, &tool_call)
-                .await?;
-            self.auth_input_refs
-                .lock()
-                .map_err(|_| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::Unavailable,
-                        "subagent spawn authorization input store is unavailable",
-                    )
-                })?
-                .insert(input_ref.clone());
-            return Ok(CapabilityCallCandidate {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                surface_version: surface.version,
-                capability_id: self.spawn_id.clone(),
-                effective_capability_ids: vec![self.spawn_id.clone()],
-                input_ref,
-                provider_replay: Some(ProviderToolCallReplay {
-                    provider_id: tool_call.provider_id,
-                    provider_model_id: tool_call.provider_model_id,
-                    provider_turn_id,
-                    provider_call_id: tool_call.id,
-                    provider_tool_name: tool_call.name,
-                    arguments: tool_call.arguments,
-                    response_reasoning: tool_call.response_reasoning,
-                    reasoning: tool_call.reasoning,
-                    signature: tool_call.signature,
-                }),
-            });
+            return self
+                .register_spawn_provider_tool_call(tool_call, CapabilityActivityId::new())
+                .await;
         }
         let inner_candidate = self.inner.register_provider_tool_call(tool_call).await?;
         Ok(inner_candidate)
+    }
+
+    async fn register_provider_tool_call_for_activity(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: CapabilityActivityId,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            return self
+                .register_spawn_provider_tool_call(tool_call, activity_id)
+                .await;
+        }
+        self.inner
+            .register_provider_tool_call_for_activity(tool_call, activity_id)
+            .await
     }
 
     async fn visible_capabilities(
