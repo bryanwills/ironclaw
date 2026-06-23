@@ -25,11 +25,12 @@ export function SlackSetupPanel({ action, setupQuery }) {
   const queryClient = useQueryClient();
   const [form, setForm] = React.useState(emptyForm());
   const initializedRef = React.useRef(false);
+  const dirtyRef = React.useRef(false);
   const status = setupQuery.data;
   const copy = slackSetupCopy(action);
 
   React.useEffect(() => {
-    if (!status || initializedRef.current) return;
+    if (!status || initializedRef.current || dirtyRef.current) return;
     setForm(formFromStatus(status));
     initializedRef.current = true;
   }, [status]);
@@ -37,6 +38,7 @@ export function SlackSetupPanel({ action, setupQuery }) {
   const saveMutation = useMutation({
     mutationFn: saveSlackSetup,
     onSuccess: (data) => {
+      dirtyRef.current = false;
       setForm(formFromStatus(data));
       initializedRef.current = true;
       queryClient.setQueryData(QUERY_KEY, data);
@@ -49,6 +51,7 @@ export function SlackSetupPanel({ action, setupQuery }) {
   });
 
   const update = (field) => (event) => {
+    dirtyRef.current = true;
     setForm((current) => ({ ...current, [field]: event.target.value }));
   };
 

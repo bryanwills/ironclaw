@@ -148,6 +148,30 @@ test("SlackSetupPanel does not reset dirty form fields on background setup refet
   assert.equal(state.values[0].bot_token, "xoxb-dirty");
 });
 
+test("SlackSetupPanel does not overwrite user input when initial setup load resolves", () => {
+  const state = { hookIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const { context } = setupContext(state);
+  const loadedStatus = {
+    configured: true,
+    installation_id: "install_loaded",
+    team_id: "T0LOADED",
+    api_app_id: "A0LOADED",
+    user_id: "user:loaded",
+    shared_subject_user_id: "user:shared-loaded",
+    bot_token_configured: true,
+    signing_secret_configured: true,
+  };
+
+  let rendered = renderPanel(context, state, { isLoading: true });
+  valuesAfter(rendered, "onChange=")[0]({ target: { value: "install_typing" } });
+  valuesAfter(rendered, "onChange=")[1]({ target: { value: "T0TYPING" } });
+
+  renderPanel(context, state, { data: loadedStatus, isLoading: false });
+
+  assert.equal(state.values[0].installation_id, "install_typing");
+  assert.equal(state.values[0].team_id, "T0TYPING");
+});
+
 test("SlackSetupPanel clears secrets and accepts saved status after successful save", () => {
   const state = { hookIndex: 0, values: {}, refs: {}, effectDeps: {} };
   const savedStatus = {

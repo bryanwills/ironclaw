@@ -105,7 +105,7 @@ pub(super) async fn build_runtime_mounts(
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
     if let Some(legacy_setup) = config.legacy_setup.clone() {
-        seed_legacy_slack_setup(
+        seed_legacy_slack_setup_if_missing(
             &setup_service,
             Arc::clone(&binding_store),
             Arc::clone(&channel_route_store),
@@ -143,6 +143,30 @@ pub(super) async fn build_runtime_mounts(
         )),
         outbound_delivery_target_provider_registered: false,
     })
+}
+
+async fn seed_legacy_slack_setup_if_missing(
+    setup_service: &SlackSetupService,
+    binding_store: Arc<dyn RebornUserIdentityBindingStore>,
+    channel_route_store: Arc<dyn SlackChannelRouteStore>,
+    legacy_setup: super::SlackHostBetaLegacySetup,
+) -> Result<(), SlackHostBetaBuildError> {
+    if setup_service
+        .current_setup()
+        .await
+        .map_err(map_legacy_setup_error("slack.legacy_setup"))?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    seed_legacy_slack_setup(
+        setup_service,
+        binding_store,
+        channel_route_store,
+        legacy_setup,
+    )
+    .await
 }
 
 async fn seed_legacy_slack_setup(
@@ -297,7 +321,7 @@ struct DynamicSlackInstallationResolver {
     state: Arc<dyn RebornUserIdentityLookup>,
     pairing: SlackPersonalBindingPairingService,
     channel_route_store: Arc<dyn SlackChannelRouteStore>,
-    cached_resolver: Arc<Mutex<DynamicSlackInstallationResolverCache>>,
+    live_resolvers: Arc<Mutex<DynamicSlackInstallationResolverLifecycle>>,
 }
 
 impl DynamicSlackInstallationResolver {
@@ -314,11 +338,16 @@ impl DynamicSlackInstallationResolver {
             state,
             pairing,
             channel_route_store,
-            cached_resolver: Arc::new(Mutex::new(DynamicSlackInstallationResolverCache::default())),
+            live_resolvers: Arc::new(Mutex::new(
+                DynamicSlackInstallationResolverLifecycle::default(),
+            )),
         }
     }
 
     async fn resolver(&self) -> Result<Arc<StaticSlackInstallationResolver>, SlackIngressError> {
+        // Read setup before consulting the live resolver holder so WebUI changes
+        // take effect on the next webhook. The holder below is for runner
+        // lifecycle/drain ownership, not for hiding setup-store I/O.
         let setup = self
             .setup_service
             .current_setup()
@@ -326,29 +355,32 @@ impl DynamicSlackInstallationResolver {
             .map_err(|_| SlackIngressError::InstallationNotFound)?
             .ok_or(SlackIngressError::InstallationNotFound)?;
         let revision = setup.revision;
-        if let Some(resolver) = self.cached_resolver(revision).await {
+        if let Some(resolver) = self.live_resolver_for_revision(revision).await {
             return Ok(resolver);
         }
 
         let resolver = Arc::new(self.build_resolver(setup).await?);
-        let mut cache = self.cached_resolver.lock().await;
-        if let Some(current) = &cache.current
+        let mut live_resolvers = self.live_resolvers.lock().await;
+        if let Some(current) = &live_resolvers.current
             && current.revision == revision
         {
             return Ok(Arc::clone(&current.resolver));
         }
-        if let Some(previous) = cache.current.replace(DynamicCachedSlackResolver {
+        if let Some(previous) = live_resolvers.current.replace(DynamicLiveSlackResolver {
             revision,
             resolver: Arc::clone(&resolver),
         }) {
-            cache.retired.push(previous.resolver);
+            live_resolvers.retired.push(previous.resolver);
         }
         Ok(resolver)
     }
 
-    async fn cached_resolver(&self, revision: u64) -> Option<Arc<StaticSlackInstallationResolver>> {
-        let cache = self.cached_resolver.lock().await;
-        cache
+    async fn live_resolver_for_revision(
+        &self,
+        revision: u64,
+    ) -> Option<Arc<StaticSlackInstallationResolver>> {
+        let live_resolvers = self.live_resolvers.lock().await;
+        live_resolvers
             .current
             .as_ref()
             .filter(|current| current.revision == revision)
@@ -393,16 +425,16 @@ impl DynamicSlackInstallationResolver {
         Ok(StaticSlackInstallationResolver::new([record]))
     }
 
-    async fn drain_cached_resolvers(&self) {
+    async fn drain_live_resolvers(&self) {
         let resolvers = {
-            let cache = self.cached_resolver.lock().await;
-            cache.resolvers()
+            let live_resolvers = self.live_resolvers.lock().await;
+            live_resolvers.resolvers()
         };
         for resolver in &resolvers {
             resolver.drain_installations().await;
         }
-        let mut cache = self.cached_resolver.lock().await;
-        cache.forget_retired(&resolvers);
+        let mut live_resolvers = self.live_resolvers.lock().await;
+        live_resolvers.forget_retired(&resolvers);
     }
 }
 
@@ -424,17 +456,17 @@ impl SlackInstallationResolver for DynamicSlackInstallationResolver {
     fn drain_installations<'a>(
         &'a self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move { self.drain_cached_resolvers().await })
+        Box::pin(async move { self.drain_live_resolvers().await })
     }
 }
 
 #[derive(Default)]
-struct DynamicSlackInstallationResolverCache {
-    current: Option<DynamicCachedSlackResolver>,
+struct DynamicSlackInstallationResolverLifecycle {
+    current: Option<DynamicLiveSlackResolver>,
     retired: Vec<Arc<StaticSlackInstallationResolver>>,
 }
 
-impl DynamicSlackInstallationResolverCache {
+impl DynamicSlackInstallationResolverLifecycle {
     fn resolvers(&self) -> Vec<Arc<StaticSlackInstallationResolver>> {
         self.current
             .iter()
@@ -449,7 +481,7 @@ impl DynamicSlackInstallationResolverCache {
     }
 }
 
-struct DynamicCachedSlackResolver {
+struct DynamicLiveSlackResolver {
     revision: u64,
     resolver: Arc<StaticSlackInstallationResolver>,
 }
@@ -931,6 +963,55 @@ mod tests {
             )
         );
         assert_eq!(bindings[0].user_id.as_str(), "user:operator");
+    }
+
+    #[tokio::test]
+    async fn seed_legacy_slack_setup_if_missing_preserves_runtime_setup() {
+        let existing_setup = setup_record(7);
+        let setup_store = Arc::new(InMemorySetupStore::new(existing_setup.clone()));
+        let setup_service = Arc::new(SlackSetupService::new(
+            TenantId::new("tenant:slack").unwrap(),
+            AgentId::new("agent:slack").unwrap(),
+            None,
+            UserId::new("user:operator").unwrap(),
+            setup_store,
+            Arc::new(InMemorySecretStore::default()),
+        ));
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let route_store = Arc::new(RecordingRouteStore::default());
+
+        seed_legacy_slack_setup_if_missing(
+            &setup_service,
+            binding_store.clone(),
+            route_store.clone(),
+            SlackHostBetaLegacySetup {
+                installation_id: "install-legacy".to_string(),
+                team_id: "TLEGACY".to_string(),
+                api_app_id: "ALEGACY".to_string(),
+                slack_user_id: Some("ULEGACY".to_string()),
+                user_id: UserId::new("user:legacy").unwrap(),
+                shared_subject_user_id: Some(UserId::new("user:legacy-shared").unwrap()),
+                channel_routes: vec![SlackHostBetaChannelRoute::new(
+                    "CLEGACY",
+                    UserId::new("user:legacy-agent").unwrap(),
+                )],
+                signing_secret: SecretString::from("legacy-signing-secret"),
+                bot_token: SecretString::from("xoxb-legacy"),
+            },
+        )
+        .await
+        .expect("existing setup skips legacy seed");
+
+        assert_eq!(
+            setup_service
+                .current_setup()
+                .await
+                .expect("setup read")
+                .expect("setup remains"),
+            existing_setup
+        );
+        assert!(binding_store.bindings.lock().unwrap().is_empty());
+        assert!(route_store.routes.lock().unwrap().is_empty());
     }
 
     fn setup_record(revision: u64) -> SlackInstallationSetup {

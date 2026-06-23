@@ -447,12 +447,23 @@ fn secret_handle_for_installation(
     installation_id: &str,
     revision: u64,
 ) -> Result<SecretHandle, ironclaw_host_api::HostApiError> {
-    let digest =
-        sha256_hex(format!("tenant:{tenant_id}\ninstallation:{installation_id}").as_bytes());
+    let digest = sha256_hex(&secret_handle_key_material(tenant_id, installation_id));
     SecretHandle::new(format!(
         "{prefix}_{}_v{revision}",
         &digest[..INSTALLATION_HANDLE_HASH_LEN]
     ))
+}
+
+fn secret_handle_key_material(tenant_id: &TenantId, installation_id: &str) -> Vec<u8> {
+    let mut key = b"slack-installation-secret:v1".to_vec();
+    append_length_prefixed(&mut key, tenant_id.as_str().as_bytes());
+    append_length_prefixed(&mut key, installation_id.as_bytes());
+    key
+}
+
+fn append_length_prefixed(key: &mut Vec<u8>, value: &[u8]) {
+    key.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    key.extend_from_slice(value);
 }
 
 fn map_secret_error(error: SecretStoreError) -> SlackSetupError {
@@ -626,6 +637,17 @@ mod tests {
                 .expect("tenant b token")
                 .expose_secret(),
             "xoxb-tenant-b"
+        );
+    }
+
+    #[test]
+    fn secret_handle_key_material_is_length_prefixed() {
+        let tenant_with_separator = TenantId::from_trusted("tenant:a\ninstallation:b".to_string());
+        let tenant = TenantId::new("tenant:a").expect("tenant");
+
+        assert_ne!(
+            secret_handle_key_material(&tenant_with_separator, "c"),
+            secret_handle_key_material(&tenant, "b\ninstallation:c")
         );
     }
 
