@@ -79,9 +79,7 @@ pub(super) fn pending_approval_resume_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
-        activity_id: resume
-            .activity_id_for_resume()
-            .unwrap_or_else(ironclaw_turns::CapabilityActivityId::new),
+        activity_id: resume.activity_id_for_resume().unwrap_or_default(),
         surface_version,
         capability_id: resume.capability_id.clone(),
         input_ref: resume.input_ref.clone(),
@@ -133,9 +131,7 @@ fn pending_auth_resume_staged_input_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
-        activity_id: resume
-            .activity_id_for_resume()
-            .unwrap_or_else(ironclaw_turns::CapabilityActivityId::new),
+        activity_id: resume.activity_id_for_resume().unwrap_or_default(),
         surface_version,
         capability_id: resume.capability_id.clone(),
         input_ref: resume.input_ref.clone(),

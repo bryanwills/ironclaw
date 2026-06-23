@@ -64,6 +64,7 @@ fn capability_display_preview() -> CapabilityDisplayPreviewView {
         output_preview: Some("fn main() {}".to_string()),
         output_kind: Some("text".to_string()),
         output_bytes: Some(12),
+        error_kind: None,
         result_ref: Some("result:tool-output".to_string()),
         truncated: false,
         updated_at: Utc::now(),

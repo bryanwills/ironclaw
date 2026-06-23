@@ -1392,7 +1392,7 @@ pub struct ProviderToolCallReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityInvocation {
     /// Stable activity identity for this invocation. Runtime hosts derive
-    /// their `InvocationId` from it rather than minting a second identity.
+    /// their execution identity from it rather than minting a second id.
     pub activity_id: CapabilityActivityId,
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
@@ -1400,10 +1400,9 @@ pub struct CapabilityInvocation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_resume: Option<CapabilityApprovalResume>,
     /// Set when the invocation was previously auth-blocked and the auth
-    /// gate has now been resolved. Carries the original `invocation_id`
-    /// (as a resume token) so re-dispatch reuses it rather than minting a
-    /// new one, preserving any prior approval lease whose scope embeds
-    /// that id.
+    /// gate has now been resolved. Carries the original activity token so
+    /// re-dispatch reuses it rather than minting a new one, preserving any
+    /// prior approval lease whose scope embeds that id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_resume: Option<CapabilityAuthResume>,
 }
@@ -1475,16 +1474,16 @@ pub struct AuthResumeApprovalIdentity {
 
 /// Auth-gate resume identity.
 ///
-/// Carries the original invocation identifier (encoded as a resume token) so
-/// that re-dispatch after credential completion reuses the same invocation
+/// Carries the original activity identity (encoded as a resume token) so
+/// that re-dispatch after credential completion reuses the same activity
 /// rather than minting a fresh one.  When the prior invocation also passed
 /// an approval gate, `prior_approval` carries the approval identity so the
 /// host can claim the matching fingerprinted lease without requiring a second
 /// human approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAuthResume {
-    /// Encodes the original invocation identifier; the host decodes it via
-    /// `invocation_id_from_resume_token` to set `context.invocation_id`.
+    /// Encodes the original activity identity so the host can reuse the
+    /// matching execution context after auth completes.
     pub resume_token: CapabilityResumeToken,
     /// Present when the invocation previously passed a one-shot approval gate.
     /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].

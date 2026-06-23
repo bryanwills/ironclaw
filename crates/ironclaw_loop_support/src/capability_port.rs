@@ -1494,16 +1494,17 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 capability.estimate.clone(),
             )
         };
-        let mut invocation_context = invocation_context_from_visible(
-            &self.visible_request.context,
-            &self.run_context,
-            request.activity_id,
-            &request.capability_id,
-            &capability,
-            trust_decision.effective_trust.class(),
-            &trust_decision.authority_ceiling.allowed_effects,
-            self.execution_mounts_for(&request.capability_id),
-        )?;
+        let mut invocation_context =
+            invocation_context_from_visible(VisibleInvocationContextRequest {
+                base: &self.visible_request.context,
+                run_context: &self.run_context,
+                activity_id: request.activity_id,
+                capability_id: &request.capability_id,
+                capability: &capability,
+                trust: trust_decision.effective_trust.class(),
+                allowed_effects: &trust_decision.authority_ceiling.allowed_effects,
+                execution_mounts: self.execution_mounts_for(&request.capability_id),
+            })?;
         // Normalize the two mutually-exclusive resume fields into a single
         // local value BEFORE touching `invocation_context`, so an illegal
         // both-set invocation is rejected before any state mutation occurs.
@@ -1888,32 +1889,36 @@ fn should_retry_result_write(
         )
 }
 
-fn invocation_context_from_visible(
-    base: &ExecutionContext,
-    run_context: &LoopRunContext,
+struct VisibleInvocationContextRequest<'a> {
+    base: &'a ExecutionContext,
+    run_context: &'a LoopRunContext,
     activity_id: CapabilityActivityId,
-    capability_id: &CapabilityId,
-    capability: &RuntimeSurfaceCapabilitySnapshot,
+    capability_id: &'a CapabilityId,
+    capability: &'a RuntimeSurfaceCapabilitySnapshot,
     trust: ironclaw_host_api::TrustClass,
-    allowed_effects: &[EffectKind],
-    execution_mounts: &MountView,
+    allowed_effects: &'a [EffectKind],
+    execution_mounts: &'a MountView,
+}
+
+fn invocation_context_from_visible(
+    request: VisibleInvocationContextRequest<'_>,
 ) -> Result<ExecutionContext, AgentLoopHostError> {
-    let mut context = base.clone();
-    let loop_driver_extension = loop_driver_execution_extension_id(run_context)?;
+    let mut context = request.base.clone();
+    let loop_driver_extension = loop_driver_execution_extension_id(request.run_context)?;
     context.extension_id = loop_driver_extension.clone();
-    context.runtime = capability.runtime;
-    context.trust = trust;
+    context.runtime = request.capability.runtime;
+    context.trust = request.trust;
     context.grants = invocation_grants_from_visible(
-        base,
-        capability_id,
+        request.base,
+        request.capability_id,
         &loop_driver_extension,
-        allowed_effects,
+        request.allowed_effects,
     )?;
     // Mount propagation is host-authority only: visible-request contexts must arrive with no
     // caller-supplied mounts, while this invocation context receives the execution mounts that the
     // authority resolver selected for the run and capability dispatch.
-    context.mounts = execution_mounts.clone();
-    let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+    context.mounts = request.execution_mounts.clone();
+    let invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
     context.invocation_id = invocation_id;
     context.correlation_id = CorrelationId::new();
     context.process_id = None;
@@ -5990,16 +5995,16 @@ mod tests {
             provider_tool_name: "demo__echo".to_string(),
         };
 
-        let err = invocation_context_from_visible(
-            &context,
-            &run_context,
-            CapabilityActivityId::new(),
-            &capability_id,
-            &capability,
-            TrustClass::Sandbox,
-            &[EffectKind::ReadFilesystem],
-            &MountView::default(),
-        )
+        let err = invocation_context_from_visible(VisibleInvocationContextRequest {
+            base: &context,
+            run_context: &run_context,
+            activity_id: CapabilityActivityId::new(),
+            capability_id: &capability_id,
+            capability: &capability,
+            trust: TrustClass::Sandbox,
+            allowed_effects: &[EffectKind::ReadFilesystem],
+            execution_mounts: &MountView::default(),
+        })
         .expect_err("elevated grant must be rejected");
 
         assert_eq!(err.kind, AgentLoopHostErrorKind::Unauthorized);
@@ -6043,16 +6048,16 @@ mod tests {
             provider_tool_name: "demo__echo".to_string(),
         };
 
-        let invocation_context = invocation_context_from_visible(
-            &context,
-            &run_context,
-            CapabilityActivityId::new(),
-            &capability_id,
-            &capability,
-            TrustClass::Sandbox,
-            &[EffectKind::ReadFilesystem],
-            &grant_mounts,
-        )
+        let invocation_context = invocation_context_from_visible(VisibleInvocationContextRequest {
+            base: &context,
+            run_context: &run_context,
+            activity_id: CapabilityActivityId::new(),
+            capability_id: &capability_id,
+            capability: &capability,
+            trust: TrustClass::Sandbox,
+            allowed_effects: &[EffectKind::ReadFilesystem],
+            execution_mounts: &grant_mounts,
+        })
         .expect("host-issued mount grant should be preserved");
 
         assert_eq!(invocation_context.mounts, grant_mounts);
@@ -6093,16 +6098,16 @@ mod tests {
             provider_tool_name: "demo__echo".to_string(),
         };
 
-        let invocation_context = invocation_context_from_visible(
-            &context,
-            &run_context,
-            CapabilityActivityId::new(),
-            &capability_id,
-            &capability,
-            TrustClass::Sandbox,
-            &[EffectKind::ReadFilesystem],
-            &MountView::default(),
-        )
+        let invocation_context = invocation_context_from_visible(VisibleInvocationContextRequest {
+            base: &context,
+            run_context: &run_context,
+            activity_id: CapabilityActivityId::new(),
+            capability_id: &capability_id,
+            capability: &capability,
+            trust: TrustClass::Sandbox,
+            allowed_effects: &[EffectKind::ReadFilesystem],
+            execution_mounts: &MountView::default(),
+        })
         .expect("matching host scope grant should be preserved");
 
         assert_eq!(invocation_context.grants.grants.len(), 1);
@@ -6144,16 +6149,16 @@ mod tests {
             provider_tool_name: "demo_echo".to_string(),
         };
 
-        let invocation_context = invocation_context_from_visible(
-            &context,
-            &run_context,
-            CapabilityActivityId::new(),
-            &capability_id,
-            &capability,
-            TrustClass::FirstParty,
-            &[EffectKind::DispatchCapability],
-            &MountView::default(),
-        )
+        let invocation_context = invocation_context_from_visible(VisibleInvocationContextRequest {
+            base: &context,
+            run_context: &run_context,
+            activity_id: CapabilityActivityId::new(),
+            capability_id: &capability_id,
+            capability: &capability,
+            trust: TrustClass::FirstParty,
+            allowed_effects: &[EffectKind::DispatchCapability],
+            execution_mounts: &MountView::default(),
+        })
         .expect("planned driver id should derive a valid execution principal");
 
         assert_eq!(
@@ -6228,16 +6233,16 @@ mod tests {
             provider_tool_name: "demo__echo".to_string(),
         };
 
-        let invocation_context = invocation_context_from_visible(
-            &context,
-            &run_context,
-            CapabilityActivityId::new(),
-            &capability_id,
-            &capability,
-            TrustClass::UserTrusted,
-            &[EffectKind::DispatchCapability],
-            &MountView::default(),
-        )
+        let invocation_context = invocation_context_from_visible(VisibleInvocationContextRequest {
+            base: &context,
+            run_context: &run_context,
+            activity_id: CapabilityActivityId::new(),
+            capability_id: &capability_id,
+            capability: &capability,
+            trust: TrustClass::UserTrusted,
+            allowed_effects: &[EffectKind::DispatchCapability],
+            execution_mounts: &MountView::default(),
+        })
         .expect("context");
 
         assert_eq!(invocation_context.extension_id, loop_driver_extension);
