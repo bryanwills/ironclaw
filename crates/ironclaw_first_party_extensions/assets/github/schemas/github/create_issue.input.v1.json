@@ -35,6 +35,11 @@
       "maxLength": 65536,
       "description": "Issue body."
     },
+    "milestone": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional milestone number to associate with the issue."
+    },
     "labels": {
       "type": "array",
       "maxItems": 100,

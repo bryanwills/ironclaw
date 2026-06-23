@@ -40,8 +40,49 @@ pub(crate) enum GitHubAction {
         repo: String,
         title: String,
         body: Option<String>,
+        milestone: Option<u32>,
         labels: Option<Vec<String>>,
         assignees: Option<Vec<String>>,
+    },
+    #[serde(rename = "update_issue")]
+    UpdateIssue {
+        owner: String,
+        repo: String,
+        issue_number: u32,
+        title: Option<String>,
+        body: Option<String>,
+        state: Option<IssueState>,
+        milestone: Option<u32>,
+        labels: Option<Vec<String>>,
+        assignees: Option<Vec<String>>,
+    },
+    #[serde(rename = "add_issue_labels")]
+    AddIssueLabels {
+        owner: String,
+        repo: String,
+        issue_number: u32,
+        labels: Vec<String>,
+    },
+    #[serde(rename = "remove_issue_label")]
+    RemoveIssueLabel {
+        owner: String,
+        repo: String,
+        issue_number: u32,
+        name: String,
+    },
+    #[serde(rename = "add_issue_assignees")]
+    AddIssueAssignees {
+        owner: String,
+        repo: String,
+        issue_number: u32,
+        assignees: Vec<String>,
+    },
+    #[serde(rename = "remove_issue_assignees")]
+    RemoveIssueAssignees {
+        owner: String,
+        repo: String,
+        issue_number: u32,
+        assignees: Vec<String>,
     },
     #[serde(rename = "get_issue")]
     GetIssue {
@@ -80,11 +121,26 @@ pub(crate) enum GitHubAction {
     CreatePullRequest {
         owner: String,
         repo: String,
-        title: String,
+        title: Option<String>,
         head: String,
         base: String,
         body: Option<String>,
+        issue: Option<u32>,
+        head_repo: Option<String>,
+        maintainer_can_modify: Option<bool>,
         draft: Option<bool>,
+    },
+    #[serde(rename = "update_pull_request")]
+    UpdatePullRequest {
+        owner: String,
+        repo: String,
+        #[serde(alias = "number", alias = "pull_number")]
+        pr_number: u32,
+        title: Option<String>,
+        body: Option<String>,
+        state: Option<PullRequestState>,
+        base: Option<String>,
+        maintainer_can_modify: Option<bool>,
     },
     #[serde(rename = "get_pull_request")]
     GetPullRequest {
@@ -110,6 +166,8 @@ pub(crate) enum GitHubAction {
         pr_number: u32,
         body: String,
         event: PrReviewEvent,
+        commit_id: Option<String>,
+        comments: Option<Vec<PrReviewCommentInput>>,
     },
     #[serde(rename = "list_pull_request_comments")]
     ListPullRequestComments {
@@ -117,6 +175,9 @@ pub(crate) enum GitHubAction {
         repo: String,
         #[serde(alias = "number", alias = "pull_number")]
         pr_number: u32,
+        sort: Option<PullRequestCommentSort>,
+        direction: Option<Direction>,
+        since: Option<String>,
         page: Option<u32>,
         limit: Option<u32>,
     },
@@ -138,6 +199,19 @@ pub(crate) enum GitHubAction {
         page: Option<u32>,
         limit: Option<u32>,
     },
+    #[serde(rename = "list_pull_request_review_threads")]
+    ListPullRequestReviewThreads {
+        owner: String,
+        repo: String,
+        #[serde(alias = "number", alias = "pull_number")]
+        pr_number: u32,
+        first: Option<u32>,
+        after: Option<String>,
+    },
+    #[serde(rename = "resolve_review_thread")]
+    ResolveReviewThread { thread_id: String },
+    #[serde(rename = "unresolve_review_thread")]
+    UnresolveReviewThread { thread_id: String },
     #[serde(rename = "get_combined_status")]
     GetCombinedStatus {
         owner: String,
@@ -275,8 +349,50 @@ pub(crate) enum GitHubAction {
         owner: String,
         repo: String,
         workflow_id: Option<String>,
+        actor: Option<String>,
+        branch: Option<String>,
+        event: Option<String>,
+        status: Option<WorkflowRunStatus>,
+        created: Option<String>,
+        exclude_pull_requests: Option<bool>,
+        check_suite_id: Option<u64>,
+        head_sha: Option<String>,
         page: Option<u32>,
         limit: Option<u32>,
+    },
+    #[serde(rename = "get_workflow_run_jobs")]
+    GetWorkflowRunJobs {
+        owner: String,
+        repo: String,
+        run_id: u64,
+        filter: Option<WorkflowJobFilter>,
+        page: Option<u32>,
+        limit: Option<u32>,
+    },
+    #[serde(rename = "get_workflow_run_artifacts")]
+    GetWorkflowRunArtifacts {
+        owner: String,
+        repo: String,
+        run_id: u64,
+        name: Option<String>,
+        direction: Option<Direction>,
+        page: Option<u32>,
+        limit: Option<u32>,
+    },
+    #[serde(rename = "rerun_failed_workflow_run_jobs")]
+    RerunFailedWorkflowRunJobs {
+        owner: String,
+        repo: String,
+        run_id: u64,
+        enable_debug_logging: Option<bool>,
+    },
+    #[serde(rename = "rerun_workflow_job")]
+    RerunWorkflowJob {
+        owner: String,
+        repo: String,
+        job_id: u64,
+        enable_debug_logging: Option<bool>,
+        enable_debugger: Option<bool>,
     },
     #[serde(rename = "fork_repo")]
     ForkRepo {
@@ -306,6 +422,168 @@ impl PrReviewEvent {
             Self::Approve => "APPROVE",
             Self::RequestChanges => "REQUEST_CHANGES",
             Self::Comment => "COMMENT",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(crate) enum IssueState {
+    #[serde(rename = "open")]
+    Open,
+    #[serde(rename = "closed")]
+    Closed,
+}
+
+impl IssueState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(crate) enum PullRequestState {
+    #[serde(rename = "open")]
+    Open,
+    #[serde(rename = "closed")]
+    Closed,
+}
+
+impl PullRequestState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub(crate) enum ReviewCommentSide {
+    #[serde(rename = "LEFT")]
+    Left,
+    #[serde(rename = "RIGHT")]
+    Right,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct PrReviewCommentInput {
+    pub(crate) path: String,
+    pub(crate) body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) position: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) side: Option<ReviewCommentSide>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) start_side: Option<ReviewCommentSide>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(crate) enum PullRequestCommentSort {
+    #[serde(rename = "created")]
+    Created,
+    #[serde(rename = "updated")]
+    Updated,
+}
+
+impl PullRequestCommentSort {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Updated => "updated",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(crate) enum Direction {
+    #[serde(rename = "asc")]
+    Asc,
+    #[serde(rename = "desc")]
+    Desc,
+}
+
+impl Direction {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(crate) enum WorkflowRunStatus {
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "action_required")]
+    ActionRequired,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+    #[serde(rename = "failure")]
+    Failure,
+    #[serde(rename = "neutral")]
+    Neutral,
+    #[serde(rename = "skipped")]
+    Skipped,
+    #[serde(rename = "stale")]
+    Stale,
+    #[serde(rename = "success")]
+    Success,
+    #[serde(rename = "timed_out")]
+    TimedOut,
+    #[serde(rename = "in_progress")]
+    InProgress,
+    #[serde(rename = "queued")]
+    Queued,
+    #[serde(rename = "requested")]
+    Requested,
+    #[serde(rename = "waiting")]
+    Waiting,
+    #[serde(rename = "pending")]
+    Pending,
+}
+
+impl WorkflowRunStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::ActionRequired => "action_required",
+            Self::Cancelled => "cancelled",
+            Self::Failure => "failure",
+            Self::Neutral => "neutral",
+            Self::Skipped => "skipped",
+            Self::Stale => "stale",
+            Self::Success => "success",
+            Self::TimedOut => "timed_out",
+            Self::InProgress => "in_progress",
+            Self::Queued => "queued",
+            Self::Requested => "requested",
+            Self::Waiting => "waiting",
+            Self::Pending => "pending",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(crate) enum WorkflowJobFilter {
+    #[serde(rename = "latest")]
+    Latest,
+    #[serde(rename = "all")]
+    All,
+}
+
+impl WorkflowJobFilter {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::All => "all",
         }
     }
 }

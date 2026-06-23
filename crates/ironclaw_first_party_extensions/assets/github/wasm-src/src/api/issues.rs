@@ -1,4 +1,5 @@
 use crate::request::github_request;
+use crate::types::IssueState;
 use crate::validation::*;
 
 #[allow(clippy::too_many_arguments)]
@@ -71,6 +72,7 @@ pub(crate) fn create_issue(
     repo: &str,
     title: &str,
     body: Option<&str>,
+    milestone: Option<u32>,
     labels: Option<Vec<String>>,
     assignees: Option<Vec<String>>,
 ) -> Result<String, String> {
@@ -93,6 +95,10 @@ pub(crate) fn create_issue(
     if let Some(body) = body {
         req_body["body"] = serde_json::json!(body);
     }
+    if let Some(milestone) = milestone {
+        validate_positive_number(milestone, "milestone")?;
+        req_body["milestone"] = serde_json::json!(milestone);
+    }
     if let Some(labels) = labels {
         req_body["labels"] = serde_json::json!(labels);
     }
@@ -100,6 +106,182 @@ pub(crate) fn create_issue(
         req_body["assignees"] = serde_json::json!(assignees);
     }
     github_request("POST", &path, Some(req_body.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_issue(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    title: Option<&str>,
+    body: Option<&str>,
+    state: Option<IssueState>,
+    milestone: Option<u32>,
+    labels: Option<Vec<String>>,
+    assignees: Option<Vec<String>>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    if let Some(title) = title {
+        validate_input_length(title, "title")?;
+    }
+    if let Some(body) = body {
+        validate_input_length(body, "body")?;
+    }
+    validate_name_list(labels.as_deref(), "labels")?;
+    validate_name_list(assignees.as_deref(), "assignees")?;
+    if let Some(milestone) = milestone {
+        validate_positive_number(milestone, "milestone")?;
+    }
+
+    let mut req_body = serde_json::json!({});
+    if let Some(title) = title {
+        req_body["title"] = serde_json::json!(title);
+    }
+    if let Some(body) = body {
+        req_body["body"] = serde_json::json!(body);
+    }
+    if let Some(state) = state {
+        req_body["state"] = serde_json::json!(state.as_str());
+    }
+    if let Some(milestone) = milestone {
+        req_body["milestone"] = serde_json::json!(milestone);
+    }
+    if let Some(labels) = labels {
+        req_body["labels"] = serde_json::json!(labels);
+    }
+    if let Some(assignees) = assignees {
+        req_body["assignees"] = serde_json::json!(assignees);
+    }
+    if req_body.as_object().is_some_and(|body| body.is_empty()) {
+        return Err("invalid_parameters".to_string());
+    }
+
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!(
+        "/repos/{}/{}/issues/{}",
+        encoded_owner, encoded_repo, issue_number
+    );
+    github_request("PATCH", &path, Some(req_body.to_string()))
+}
+
+pub(crate) fn add_issue_labels(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    labels: Vec<String>,
+) -> Result<String, String> {
+    issue_name_list_request(
+        "POST",
+        owner,
+        repo,
+        issue_number,
+        "labels",
+        labels,
+        "labels",
+    )
+}
+
+pub(crate) fn remove_issue_label(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    name: &str,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_label_name(name)?;
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let encoded_name = url_encode_path(name);
+    let path = format!(
+        "/repos/{}/{}/issues/{}/labels/{}",
+        encoded_owner, encoded_repo, issue_number, encoded_name
+    );
+    github_request("DELETE", &path, None)
+}
+
+pub(crate) fn add_issue_assignees(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    assignees: Vec<String>,
+) -> Result<String, String> {
+    issue_name_list_request(
+        "POST",
+        owner,
+        repo,
+        issue_number,
+        "assignees",
+        assignees,
+        "assignees",
+    )
+}
+
+pub(crate) fn remove_issue_assignees(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    assignees: Vec<String>,
+) -> Result<String, String> {
+    issue_name_list_request(
+        "DELETE",
+        owner,
+        repo,
+        issue_number,
+        "assignees",
+        assignees,
+        "assignees",
+    )
+}
+
+fn issue_name_list_request(
+    method: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    endpoint: &str,
+    values: Vec<String>,
+    field_name: &str,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_name_list(Some(values.as_slice()), field_name)?;
+    if values.is_empty() {
+        return Err(format!("Invalid {field_name}: values cannot be empty"));
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!(
+        "/repos/{}/{}/issues/{}/{}",
+        encoded_owner, encoded_repo, issue_number, endpoint
+    );
+    let mut req_body = serde_json::Map::new();
+    req_body.insert(field_name.to_string(), serde_json::json!(values));
+    let req_body = serde_json::Value::Object(req_body);
+    github_request(method, &path, Some(req_body.to_string()))
+}
+
+fn validate_positive_number(value: u32, field_name: &str) -> Result<(), String> {
+    if value == 0 {
+        return Err(format!("invalid_{field_name}"));
+    }
+    Ok(())
+}
+
+fn validate_label_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("invalid_label".to_string());
+    }
+    validate_input_length(name, "label")?;
+    if name.chars().count() > 100 {
+        return Err("invalid_label".to_string());
+    }
+    Ok(())
 }
 
 fn validate_name_list(values: Option<&[String]>, field_name: &str) -> Result<(), String> {

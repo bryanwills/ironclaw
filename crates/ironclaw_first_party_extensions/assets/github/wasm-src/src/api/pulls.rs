@@ -1,5 +1,8 @@
 use crate::request::github_request;
-use crate::types::{MergeMethod, PrReviewEvent};
+use crate::types::{
+    Direction, MergeMethod, PrReviewCommentInput, PrReviewEvent, PullRequestCommentSort,
+    PullRequestState,
+};
 use crate::validation::*;
 
 #[allow(clippy::too_many_arguments)]
@@ -64,38 +67,116 @@ pub(crate) fn list_pull_requests(
     github_request("GET", &path, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_pull_request(
     owner: &str,
     repo: &str,
-    title: &str,
+    title: Option<&str>,
     head: &str,
     base: &str,
     body: Option<&str>,
+    issue: Option<u32>,
+    head_repo: Option<&str>,
+    maintainer_can_modify: Option<bool>,
     draft: bool,
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
-    validate_input_length(title, "title")?;
+    if issue.is_none() && title.is_none_or(|value| value.is_empty()) {
+        return Err("invalid_parameters".to_string());
+    }
+    if let Some(title) = title {
+        validate_input_length(title, "title")?;
+    }
     validate_input_length(head, "head")?;
     validate_input_length(base, "base")?;
     if let Some(b) = body {
         validate_input_length(b, "body")?;
+    }
+    if let Some(head_repo) = head_repo {
+        if !validate_path_segment(head_repo) {
+            return Err("Invalid repository name".into());
+        }
     }
 
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let path = format!("/repos/{}/{}/pulls", encoded_owner, encoded_repo);
     let mut req_body = serde_json::json!({
-        "title": title,
         "head": head,
         "base": base,
         "draft": draft,
     });
+    if let Some(title) = title {
+        req_body["title"] = serde_json::json!(title);
+    }
     if let Some(body) = body {
         req_body["body"] = serde_json::json!(body);
     }
+    if let Some(issue) = issue {
+        req_body["issue"] = serde_json::json!(issue);
+    }
+    if let Some(head_repo) = head_repo {
+        req_body["head_repo"] = serde_json::json!(head_repo);
+    }
+    if let Some(maintainer_can_modify) = maintainer_can_modify {
+        req_body["maintainer_can_modify"] = serde_json::json!(maintainer_can_modify);
+    }
     github_request("POST", &path, Some(req_body.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_pull_request(
+    owner: &str,
+    repo: &str,
+    pr_number: u32,
+    title: Option<&str>,
+    body: Option<&str>,
+    state: Option<PullRequestState>,
+    base: Option<&str>,
+    maintainer_can_modify: Option<bool>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    if let Some(title) = title {
+        validate_input_length(title, "title")?;
+    }
+    if let Some(body) = body {
+        validate_input_length(body, "body")?;
+    }
+    if let Some(base) = base {
+        validate_input_length(base, "base")?;
+    }
+
+    let mut req_body = serde_json::json!({});
+    if let Some(title) = title {
+        req_body["title"] = serde_json::json!(title);
+    }
+    if let Some(body) = body {
+        req_body["body"] = serde_json::json!(body);
+    }
+    if let Some(state) = state {
+        req_body["state"] = serde_json::json!(state.as_str());
+    }
+    if let Some(base) = base {
+        req_body["base"] = serde_json::json!(base);
+    }
+    if let Some(maintainer_can_modify) = maintainer_can_modify {
+        req_body["maintainer_can_modify"] = serde_json::json!(maintainer_can_modify);
+    }
+    if req_body.as_object().is_some_and(|body| body.is_empty()) {
+        return Err("invalid_parameters".to_string());
+    }
+
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!(
+        "/repos/{}/{}/pulls/{}",
+        encoded_owner, encoded_repo, pr_number
+    );
+    github_request("PATCH", &path, Some(req_body.to_string()))
 }
 
 pub(crate) fn get_pull_request(owner: &str, repo: &str, pr_number: u32) -> Result<String, String> {
@@ -145,11 +226,19 @@ pub(crate) fn create_pr_review(
     pr_number: u32,
     body: &str,
     event: PrReviewEvent,
+    commit_id: Option<&str>,
+    comments: Option<Vec<PrReviewCommentInput>>,
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
     validate_input_length(body, "body")?;
+    if let Some(commit_id) = commit_id {
+        validate_input_length(commit_id, "commit_id")?;
+    }
+    if let Some(comments) = comments.as_deref() {
+        validate_review_comments(comments)?;
+    }
 
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
@@ -161,13 +250,25 @@ pub(crate) fn create_pr_review(
         "body": body,
         "event": event.as_str(),
     });
+    let mut req_body = req_body;
+    if let Some(commit_id) = commit_id {
+        req_body["commit_id"] = serde_json::json!(commit_id);
+    }
+    if let Some(comments) = comments {
+        req_body["comments"] =
+            serde_json::to_value(comments).map_err(|_| "invalid_parameters".to_string())?;
+    }
     github_request("POST", &path, Some(req_body.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn list_pull_request_comments(
     owner: &str,
     repo: &str,
     pr_number: u32,
+    sort: Option<PullRequestCommentSort>,
+    direction: Option<Direction>,
+    since: Option<&str>,
     page: Option<u32>,
     limit: Option<u32>,
 ) -> Result<String, String> {
@@ -181,10 +282,37 @@ pub(crate) fn list_pull_request_comments(
         "/repos/{}/{}/pulls/{}/comments?per_page={}",
         encoded_owner, encoded_repo, pr_number, limit
     );
+    if let Some(sort) = sort {
+        path.push_str("&sort=");
+        path.push_str(sort.as_str());
+    }
+    if let Some(direction) = direction {
+        path.push_str("&direction=");
+        path.push_str(direction.as_str());
+    }
+    if let Some(since) = since {
+        validate_input_length(since, "since")?;
+        path.push_str("&since=");
+        path.push_str(&url_encode_query(since));
+    }
     if let Some(p) = page {
         path.push_str(&format!("&page={}", p));
     }
     github_request("GET", &path, None)
+}
+
+fn validate_review_comments(comments: &[PrReviewCommentInput]) -> Result<(), String> {
+    if comments.len() > 100 {
+        return Err("invalid_comments".to_string());
+    }
+    for comment in comments {
+        validate_repo_path(&comment.path)?;
+        validate_input_length(&comment.body, "body")?;
+        if comment.body.is_empty() {
+            return Err("invalid_comments".to_string());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn reply_pull_request_comment(

@@ -74,6 +74,9 @@ fn guest_error_kind(code: &str) -> &'static str {
         | "invalid_page"
         | "invalid_limit"
         | "invalid_labels"
+        | "invalid_label"
+        | "invalid_comments"
+        | "invalid_thread_id"
         | "Invalid owner or repo name"
         | "Invalid repository name"
         | "Invalid org name"
@@ -216,6 +219,16 @@ mod tests {
         assert!(find_schema("GitHub list_issues input")["properties"]["labels"].is_object());
         assert!(find_schema("GitHub merge_pull_request input")["properties"]["sha"].is_object());
         assert!(find_schema("GitHub create_issue input")["properties"]["assignees"].is_object());
+        assert!(find_schema("GitHub create_issue input")["properties"]["milestone"].is_object());
+        assert!(find_schema("GitHub update_issue input")["properties"]["state"].is_object());
+        assert!(find_schema("GitHub update_pull_request input")["properties"]["state"].is_object());
+        assert!(
+            find_schema("GitHub list_pull_request_review_threads input")["properties"]["first"]
+                .is_object()
+        );
+        assert!(
+            find_schema("GitHub get_workflow_run_jobs input")["properties"]["run_id"].is_object()
+        );
         assert_eq!(
             find_schema("GitHub list_repos input")["properties"]["type"]["enum"],
             json!(["all", "owner", "public", "private", "member"])
@@ -439,11 +452,11 @@ mod tests {
     }
 
     #[test]
-    fn create_issue_sends_assignees() {
+    fn create_issue_sends_assignees_and_milestone() {
         test_support::set_response(Ok(json!({"number": 12}).to_string()));
 
         execute_inner(
-            r#"{"owner":"nearai","repo":"ironclaw","title":"bug","assignees":["henry"],"labels":["api"]}"#,
+            r#"{"owner":"nearai","repo":"ironclaw","title":"bug","milestone":7,"assignees":["henry"],"labels":["api"]}"#,
             Some(r#"{"capability_id":"github.create_issue"}"#),
         )
         .expect("github.create_issue should accept assignees");
@@ -454,8 +467,232 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
         assert_eq!(body["title"], "bug");
+        assert_eq!(body["milestone"], 7);
         assert_eq!(body["assignees"], json!(["henry"]));
         assert_eq!(body["labels"], json!(["api"]));
+    }
+
+    #[test]
+    fn issue_mutation_tools_use_native_endpoints() {
+        for (capability, input, expected_method, expected_path, expected_body) in [
+            (
+                "github.update_issue",
+                r#"{"owner":"nearai","repo":"ironclaw","issue_number":42,"state":"closed","labels":["bug"],"assignees":["henry"],"milestone":7}"#,
+                "PATCH",
+                "/repos/nearai/ironclaw/issues/42",
+                json!({"state":"closed","labels":["bug"],"assignees":["henry"],"milestone":7}),
+            ),
+            (
+                "github.add_issue_labels",
+                r#"{"owner":"nearai","repo":"ironclaw","issue_number":42,"labels":["api","reborn"]}"#,
+                "POST",
+                "/repos/nearai/ironclaw/issues/42/labels",
+                json!({"labels":["api","reborn"]}),
+            ),
+            (
+                "github.add_issue_assignees",
+                r#"{"owner":"nearai","repo":"ironclaw","issue_number":42,"assignees":["henry"]}"#,
+                "POST",
+                "/repos/nearai/ironclaw/issues/42/assignees",
+                json!({"assignees":["henry"]}),
+            ),
+            (
+                "github.remove_issue_assignees",
+                r#"{"owner":"nearai","repo":"ironclaw","issue_number":42,"assignees":["henry"]}"#,
+                "DELETE",
+                "/repos/nearai/ironclaw/issues/42/assignees",
+                json!({"assignees":["henry"]}),
+            ),
+        ] {
+            test_support::set_response(Ok(json!({}).to_string()));
+
+            execute_inner(input, Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
+                .expect("issue mutation should dispatch");
+
+            let requests = test_support::requests();
+            assert_eq!(requests[0].method, expected_method);
+            assert_eq!(requests[0].path, expected_path);
+            let body: serde_json::Value =
+                serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+            assert_eq!(body, expected_body);
+        }
+
+        test_support::set_response(Ok(json!({}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","issue_number":42,"name":"needs review"}"#,
+            Some(r#"{"capability_id":"github.remove_issue_label"}"#),
+        )
+        .expect("remove label should dispatch");
+        let requests = test_support::requests();
+        assert_eq!(requests[0].method, "DELETE");
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/issues/42/labels/needs%20review"
+        );
+        assert!(requests[0].body.is_none());
+    }
+
+    #[test]
+    fn pull_request_workflow_tools_use_native_endpoints() {
+        test_support::set_response(Ok(json!({"number": 12}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","head":"feature","base":"main","issue":42,"head_repo":"ironclaw-fork","maintainer_can_modify":true}"#,
+            Some(r#"{"capability_id":"github.create_pull_request"}"#),
+        )
+        .expect("create PR should accept issue and fork fields");
+        let requests = test_support::requests();
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/repos/nearai/ironclaw/pulls");
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["issue"], 42);
+        assert_eq!(body["head_repo"], "ironclaw-fork");
+        assert_eq!(body["maintainer_can_modify"], true);
+        assert!(body.get("title").is_none());
+
+        test_support::set_response(Ok(json!({"number": 12}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","pr_number":12,"state":"closed","base":"release","maintainer_can_modify":false}"#,
+            Some(r#"{"capability_id":"github.update_pull_request"}"#),
+        )
+        .expect("update PR should dispatch");
+        let requests = test_support::requests();
+        assert_eq!(requests[0].method, "PATCH");
+        assert_eq!(requests[0].path, "/repos/nearai/ironclaw/pulls/12");
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            json!({"state":"closed","base":"release","maintainer_can_modify":false})
+        );
+
+        test_support::set_response(Ok(json!({"id": 1}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","pr_number":12,"body":"review","event":"COMMENT","commit_id":"abc123","comments":[{"path":"src/lib.rs","body":"inline","line":10,"side":"RIGHT"}]}"#,
+            Some(r#"{"capability_id":"github.create_pr_review"}"#),
+        )
+        .expect("create PR review should accept inline comments");
+        let requests = test_support::requests();
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(requests[0].path, "/repos/nearai/ironclaw/pulls/12/reviews");
+        assert_eq!(body["commit_id"], "abc123");
+        assert_eq!(body["comments"][0]["path"], "src/lib.rs");
+        assert_eq!(body["comments"][0]["line"], 10);
+
+        test_support::set_response(Ok(json!([]).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","pr_number":12,"sort":"updated","direction":"desc","since":"2026-06-23T00:00:00Z","limit":2,"page":3}"#,
+            Some(r#"{"capability_id":"github.list_pull_request_comments"}"#),
+        )
+        .expect("list PR comments should accept filters");
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/pulls/12/comments?per_page=2&sort=updated&direction=desc&since=2026-06-23T00%3A00%3A00Z&page=3"
+        );
+    }
+
+    #[test]
+    fn review_threads_use_graphql_endpoint() {
+        test_support::set_response(Ok(json!({"data": {}}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","pr_number":12,"first":10,"after":"cursor"}"#,
+            Some(r#"{"capability_id":"github.list_pull_request_review_threads"}"#),
+        )
+        .expect("list review threads should dispatch");
+        let requests = test_support::requests();
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/graphql");
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert!(body["query"].as_str().unwrap().contains("reviewThreads"));
+        assert_eq!(body["variables"]["owner"], "nearai");
+        assert_eq!(body["variables"]["first"], 10);
+
+        test_support::set_response(Ok(json!({"data": {}}).to_string()));
+        execute_inner(
+            r#"{"thread_id":"PRRT_kwDOExample"}"#,
+            Some(r#"{"capability_id":"github.resolve_review_thread"}"#),
+        )
+        .expect("resolve review thread should dispatch");
+        let requests = test_support::requests();
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert!(body["query"]
+            .as_str()
+            .unwrap()
+            .contains("resolveReviewThread"));
+        assert_eq!(body["variables"]["threadId"], "PRRT_kwDOExample");
+    }
+
+    #[test]
+    fn workflow_action_tools_use_native_endpoints() {
+        test_support::set_response(Ok(json!({"workflow_runs": []}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","workflow_id":"ci.yml","head_sha":"abc123","event":"pull_request","status":"failure","exclude_pull_requests":false,"limit":5,"page":2}"#,
+            Some(r#"{"capability_id":"github.get_workflow_runs"}"#),
+        )
+        .expect("workflow runs should accept filters");
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/actions/workflows/ci.yml/runs?per_page=5&event=pull_request&status=failure&exclude_pull_requests=false&head_sha=abc123&page=2"
+        );
+
+        test_support::set_response(Ok(json!({"jobs": []}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","run_id":123,"filter":"all","limit":6,"page":2}"#,
+            Some(r#"{"capability_id":"github.get_workflow_run_jobs"}"#),
+        )
+        .expect("workflow jobs should dispatch");
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/actions/runs/123/jobs?per_page=6&filter=all&page=2"
+        );
+
+        test_support::set_response(Ok(json!({"artifacts": []}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","run_id":123,"name":"coverage","direction":"asc","limit":7,"page":3}"#,
+            Some(r#"{"capability_id":"github.get_workflow_run_artifacts"}"#),
+        )
+        .expect("workflow artifacts should dispatch");
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/actions/runs/123/artifacts?per_page=7&name=coverage&direction=asc&page=3"
+        );
+
+        test_support::set_response(Ok(json!({"status": 201}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","run_id":123,"enable_debug_logging":true}"#,
+            Some(r#"{"capability_id":"github.rerun_failed_workflow_run_jobs"}"#),
+        )
+        .expect("rerun failed jobs should dispatch");
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/actions/runs/123/rerun-failed-jobs"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, json!({"enable_debug_logging": true}));
+
+        test_support::set_response(Ok(json!({"status": 201}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","job_id":456,"enable_debugger":true}"#,
+            Some(r#"{"capability_id":"github.rerun_workflow_job"}"#),
+        )
+        .expect("rerun workflow job should dispatch");
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/actions/jobs/456/rerun"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, json!({"enable_debugger": true}));
     }
 
     #[test]

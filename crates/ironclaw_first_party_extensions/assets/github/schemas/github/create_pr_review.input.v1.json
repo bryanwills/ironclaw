@@ -35,6 +35,68 @@
       "maxLength": 65536,
       "description": "Review body."
     },
+    "commit_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional commit SHA to anchor the review."
+    },
+    "comments": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "Repository path to comment on."
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536,
+            "description": "Inline review comment body."
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Diff position for a review comment."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "File line number for a line-based review comment."
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "LEFT",
+              "RIGHT"
+            ]
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "start_side": {
+            "type": "string",
+            "enum": [
+              "LEFT",
+              "RIGHT"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "body"
+        ]
+      },
+      "description": "Optional inline file comments to include with the review."
+    },
     "event": {
       "type": "string",
       "enum": [

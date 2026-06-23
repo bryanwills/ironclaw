@@ -1,6 +1,6 @@
 Use `github.create_issue` to create an issue.
 
-Use `labels` for issue labels and `assignees` for GitHub logins to assign on creation.
+Use `labels` for issue labels, `assignees` for GitHub logins to assign on creation, and `milestone` for a GitHub milestone number.
 
 Use the exact JSON field names from this capability schema. If the user provides a GitHub URL, extract the owner and repo fields plus the schema-specific number, path, or ref key; for pull-request tools, use `pr_number`; for issue tools, use `issue_number`.
 
