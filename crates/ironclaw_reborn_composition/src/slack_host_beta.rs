@@ -473,11 +473,15 @@ pub fn build_triggered_run_delivery_hook(
     config: &SlackHostBetaConfig,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
 ) -> Result<Arc<TriggeredRunDeliveryDriver>, SlackHostBetaBuildError> {
-    let local_runtime = runtime
-        .services()
-        .local_runtime
-        .as_ref()
-        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+    let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    build_triggered_run_delivery_hook_from_parts(&parts, config, delivery_store)
+}
+
+fn build_triggered_run_delivery_hook_from_parts(
+    parts: &SlackHostBetaRuntimeParts,
+    config: &SlackHostBetaConfig,
+    delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+) -> Result<Arc<TriggeredRunDeliveryDriver>, SlackHostBetaBuildError> {
     let token_handle = slack_bot_token_handle()?;
     let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
         .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
@@ -487,28 +491,29 @@ pub fn build_triggered_run_delivery_hook(
         egress_credential_handle: token_handle.clone(),
         auth_requirement: slack_request_signature_auth_requirement(),
     }));
-    let egress = slack_protocol_egress(runtime, config, token_handle)?;
-    let outbound_store: Arc<dyn OutboundStateStore> = Arc::clone(&local_runtime.outbound_state);
+    let egress = slack_protocol_egress_from_parts(parts, config, token_handle)?;
+    let outbound_store: Arc<dyn OutboundStateStore> =
+        Arc::clone(&parts.local_runtime.outbound_state);
     let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::clone(&local_runtime.delivered_gate_routes);
+        Arc::clone(&parts.local_runtime.delivered_gate_routes);
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
-        Arc::clone(&local_runtime.outbound_preferences);
+        Arc::clone(&parts.local_runtime.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let binding_service: Arc<dyn ConversationBindingService> =
         Arc::new(NoopConversationBindingService);
     let services = SlackFinalReplyDeliveryServices {
         binding_service,
-        thread_service: runtime.webui_thread_service(),
-        turn_coordinator: runtime.webui_turn_coordinator(),
+        thread_service: Arc::clone(&parts.thread_service),
+        turn_coordinator: Arc::clone(&parts.turn_coordinator),
         outbound_store,
         route_store: Arc::clone(&route_store),
         communication_preferences: preferences,
         adapter,
         egress,
         delivery_sink,
-        auth_challenges: runtime.auth_challenge_provider(),
-        auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
-        approval_requests: Some(Arc::clone(&local_runtime.approval_requests)
+        auth_challenges: parts.auth_challenge_provider.clone(),
+        auth_flow_canceller: parts.auth_flow_canceller.clone(),
+        approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
             as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
     };
     // Pass config.agent_id as the fallback so the ThreadScope key matches the
@@ -2646,6 +2651,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dynamic_slack_setup_pairing_registers_runtime_personal_dm_target() {
+        // Regression guard for PR #5152's WebUI Slack setup path: dynamic setup
+        // must register the same runtime outbound target provider and pairing
+        // DM provisioner that static Slack host-beta setup wires.
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts = build_slack_host_beta_runtime_mounts(
+            &runtime,
+            dynamic_runtime_config_without_legacy_actor(),
+        )
+        .await
+        .expect("dynamic mounts");
+        assert!(
+            mounts.outbound_delivery_target_provider_registered,
+            "dynamic Slack setup must register its target provider with the runtime"
+        );
+
+        let first_body =
+            dm_event_body_with("Ev-dynamic-dm-provision", "pair me", "1710000003.000001");
+        post_signed_slack_event(&mounts.events, &first_body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        let pairing_code = wait_for_pairing_code(&egress).await;
+
+        let pairing_mount =
+            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing.clone());
+        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
+        let redeem_response = pairing_mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+                    .header("content-type", "application/json")
+                    .extension(operator_caller())
+                    .body(Body::from(redeem_body))
+                    .expect("redeem request builds"),
+            )
+            .await
+            .expect("redeem route responds");
+        assert_eq!(redeem_response.status(), StatusCode::OK);
+
+        let runtime_provider = runtime
+            .outbound_delivery_target_provider()
+            .expect("dynamic Slack setup registers runtime provider");
+        let mut runtime_targets = Vec::new();
+        for _ in 0..40 {
+            runtime_targets = runtime_provider
+                .list_outbound_delivery_targets(&operator_caller())
+                .await
+                .expect("runtime target list");
+            if !runtime_targets.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            runtime_targets.len(),
+            1,
+            "dynamic pairing must provision a runtime-visible personal DM target"
+        );
+        assert_eq!(
+            runtime_targets[0].summary.target_id.as_str(),
+            "slack:personal-dm:T0HOST:user:slack-host"
+        );
+
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Hidden,
+        )
+        .expect("webui bundle");
+        let selected = bundle
+            .api
+            .set_outbound_preferences(
+                operator_caller(),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(runtime_targets[0].summary.target_id.clone()),
+                },
+            )
+            .await
+            .expect("set dynamic Slack personal DM target");
+        assert_eq!(
+            selected.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::Available
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
     async fn pairing_redeem_is_idempotent_and_does_not_duplicate_dm_target() {
         // Re-provisioning (pairing re-fires) must not create duplicate targets.
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
@@ -3342,6 +3443,26 @@ mod tests {
             bot_token: SecretString::from("xoxb-host-token"),
         })
         .expect("valid config")
+    }
+
+    fn dynamic_runtime_config_without_legacy_actor() -> SlackHostBetaRuntimeConfig {
+        SlackHostBetaRuntimeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            AgentId::new(AGENT).expect("agent"),
+            Some(ProjectId::new(PROJECT).expect("project")),
+            UserId::new(USER).expect("user"),
+        )
+        .with_legacy_setup(SlackHostBetaLegacySetup {
+            installation_id: INSTALLATION.to_string(),
+            team_id: TEAM.to_string(),
+            api_app_id: API_APP.to_string(),
+            slack_user_id: None,
+            user_id: UserId::new(USER).expect("user"),
+            shared_subject_user_id: None,
+            channel_routes: Vec::new(),
+            signing_secret: SecretString::from(SECRET),
+            bot_token: SecretString::from("xoxb-host-token"),
+        })
     }
 
     fn config_without_channel_routes() -> SlackHostBetaConfig {
@@ -4142,6 +4263,39 @@ mod tests {
 
     #[tokio::test]
     async fn build_slack_host_beta_mounts_wires_trigger_delivery_hook_writes_record() {
+        let (runtime, _tmp) = runtime_with_trigger_poller().await;
+
+        // Wire the delivery hook by calling the production mount builder.
+        let _mounts =
+            build_slack_host_beta_mounts(&runtime, config()).expect("mounts should build");
+
+        assert_due_personal_trigger_writes_delivery_record(&runtime, "hook-wiring-e2e").await;
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_runtime_mounts_wires_dynamic_trigger_delivery_hook_writes_record()
+     {
+        let (runtime, _tmp) = runtime_with_trigger_poller().await;
+
+        // Wire the delivery hook by calling the dynamic production mount builder
+        // used by WebUI-managed Slack setup.
+        let _mounts = build_slack_host_beta_runtime_mounts(
+            &runtime,
+            dynamic_runtime_config_without_legacy_actor(),
+        )
+        .await
+        .expect("dynamic mounts should build");
+
+        assert_due_personal_trigger_writes_delivery_record(&runtime, "dynamic-hook-wiring-e2e")
+            .await;
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    async fn assert_due_personal_trigger_writes_delivery_record(
+        runtime: &RebornRuntime,
+        trigger_name: &str,
+    ) {
         use std::time::Instant;
 
         use chrono::Utc;
@@ -4151,12 +4305,6 @@ mod tests {
             TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerRecord, TriggerSchedule,
             TriggerSourceKind, TriggerState,
         };
-
-        let (runtime, _tmp) = runtime_with_trigger_poller().await;
-
-        // Wire the delivery hook by calling the production mount builder.
-        let _mounts =
-            build_slack_host_beta_mounts(&runtime, config()).expect("mounts should build");
 
         // Pair the trigger actor so the trusted submitter can resolve the
         // creator's user binding (fails closed for unpaired actors by design).
@@ -4189,10 +4337,10 @@ mod tests {
             creator_user_id: user_id.clone(),
             agent_id: Some(AgentId::new(AGENT).expect("agent")),
             project_id: None,
-            name: "hook-wiring-e2e".to_string(),
+            name: trigger_name.to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("* * * * *").expect("valid cron"),
-            prompt: "hook-wiring-e2e-prompt-marker".to_string(),
+            prompt: format!("{trigger_name}-prompt-marker"),
             state: TriggerState::Scheduled,
             next_run_at: Utc::now() - chrono::Duration::seconds(120),
             last_run_at: None,
@@ -4247,8 +4395,6 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
-
-        runtime.shutdown().await.expect("runtime shutdown");
 
         assert!(
             fired_run_id.is_some(),

@@ -432,7 +432,7 @@ async fn set_trigger_state(
     state: TriggerState,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerStateInput = serde_json::from_value(input).map_err(|error| {
-        tracing::debug!(%error, "invalid trigger state input payload");
+        tracing::debug!(%error, "failed to deserialize trigger state input");
         input_error()
     })?;
     let trigger_id = TriggerId::parse(&input.trigger_id).map_err(trigger_input_error)?;
