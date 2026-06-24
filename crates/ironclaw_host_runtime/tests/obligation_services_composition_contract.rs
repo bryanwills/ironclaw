@@ -248,7 +248,6 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
                         prefix: Some("Bearer ".to_string()),
                     },
                     required: true,
-                    credential_account: None,
                 }],
                 response_body_limit: None,
                 save_body_to: None,

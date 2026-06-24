@@ -327,6 +327,7 @@ where
 fn attach_runtime_credential_unauthorized_recovery<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
     credential_accounts: Arc<dyn ironclaw_auth::CredentialAccountService>,
+    reauth_bridge: Arc<crate::runtime_credential_reauth::RuntimeCredentialReauthBridge>,
 ) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
@@ -346,6 +347,7 @@ where
         crate::runtime_credential_unauthorized::RuntimeCredentialUnauthorizedRecoveryEgress::new(
             runtime_http_egress,
             credential_accounts,
+            reauth_bridge,
         ),
     )))
 }
@@ -1223,9 +1225,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
         }
     };
+    let reauth_bridge =
+        Arc::new(crate::runtime_credential_reauth::RuntimeCredentialReauthBridge::default());
     services = attach_runtime_credential_unauthorized_recovery(
         services,
         product_auth.credential_account_service(),
+        Arc::clone(&reauth_bridge),
     )?;
     services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
@@ -1342,6 +1347,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
+    let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> = Arc::new(
+        crate::runtime_credential_reauth::RuntimeCredentialReauthHostRuntime::new(
+            host_runtime,
+            reauth_bridge,
+        ),
+    );
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
@@ -3820,9 +3831,12 @@ where
         None => CredentialRefreshWorkerReady::Absent,
     };
     let product_auth_ready = true;
+    let reauth_bridge =
+        Arc::new(crate::runtime_credential_reauth::RuntimeCredentialReauthBridge::default());
     let services = attach_runtime_credential_unauthorized_recovery(
         services,
         product_auth_services.credential_account_service(),
+        Arc::clone(&reauth_bridge),
     )?;
     // Wire ProductAuthAccount runtime credential resolver before
     // host_runtime_for_production so WASM extensions whose manifest declares a
@@ -3850,6 +3864,12 @@ where
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
+    let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> = Arc::new(
+        crate::runtime_credential_reauth::RuntimeCredentialReauthHostRuntime::new(
+            host_runtime,
+            reauth_bridge,
+        ),
+    );
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),

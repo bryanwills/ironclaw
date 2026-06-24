@@ -6448,7 +6448,6 @@ impl WasmRuntimeCredentialProvider for SecretStoreLeaseCredentials {
                 prefix: Some("Bearer ".to_string()),
             },
             required: true,
-            credential_account: None,
         }])
     }
 }

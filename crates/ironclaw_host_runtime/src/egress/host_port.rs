@@ -297,8 +297,9 @@ mod tests {
         CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationRequest,
     };
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialUnauthorizedPolicy,
+        ExtensionId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
+        NetworkTargetPattern, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+        RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorizedPolicy,
         RuntimeHttpEgressResponse, UserId,
     };
 
@@ -488,6 +489,7 @@ mod tests {
                 account_id: account_id.clone(),
                 account_updated_at: Some(chrono::Utc::now()),
                 requester_extension: None,
+                auth_requirement: Some(auth_requirement("github")),
                 unauthorized_policy: RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
             }),
         });
@@ -526,6 +528,7 @@ mod tests {
                     account_id: account_id.to_string(),
                     account_updated_at: Some(chrono::Utc::now()),
                     requester_extension: None,
+                    auth_requirement: Some(auth_requirement("github")),
                     unauthorized_policy: RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
                 }),
             });
@@ -539,6 +542,65 @@ mod tests {
         assert!(
             response.credential_unauthorized.is_none(),
             "a 401 with multiple credential accounts must not guess which account was rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_runtime_http_egress_skips_credential_unauthorized_marker_when_recovery_metadata_differs()
+     {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::responding(401));
+        let port = host_port(egress, Arc::new(AllowObligations), secret_store());
+        let mut request = host_request();
+        let scope = request.request.scope.clone();
+        let account_id = "product-auth-account-123".to_string();
+        let account_updated_at = chrono::Utc::now();
+        for (header, requester_extension, unauthorized_policy) in [
+            (
+                "x-token-primary",
+                "github",
+                RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
+            ),
+            (
+                "x-token-secondary",
+                "github-alt",
+                RuntimeCredentialUnauthorizedPolicy::RefreshAccount,
+            ),
+        ] {
+            request.credentials.push(HostRuntimeCredentialMaterial {
+                handle: SecretHandle::new(header).expect("secret handle"),
+                material: SecretMaterial::from("host-held-token"),
+                target: RuntimeCredentialTarget::Header {
+                    name: header.to_string(),
+                    prefix: None,
+                },
+                required: true,
+                credential_account: Some(RuntimeCredentialAccountIdentity {
+                    scope: scope.clone(),
+                    account_provider: RuntimeCredentialAccountProviderId::new("github")
+                        .expect("provider"),
+                    account_id: account_id.clone(),
+                    account_updated_at: Some(account_updated_at),
+                    requester_extension: Some(
+                        ExtensionId::new(requester_extension).expect("extension id"),
+                    ),
+                    auth_requirement: Some(RuntimeCredentialAuthRequirement {
+                        requester_extension: ExtensionId::new(requester_extension)
+                            .expect("extension id"),
+                        ..auth_requirement("github")
+                    }),
+                    unauthorized_policy,
+                }),
+            });
+        }
+
+        let response = port
+            .execute(request)
+            .await
+            .expect("401 response should still succeed");
+
+        assert!(
+            response.credential_unauthorized.is_none(),
+            "a 401 with conflicting recovery metadata must not guess which recovery flow to run"
         );
     }
 
@@ -562,6 +624,7 @@ mod tests {
                 account_id: "product-auth-account-123".to_string(),
                 account_updated_at: Some(chrono::Utc::now()),
                 requester_extension: None,
+                auth_requirement: Some(auth_requirement("github")),
                 unauthorized_policy: RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
             }),
         });
@@ -597,6 +660,7 @@ mod tests {
                 account_id: "oauth-account-123".to_string(),
                 account_updated_at: Some(chrono::Utc::now()),
                 requester_extension: None,
+                auth_requirement: Some(auth_requirement("google")),
                 unauthorized_policy: RuntimeCredentialUnauthorizedPolicy::RefreshAccount,
             }),
         });
@@ -674,6 +738,15 @@ mod tests {
             }],
             deny_private_ip_ranges: true,
             max_egress_bytes: Some(1024),
+        }
+    }
+
+    fn auth_requirement(provider: &str) -> RuntimeCredentialAuthRequirement {
+        RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new(provider).expect("provider"),
+            setup: RuntimeCredentialAccountSetup::ManualToken,
+            requester_extension: ExtensionId::new("test_extension").expect("extension id"),
+            provider_scopes: Vec::new(),
         }
     }
 }

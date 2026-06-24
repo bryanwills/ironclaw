@@ -1147,16 +1147,20 @@ fn runtime_http_egress_response_round_trips_optional_credential_unauthorized() {
         request_bytes: 32,
         response_bytes: 12,
         redaction_applied: true,
-        credential_unauthorized: Some(
-            RuntimeCredentialUnauthorized::new(
-                scope.clone(),
-                RuntimeCredentialAccountProviderId::new("github").unwrap(),
-                "account-123",
-                Some(updated_at),
-                RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
-            )
-            .with_requester_extension(Some(ExtensionId::new("github").unwrap())),
-        ),
+        credential_unauthorized: Some(RuntimeCredentialUnauthorized {
+            scope: scope.clone(),
+            account_provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            account_id: "account-123".to_string(),
+            account_updated_at: updated_at,
+            requester_extension: Some(ExtensionId::new("github").unwrap()),
+            auth_requirement: RuntimeCredentialAuthRequirement {
+                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: RuntimeCredentialAccountSetup::ManualToken,
+                requester_extension: ExtensionId::new("github").unwrap(),
+                provider_scopes: Vec::new(),
+            },
+            unauthorized_policy: RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
+        }),
     })
     .unwrap();
 
@@ -1170,7 +1174,11 @@ fn runtime_http_egress_response_round_trips_optional_credential_unauthorized() {
         RuntimeCredentialAccountProviderId::new("github").unwrap()
     );
     assert_eq!(rejected.account_id, "account-123");
-    assert_eq!(rejected.account_updated_at, Some(updated_at));
+    assert_eq!(rejected.account_updated_at, updated_at);
+    assert_eq!(
+        rejected.auth_requirement.provider,
+        RuntimeCredentialAccountProviderId::new("github").unwrap()
+    );
     assert_eq!(
         rejected.requester_extension,
         Some(ExtensionId::new("github").unwrap())

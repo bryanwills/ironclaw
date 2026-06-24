@@ -577,6 +577,7 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         scope: &crate::AuthProductScope,
         account_id: CredentialAccountId,
         expected_updated_at: Timestamp,
+        requester_extension: Option<ExtensionId>,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
         let now = Utc::now();
         let mut state = self.lock_state();
@@ -584,6 +585,9 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             return Ok(None);
         };
         if !scope_matches(scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !account_is_authorized_for_requester(account, requester_extension.as_ref()) {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.updated_at != expected_updated_at {

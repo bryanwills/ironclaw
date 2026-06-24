@@ -8681,6 +8681,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             request_bytes: request.body.len() as u64,
             response_bytes: self.response_bytes_override.unwrap_or(body.len() as u64),
             redaction_applied: self.redaction_applied,
+            credential_unauthorized: None,
         })
     }
 }

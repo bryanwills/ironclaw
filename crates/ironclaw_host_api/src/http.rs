@@ -12,7 +12,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
     CapabilityId, ExtensionId, HostApiError, MountGrant, NetworkMethod, NetworkPolicy,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeKind, ScopedPath, SecretHandle,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+    RuntimeKind, ScopedPath, SecretHandle,
 };
 
 /// Runtime HTTP request accepted by the host-owned egress service.
@@ -120,6 +121,8 @@ pub struct RuntimeCredentialAccountIdentity {
     pub account_updated_at: Option<crate::Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester_extension: Option<ExtensionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_requirement: Option<RuntimeCredentialAuthRequirement>,
     #[serde(default)]
     pub unauthorized_policy: RuntimeCredentialUnauthorizedPolicy,
 }
@@ -138,6 +141,7 @@ impl RuntimeCredentialAccountIdentity {
             account_id: account_id.into(),
             account_updated_at,
             requester_extension: None,
+            auth_requirement: None,
             unauthorized_policy,
         }
     }
@@ -147,12 +151,24 @@ impl RuntimeCredentialAccountIdentity {
         self
     }
 
+    pub fn with_auth_requirement(
+        mut self,
+        auth_requirement: RuntimeCredentialAuthRequirement,
+    ) -> Self {
+        self.auth_requirement = Some(auth_requirement);
+        self
+    }
+
     pub fn marker_on_unauthorized(&self) -> Option<RuntimeCredentialUnauthorized> {
-        if self.account_updated_at.is_some() {
-            Some(self.clone())
-        } else {
-            None
-        }
+        Some(RuntimeCredentialUnauthorized {
+            scope: self.scope.clone(),
+            account_provider: self.account_provider.clone(),
+            account_id: self.account_id.clone(),
+            account_updated_at: self.account_updated_at?,
+            requester_extension: self.requester_extension.clone(),
+            auth_requirement: self.auth_requirement.clone()?,
+            unauthorized_policy: self.unauthorized_policy,
+        })
     }
 }
 
@@ -334,7 +350,37 @@ pub struct RuntimeHttpSavedBody {
 
 /// Typed signal that a response came back unauthorized for an injected
 /// product-auth credential.
-pub type RuntimeCredentialUnauthorized = RuntimeCredentialAccountIdentity;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialUnauthorized {
+    pub scope: ResourceScope,
+    pub account_provider: RuntimeCredentialAccountProviderId,
+    pub account_id: String,
+    pub account_updated_at: crate::Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_extension: Option<ExtensionId>,
+    pub auth_requirement: RuntimeCredentialAuthRequirement,
+    #[serde(default)]
+    pub unauthorized_policy: RuntimeCredentialUnauthorizedPolicy,
+}
+
+impl RuntimeCredentialUnauthorized {
+    pub fn account_key(&self) -> RuntimeCredentialUnauthorizedAccountKey {
+        RuntimeCredentialUnauthorizedAccountKey {
+            scope: self.scope.clone(),
+            account_provider: self.account_provider.clone(),
+            account_id: self.account_id.clone(),
+            account_updated_at: self.account_updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialUnauthorizedAccountKey {
+    pub scope: ResourceScope,
+    pub account_provider: RuntimeCredentialAccountProviderId,
+    pub account_id: String,
+    pub account_updated_at: crate::Timestamp,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RuntimeHttpEgressError {

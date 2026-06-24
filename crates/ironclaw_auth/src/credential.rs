@@ -512,14 +512,13 @@ pub trait CredentialAccountService: Send + Sync {
         scope: &AuthProductScope,
         account_id: CredentialAccountId,
         expected_updated_at: Timestamp,
+        requester_extension: Option<ExtensionId>,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
-        let Some(account) = self
-            .get_account(CredentialAccountLookupRequest::new(
-                scope.clone(),
-                account_id,
-            ))
-            .await?
-        else {
+        let mut lookup = CredentialAccountLookupRequest::new(scope.clone(), account_id);
+        if let Some(requester_extension) = requester_extension {
+            lookup = lookup.for_extension(requester_extension);
+        }
+        let Some(account) = self.get_account(lookup).await? else {
             return Ok(None);
         };
         if account.updated_at != expected_updated_at {
@@ -1031,9 +1030,10 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
         scope: &AuthProductScope,
         account_id: CredentialAccountId,
         expected_updated_at: Timestamp,
+        requester_extension: Option<ExtensionId>,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
         self.accounts
-            .revoke_if_unchanged(scope, account_id, expected_updated_at)
+            .revoke_if_unchanged(scope, account_id, expected_updated_at, requester_extension)
             .await
     }
 

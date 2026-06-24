@@ -17,6 +17,7 @@ use ironclaw_auth::{
     CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSetupService, NewCredentialAccount, Timestamp,
 };
+use ironclaw_host_api::ExtensionId;
 
 #[async_trait]
 impl<F> CredentialAccountService for FilesystemAuthProductServices<F>
@@ -113,6 +114,7 @@ where
         scope: &ironclaw_auth::AuthProductScope,
         account_id: CredentialAccountId,
         expected_updated_at: Timestamp,
+        requester_extension: Option<ExtensionId>,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
         let lock = self.lock_for(format!("account:{account_id}"));
         let _guard = lock.lock().await;
@@ -120,6 +122,9 @@ where
             return Ok(None);
         };
         if !scope_matches(scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !account_is_authorized_for_requester(&account, requester_extension.as_ref()) {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.updated_at != expected_updated_at {

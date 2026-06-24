@@ -497,11 +497,13 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             .await
             .map_err(map_account_error)?;
         let unauthorized_policy = unauthorized_policy_for_account(&setup, &account);
-        let recovery_requester_extension = match unauthorized_policy {
-            RuntimeCredentialUnauthorizedPolicy::RefreshAccount => {
-                refresh_requester_for_account(&account, requester_extension.as_ref())
-            }
-            RuntimeCredentialUnauthorizedPolicy::RevokeAccount => None,
+        let recovery_requester_extension =
+            refresh_requester_for_account(&account, requester_extension.as_ref());
+        let auth_requirement = RuntimeCredentialAuthRequirement {
+            provider: request.provider.clone(),
+            setup: request.setup.clone(),
+            requester_extension: request.requester_extension.clone(),
+            provider_scopes: request.provider_scopes.to_vec(),
         };
         if account.status != CredentialAccountStatus::Configured {
             return Err(CredentialStageError::AuthRequired);
@@ -525,6 +527,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
                 account_id: account.id.to_string(),
                 account_updated_at: Some(account.updated_at),
                 requester_extension: recovery_requester_extension,
+                auth_requirement: Some(auth_requirement),
                 unauthorized_policy,
             }),
         })

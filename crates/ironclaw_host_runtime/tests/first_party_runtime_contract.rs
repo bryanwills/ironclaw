@@ -755,7 +755,6 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
                         prefix: Some("Bearer ".to_string()),
                     },
                     required: true,
-                    credential_account: None,
                 }],
                 response_body_limit: Some(4096),
                 save_body_to: None,
