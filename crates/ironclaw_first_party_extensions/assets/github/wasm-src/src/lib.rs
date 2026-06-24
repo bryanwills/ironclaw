@@ -617,6 +617,37 @@ mod tests {
     }
 
     #[test]
+    fn update_issue_allows_clearing_body_and_rejects_oversized_body_before_egress() {
+        test_support::set_response(Ok(json!({}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","issue_number":42,"body":null}"#,
+            Some(r#"{"capability_id":"github.update_issue"}"#),
+        )
+        .expect("update issue should allow clearing body");
+        let requests = test_support::requests();
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, json!({"body": null}));
+
+        test_support::set_response(Ok(json!({}).to_string()));
+        let oversized_body = "a".repeat(65537);
+        let input = format!(
+            r#"{{"owner":"nearai","repo":"ironclaw","issue_number":42,"body":"{}"}}"#,
+            oversized_body
+        );
+        let error = execute_inner(&input, Some(r#"{"capability_id":"github.update_issue"}"#))
+            .expect_err("oversized body should be rejected");
+        assert_eq!(
+            error,
+            "Input 'body' exceeds maximum length of 65536 characters"
+        );
+        assert!(
+            test_support::requests().is_empty(),
+            "oversized body should fail before egress"
+        );
+    }
+
+    #[test]
     fn pull_request_workflow_tools_use_native_endpoints() {
         test_support::set_response(Ok(json!({"number": 12}).to_string()));
         execute_inner(

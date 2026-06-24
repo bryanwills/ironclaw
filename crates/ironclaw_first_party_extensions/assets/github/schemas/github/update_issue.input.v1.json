@@ -31,7 +31,7 @@
       "maxLength": 65536
     },
     "body": {
-      "type": "string",
+      "type": ["string", "null"],
       "maxLength": 65536
     },
     "state": {

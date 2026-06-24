@@ -78,7 +78,7 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             &repo,
             issue_number,
             title.as_deref(),
-            body.as_deref(),
+            body.as_ref().map(|body| body.as_deref()),
             state,
             milestone,
             labels,

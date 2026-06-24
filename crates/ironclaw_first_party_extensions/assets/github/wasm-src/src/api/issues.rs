@@ -118,7 +118,7 @@ pub(crate) fn update_issue(
     repo: &str,
     issue_number: u32,
     title: Option<&str>,
-    body: Option<&str>,
+    body: Option<Option<&str>>,
     state: Option<IssueState>,
     milestone: Option<Option<u32>>,
     labels: Option<Vec<String>>,
@@ -130,7 +130,7 @@ pub(crate) fn update_issue(
     if let Some(title) = title {
         validate_input_length(title, "title")?;
     }
-    if let Some(body) = body {
+    if let Some(Some(body)) = body {
         validate_input_length(body, "body")?;
     }
     validate_name_list(labels.as_deref(), "labels")?;

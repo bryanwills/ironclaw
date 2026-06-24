@@ -9,6 +9,15 @@ where
     Option::<u32>::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_nullable_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct GitCommitIdentity {
     pub(crate) name: String,
@@ -57,7 +66,8 @@ pub(crate) enum GitHubAction {
         repo: String,
         issue_number: u32,
         title: Option<String>,
-        body: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_nullable_string")]
+        body: Option<Option<String>>,
         state: Option<IssueState>,
         #[serde(default, deserialize_with = "deserialize_nullable_u32")]
         milestone: Option<Option<u32>>,
