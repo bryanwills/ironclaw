@@ -541,7 +541,8 @@ mod learning {
                 .read_content_for_scope(scope.clone(), name)
                 .await
                 .map_err(|error| error.to_string())?;
-            let Some(provenance) = provenance.filter(|prov| prov.matches_live_content(&live.content))
+            let Some(provenance) =
+                provenance.filter(|prov| prov.matches_live_content(&live.content))
             else {
                 let proposed = self.stash_proposal(scope, name, content).await;
                 tracing::debug!(

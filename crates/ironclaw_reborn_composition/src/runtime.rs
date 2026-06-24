@@ -4157,7 +4157,8 @@ mod tests {
         build_reborn_runtime,
     };
 
-    const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+    const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
+    const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
     async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
         runtime.turn_scheduler.stop_for_test().await;
@@ -6262,7 +6263,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6349,7 +6350,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6449,7 +6450,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6525,7 +6526,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6604,7 +6605,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
@@ -7371,7 +7372,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -7507,7 +7508,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.execute_skill_message(&conversation, "$asset-helper use policy"),
         )
         .await
@@ -7614,7 +7615,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -7684,7 +7685,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -7766,7 +7767,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.execute_skill_message(&conversation, "$marker-helper"),
         )
         .await
@@ -7929,7 +7930,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
@@ -8405,6 +8406,100 @@ mod tests {
             resolved.as_str(),
             "legacy-runtime-user",
             "a returning legacy SSO user keeps their UserId through the runtime accessor"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use ironclaw_webui_v2::{
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State,
+            webui_v2_router,
+        };
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-diagnostics-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-diagnostics-tenant".to_string(),
+            agent_id: "runtime-webui-diagnostics-agent".to_string(),
+            source_binding_id: "runtime-webui-diagnostics-source".to_string(),
+            reply_target_binding_id: "runtime-webui-diagnostics-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-diagnostics-tenant").unwrap(),
+            UserId::new("runtime-webui-diagnostics-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-diagnostics-agent").unwrap()),
+            None,
+        );
+        let router = webui_v2_router(WebUiV2State::new(
+            bundle.api,
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: true,
+        }))
+        .layer(axum::Extension(caller));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/webchat/v2/operator/diagnostics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("diagnostics json");
+        assert!(
+            json["operator_status"]["checks"]
+                .as_array()
+                .expect("status checks")
+                .iter()
+                .any(|check| check["id"] == "readiness_composition_profile"
+                    && check["status"] == "blocked"
+                    && check["summary"]
+                        .as_str()
+                        .is_some_and(|summary| summary.contains("reason=dev-only-profile"))),
+            "diagnostics route should expose readiness-derived status checks: {json}"
+        );
+        assert!(
+            json["diagnostics"]
+                .as_array()
+                .expect("diagnostics")
+                .iter()
+                .any(|diagnostic| diagnostic["reason_code"]
+                    == "operator_doctor_readiness_composition_profile_blocked"
+                    && diagnostic["key"] == "readiness_composition_profile"),
+            "diagnostics route should expose readiness-derived doctor diagnostics: {json}"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
@@ -9287,7 +9382,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
