@@ -501,6 +501,16 @@ impl RebornServices {
             capability_leases,
         })
     }
+
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_auto_approve_settings_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+            local_runtime.auto_approve_settings.clone();
+        Some(auto_approve_settings)
+    }
 }
 
 #[cfg(feature = "test-support")]
