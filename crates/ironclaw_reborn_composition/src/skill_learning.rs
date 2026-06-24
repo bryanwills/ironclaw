@@ -523,21 +523,43 @@ mod learning {
             name: &str,
             content: &str,
         ) -> Result<SkillWriteOutcome, String> {
-            // Fail closed: a provenance read failure must NOT collapse to
-            // "not held -> evolve + activate" and bypass the review hold.
-            // Propagate the error so the caller treats it as a failed write
-            // (no overwrite) rather than approving on a boundary-read failure.
-            let held = self
+            // Re-validate the overwrite authority HERE, right before the write.
+            // `is_auto_overwritable` was checked in `install_or_update` BEFORE the
+            // refiner's (slow) LLM merge, so a human could have edited the skill
+            // during that window (TOCTOU). Read provenance + live content once and
+            // require the live skill still match the machine baseline; a missing
+            // sidecar or a mismatch means a human now owns it — stash the
+            // candidate as a proposal instead of clobbering the edit. Read
+            // failures propagate (fail closed, no overwrite).
+            let provenance = self
                 .port
                 .read_provenance_for_scope(scope.clone(), name)
                 .await
-                .map_err(|error| error.to_string())?
-                .is_some_and(|provenance| provenance.pending_review);
-            if held {
+                .map_err(|error| error.to_string())?;
+            let live = self
+                .port
+                .read_content_for_scope(scope.clone(), name)
+                .await
+                .map_err(|error| error.to_string())?;
+            let Some(provenance) = provenance.filter(|prov| prov.matches_live_content(&live.content))
+            else {
+                let proposed = self.stash_proposal(scope, name, content).await;
+                tracing::debug!(
+                    skill = %name,
+                    proposed,
+                    "skill-learning: live skill diverged during refine; not overwriting"
+                );
+                return Ok(if proposed {
+                    SkillWriteOutcome::Proposed(name.to_string())
+                } else {
+                    SkillWriteOutcome::Skipped
+                });
+            };
+            if provenance.pending_review {
                 // Re-learning a held skill before the user has reviewed it must
                 // keep the hold: stage inactive, stay pending, emit no
-                // "auto-applies" notice. (Holds true even if `require_review` was
-                // since switched off — an already-held skill is still unreviewed.)
+                // "auto-applies" notice. (Holds even if `require_review` was since
+                // switched off — an already-held skill is still unreviewed.)
                 let staged = mark_learned(&set_skill_auto_activate(content, false));
                 self.port
                     .update_for_scope(scope.clone(), name, &staged)
@@ -546,22 +568,13 @@ mod learning {
                 self.record_baseline(scope, name, &staged, true).await;
                 Ok(SkillWriteOutcome::Pending(name.to_string()))
             } else {
-                // Preserve the live skill's activation state across evolution: an
+                // Preserve the live skill's activation across evolution: an
                 // evolution improves CONTENT, it must NOT silently flip a skill the
-                // user turned off back on (the refined/consolidated doc defaults
-                // auto_activate to true). A read failure fails closed (propagate,
-                // do not evolve); a parse failure on the live content defaults the
-                // evolved skill to OFF rather than silently activating it.
-                let keep_active = parse_skill_md(
-                    &self
-                        .port
-                        .read_content_for_scope(scope.clone(), name)
-                        .await
-                        .map_err(|error| error.to_string())?
-                        .content,
-                )
-                .map(|parsed| parsed.manifest.auto_activate)
-                .unwrap_or(false);
+                // user turned off back on. A parse failure on the (baseline-
+                // matching) live content defaults to OFF rather than activating.
+                let keep_active = parse_skill_md(&live.content)
+                    .map(|parsed| parsed.manifest.auto_activate)
+                    .unwrap_or(false);
                 let evolved = mark_learned(&set_skill_auto_activate(content, keep_active));
                 self.port
                     .update_for_scope(scope.clone(), name, &evolved)
