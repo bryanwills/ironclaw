@@ -175,6 +175,42 @@ test("Chat leaves the composer editable while a run is processing", () => {
   assert.equal(props.sendDisabled, true);
 });
 
+test("Chat blocks sends while a run is processing", async () => {
+  let sendCount = 0;
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => {
+        sendCount += 1;
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  assert.equal(await props.onSend("draft while running"), null);
+  assert.equal(sendCount, 0);
+});
+
 test("Chat cancel button ignores active runs from another thread", () => {
   const { tree, components } = renderChat({
     hookState: {
@@ -204,7 +240,7 @@ test("Chat cancel button ignores active runs from another thread", () => {
   assert.equal(props.canCancel, false);
 });
 
-test("Chat keeps composer cancel disabled while a gate owns the run decision", () => {
+test("Chat keeps composer send blocked while a gate owns the run decision", async () => {
   const pendingGate = {
     kind: "gate",
     requestId: "request-1",
@@ -212,6 +248,7 @@ test("Chat keeps composer cancel disabled while a gate owns the run decision", (
     description: "",
     parameters: "",
   };
+  let sendCount = 0;
   const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
@@ -224,7 +261,10 @@ test("Chat keeps composer cancel disabled while a gate owns the run decision", (
       cooldownSeconds: 0,
       recoveryNotice: null,
       activeRun: { runId: "run-1", threadId: "thread-1", status: "blocked" },
-      send: async () => ({}),
+      send: async () => {
+        sendCount += 1;
+        return {};
+      },
       cancelRun: async () => {},
       retryMessage: () => {},
       approve: () => {},
@@ -238,6 +278,16 @@ test("Chat keeps composer cancel disabled while a gate owns the run decision", (
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.canCancel, false);
+  assert.equal(props.sendDisabled, true);
+  assert.equal(
+    props.statusText,
+    "Resolve the approval request before sending another message.",
+  );
+  await assert.rejects(
+    props.onSend("draft while approval is open"),
+    /Resolve the approval request before sending another message/,
+  );
+  assert.equal(sendCount, 0);
 });
 
 test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {
