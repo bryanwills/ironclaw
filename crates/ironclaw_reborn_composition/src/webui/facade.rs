@@ -1164,7 +1164,7 @@ mod tests {
         ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
         InMemoryExtensionInstallationStore, ManifestSource,
     };
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::{
         ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions,
         MountView, TenantId, UserId, VirtualPath,
@@ -1302,7 +1302,7 @@ mod tests {
             .expect("trust policy"),
         );
         let port = Arc::new(RebornLocalExtensionManagementPort::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             AvailableExtensionCatalog::from_packages(Vec::new()),
             installation_store,
             Arc::new(Mutex::new(ExtensionLifecycleService::new(
@@ -1605,7 +1605,7 @@ mod tests {
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(&storage_root).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -1672,7 +1672,7 @@ mod tests {
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(&storage_root).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -1718,7 +1718,7 @@ mod tests {
         )
         .expect("system skill");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -1989,7 +1989,7 @@ output_schema_ref = "schemas/{capability_name}.output.json"
     }
 
     fn local_skills_facade(storage_root: &Path) -> LocalSkillsProductFacade {
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),

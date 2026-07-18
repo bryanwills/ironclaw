@@ -2553,7 +2553,7 @@ mod tests {
         SharedExtensionRegistry,
     };
     use ironclaw_filesystem::{
-        DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem,
+        DirEntry, DiskFilesystem, FileStat, FilesystemError, FilesystemOperation,
     };
     use ironclaw_host_api::{
         AgentId, CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog,
@@ -5012,7 +5012,7 @@ output_schema_ref = "schemas/run.output.json"
         );
         let installation_store_trait: Arc<dyn ExtensionInstallationStore> =
             installation_store.clone();
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
 
         restore_extension_lifecycle_state(
             &AvailableExtensionCatalog::from_packages(Vec::new()),
@@ -5311,7 +5311,7 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&restored_trust_policy),
         );
         let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
 
         let error = restore_extension_lifecycle_state(
             &catalog,
@@ -6014,7 +6014,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/system/extensions").expect("valid virtual path"),
@@ -7177,7 +7177,7 @@ output_schema_ref = "schemas/run.output.json"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7291,7 +7291,7 @@ output_schema_ref = "schemas/run.output.json"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7381,7 +7381,7 @@ output_schema_ref = "schemas/run.output.json"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7512,7 +7512,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7556,7 +7556,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
