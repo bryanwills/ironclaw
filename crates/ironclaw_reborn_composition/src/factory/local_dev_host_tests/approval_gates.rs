@@ -23,7 +23,7 @@ use ironclaw_host_runtime::{
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
 
 use super::*;
-use crate::local_dev_capability_policy::local_dev_one_shot_lease_approval;
+use crate::builtin_capability_policy::builtin_one_shot_lease_approval;
 
 use crate::approval_test_support::disable_global_auto_approve;
 
@@ -911,7 +911,7 @@ fn shell_network_policy() -> NetworkPolicy {
 }
 
 async fn approve_shell_dispatch(
-    local_runtime: &RebornLocalRuntimeServices,
+    local_runtime: &RebornRuntimeSubstrate,
     context: &ExecutionContext,
     gate: &RuntimeApprovalGate,
 ) {
@@ -929,7 +929,7 @@ async fn approve_shell_dispatch(
 }
 
 async fn pending_approval_count(
-    local_runtime: &RebornLocalRuntimeServices,
+    local_runtime: &RebornRuntimeSubstrate,
     context: &ExecutionContext,
 ) -> usize {
     local_runtime
@@ -955,7 +955,7 @@ fn operator_tool_permission_scope_for_test(scope: &ResourceScope) -> ResourceSco
 }
 
 fn shell_lease_approval() -> LeaseApproval {
-    local_dev_one_shot_lease_approval(GrantConstraints {
+    builtin_one_shot_lease_approval(GrantConstraints {
         allowed_effects: shell_allowed_effects(),
         mounts: MountView::default(),
         network: shell_network_policy(),
@@ -967,7 +967,7 @@ fn shell_lease_approval() -> LeaseApproval {
 }
 
 fn echo_dispatch_lease_approval() -> LeaseApproval {
-    local_dev_one_shot_lease_approval(GrantConstraints {
+    builtin_one_shot_lease_approval(GrantConstraints {
         allowed_effects: echo_dispatch_allowed_effects(),
         mounts: MountView::default(),
         network: NetworkPolicy::default(),
