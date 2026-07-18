@@ -78,10 +78,16 @@ pub use extension_host::gsuite::{
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 #[cfg(feature = "migration-support")]
 pub use factory::extension_installation_store_for_migration;
+#[cfg(feature = "libsql")]
+pub use factory::open_local_dev_secret_store;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
@@ -120,8 +126,8 @@ pub use ironclaw_turns::TurnStatus;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_catalog::{
     ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
-    resolve_llm_selection_against_catalog, resolve_reborn_runtime_llm,
-    validate_reborn_provider_catalog_contents,
+    resolve_llm_selection_against_catalog, resolve_llm_selection_allow_missing_key,
+    resolve_reborn_runtime_llm, validate_reborn_provider_catalog_contents,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
@@ -141,6 +147,7 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
+    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
     RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
     RebornProviderWriteOutcome, RebornV1State,
