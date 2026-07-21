@@ -273,6 +273,7 @@ SEL_V2 = {
     "workspace_directory_entry_for": (
         "[data-testid='workspace-directory-entry'][data-entry-path='{path}']"
     ),
+    "workspace_tree_entry": "[data-testid='workspace-tree-entry']",
     "thread_delete_for": (
         '[data-testid="thread-delete"][data-thread-id="{id}"]'
     ),
