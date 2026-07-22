@@ -11,8 +11,8 @@ use ironclaw_host_api::{
     CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
     GrantConstraints, HostPath, InvocationId, MissionId, MountView, NetworkMethod, NetworkPolicy,
     NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
-    ResourceEstimate, ResourceScope, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
-    VendorId, VirtualPath,
+    ResourceEstimate, ResourceScope, RunId, RuntimeKind, SecretHandle, TenantId, TrustClass,
+    UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
@@ -2312,7 +2312,7 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
-        run_id: None,
+        run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),

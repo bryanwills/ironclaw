@@ -906,7 +906,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 
 fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
-        run_id: None,
+        run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
@@ -935,7 +935,7 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
-        run_id: None,
+        run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
@@ -997,6 +997,7 @@ fn process_start(
         mounts: MountView::default(),
         estimated_resources: ResourceEstimate::default(),
         resource_reservation_id: None,
+        authorized_continuation: None,
         input: json!({"message": "running"}),
     }
 }

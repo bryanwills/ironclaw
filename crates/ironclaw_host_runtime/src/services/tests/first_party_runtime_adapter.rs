@@ -506,6 +506,13 @@ impl ResourceGovernor for ReconcileFailingGovernor {
         Err(ironclaw_resources::ResourceError::UnknownReservation { id: reservation_id })
     }
 
+    fn validate_reservation(
+        &self,
+        reservation: &ironclaw_host_api::ResourceReservation,
+    ) -> Result<(), ironclaw_resources::ResourceError> {
+        self.inner.validate_reservation(reservation)
+    }
+
     fn release(
         &self,
         reservation_id: ironclaw_host_api::ResourceReservationId,

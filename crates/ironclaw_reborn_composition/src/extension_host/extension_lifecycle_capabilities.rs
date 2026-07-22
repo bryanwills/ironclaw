@@ -1603,6 +1603,7 @@ mod tests {
         )
         .expect("valid execution context");
         context.authenticated_actor_user_id = Some(user_id);
+        context.run_id = Some(ironclaw_host_api::RunId::new());
         context
     }
 

@@ -1934,6 +1934,10 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         self.inner.reconcile(reservation_id, actual)
     }
 
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        self.inner.validate_reservation(reservation)
+    }
+
     fn release(
         &self,
         reservation_id: ResourceReservationId,

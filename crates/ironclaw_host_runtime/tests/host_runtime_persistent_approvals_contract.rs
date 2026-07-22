@@ -829,6 +829,7 @@ impl ProcessManager for RecordingProcessManager {
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
             resource_reservation_id: start.resource_reservation_id,
+            authorized_continuation: start.authorized_continuation,
             error_kind: None,
         })
     }
@@ -920,7 +921,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -928,7 +929,9 @@ fn execution_context_without_grants() -> ExecutionContext {
         CapabilitySet::default(),
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn scoped_approval_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
