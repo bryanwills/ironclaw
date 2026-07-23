@@ -9553,6 +9553,7 @@ async fn setup_extension_rejects_blank_required_manual_secret() {
         caller(),
         "github",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9581,6 +9582,7 @@ async fn setup_extension_rejects_unknown_secret_name() {
         caller(),
         "github",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9609,6 +9611,7 @@ async fn setup_extension_rejects_oauth_secret_via_manual_submit() {
         caller(),
         "google",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9724,6 +9727,7 @@ async fn setup_extension_projects_and_routes_channel_config_values() {
         caller(),
         "github",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9779,6 +9783,7 @@ async fn setup_extension_rejects_unknown_channel_config_field() {
         caller(),
         "github",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "fields": {
@@ -11896,6 +11901,7 @@ async fn upsert_llm_provider_allows_loopback_base_url_for_self_hosted() {
             CapabilityId::new(LLM_PROVIDER_UPSERT_CAPABILITY_ID).expect("capability id"),
             ProductCapabilityInput::llm_provider_upsert(UpsertLlmProviderRequest {
                 id: "ollama".to_string(),
+                client_action_id: None,
                 name: None,
                 adapter: "ollama".to_string(),
                 base_url: Some("http://127.0.0.1:11434/v1".to_string()),
