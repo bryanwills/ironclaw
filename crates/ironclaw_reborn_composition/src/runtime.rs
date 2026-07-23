@@ -92,10 +92,9 @@ use ironclaw_turns::{
 
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_product_workflow::{
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
-};
+use ironclaw_outbound::OutboundError;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::run_profile::UserProfileContext;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
@@ -106,8 +105,9 @@ use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+use crate::outbound::{
+    DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
+    OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
@@ -122,8 +122,8 @@ use ironclaw_filesystem::CompositeRootFilesystem;
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 struct StaticOutboundDeliveryTargetProvider {
-    summary: RebornOutboundDeliveryTargetSummary,
-    capabilities: RebornOutboundDeliveryTargetCapabilities,
+    summary: OutboundDeliveryTargetSummary,
+    capabilities: DeliveryTargetCapabilities,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -132,8 +132,8 @@ struct StaticOutboundDeliveryTargetProvider {
 impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
         // Static test/QA fixture available to whichever caller asks: it claims
         // the querying caller as owner so it always survives the registry's
         // caller-scoping filter. Real providers derive the owner from the
@@ -142,7 +142,7 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
-            owner: OutboundDeliveryTargetOwner::for_caller(caller),
+            owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
 }
@@ -1752,7 +1752,12 @@ impl RebornRuntime {
         description: Option<&str>,
         reply_target_binding_ref: ReplyTargetBindingRef,
     ) -> Result<(), RebornRuntimeError> {
-        let summary = RebornOutboundDeliveryTargetSummary::new(
+        let target_id = OutboundDeliveryTargetId::new(target_id.as_str()).map_err(|error| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("invalid outbound delivery target id: {error}"),
+            }
+        })?;
+        let summary = OutboundDeliveryTargetSummary::new(
             target_id,
             channel,
             display_name,
@@ -1765,10 +1770,12 @@ impl RebornRuntime {
             provider_key,
             Arc::new(StaticOutboundDeliveryTargetProvider {
                 summary,
-                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                capabilities: DeliveryTargetCapabilities {
                     final_replies: true,
+                    progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    modalities: Vec::new(),
                 },
                 reply_target_binding_ref,
             }),
