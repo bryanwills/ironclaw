@@ -116,22 +116,21 @@ pub struct RefreshingCapabilityPortTestParts {
 /// when forwarding to the production factory. Mirrors `SkillActivationTestSource`.
 #[cfg(feature = "test-support")]
 pub struct ExtensionManagementTestHandle {
-    extension_management:
-        std::sync::Arc<crate::extension_host::extension_lifecycle::ExtensionManagementPort>,
+    readiness_source: std::sync::Arc<crate::extension_host::lifecycle::LifecycleFacade>,
 }
 
 #[cfg(feature = "test-support")]
 impl ExtensionManagementTestHandle {
-    /// Crate-internal accessor for the wrapped port. Kept `pub(crate)` (never
-    /// `pub`) so the crate-private `ExtensionManagementPort` type
-    /// never appears in this crate's public API; only `runtime::local_dev`'s
-    /// test-support constructor (which already names the type) may call this.
-    /// For tests only -- gated behind `test-support`, ships zero bytes in
-    /// production builds.
-    pub(crate) fn extension_management(
+    /// Crate-internal accessor for the caller-scoped readiness facade. Kept
+    /// `pub(crate)` (never `pub`) so the crate-private
+    /// `LifecycleFacade` type never appears in this crate's public
+    /// API; only `runtime::local_dev`'s test-support constructor (which
+    /// already names the type) may call this. For tests only -- gated behind
+    /// `test-support`, ships zero bytes in production builds.
+    pub(crate) fn readiness_source(
         &self,
-    ) -> std::sync::Arc<crate::extension_host::extension_lifecycle::ExtensionManagementPort> {
-        self.extension_management.clone()
+    ) -> std::sync::Arc<crate::extension_host::lifecycle::LifecycleFacade> {
+        self.readiness_source.clone()
     }
 }
 
@@ -150,9 +149,20 @@ impl ExtensionManagementTestHandle {
 pub fn build_extension_management_for_test(
     runtime: &crate::RebornRuntime,
 ) -> Option<ExtensionManagementTestHandle> {
-    let extension_management = runtime.extension_management.clone();
+    let mut facade =
+        crate::extension_host::lifecycle::LifecycleFacade::new(runtime.skill_management.clone())
+            .with_extension_management(runtime.extension_management.clone())
+            .with_admin_configuration_resolver(runtime.admin_configuration_resolver.clone())
+            .with_runtime_credential_accounts(
+                runtime
+                    .product_auth
+                    .runtime_credential_account_selection_service(),
+            );
+    if let Some(egress) = runtime.runtime_http_egress.as_ref() {
+        facade = facade.with_runtime_http_egress(egress.clone());
+    }
     Some(ExtensionManagementTestHandle {
-        extension_management,
+        readiness_source: std::sync::Arc::new(facade),
     })
 }
 

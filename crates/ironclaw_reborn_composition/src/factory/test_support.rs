@@ -16,7 +16,7 @@ pub struct ChannelHostAssemblyTestWiring {
     pub thread_service: Arc<dyn SessionThreadService>,
     pub turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub identity: crate::extension_host::channel_host::ChannelHostIdentity,
-    pub run_delivery_settings: ironclaw_product::RunDeliverySettings,
+    pub run_delivery_events: Arc<ironclaw_product::RunDeliveryEventRouter>,
 }
 
 #[allow(dead_code)]
@@ -273,14 +273,12 @@ impl RebornRuntimeStores {
             .await
             .map_err(|error| error.to_string())?;
         let paired_user = match outcome {
-            crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::Paired {
-                user_id,
+            ironclaw_product::ChannelPairingConsumeOutcome::Paired { user_id }
+            | ironclaw_product::ChannelPairingConsumeOutcome::AlreadyPairedSameUser { user_id } => {
+                Some(user_id)
             }
-            | crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
-                user_id,
-            } => Some(user_id),
-            crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
-            | crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
+            ironclaw_product::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
+            | ironclaw_product::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
         };
         if let Some(user_id) = paired_user.as_ref() {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
@@ -289,7 +287,7 @@ impl RebornRuntimeStores {
                 Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
             );
             service
-                .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
+                .finish_pending_for_user_with_for_test(user_id, tenant_id, continuation)
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -321,19 +319,6 @@ impl RebornRuntimeStores {
         self.delivery_coordinator.clone()
     }
 
-    /// The generic `[channel.config]` configure port (extension-runtime
-    /// §6.4): the production surface the WebUI setup facade and the
-    /// lifecycle configure action route operator channel config through.
-    /// `None` without a local-dev runtime.
-    pub(crate) fn channel_config_facade(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigFacade>> {
-        let service = self.channel_config.clone();
-        Some(Arc::new(
-            crate::extension_host::channel_config::RebornChannelConfigFacade::new(service),
-        ))
-    }
-
     /// Test-support flavor of [`Self::start_channel_host_assembly`]: the
     /// integration harness supplies its own run-world services (thread
     /// service, turn coordinator, identity) because the harness's runs
@@ -355,7 +340,7 @@ impl RebornRuntimeStores {
             approval_context: None,
             blocked_auth_prompts: None,
             auth_flow_cancel: None,
-            run_delivery_settings: wiring.run_delivery_settings,
+            run_delivery_events: wiring.run_delivery_events,
         })
     }
 
@@ -781,7 +766,7 @@ fn active_extension_network_policy_for_test(
     // Delegate to the production manifest-egress policy builder (gsuite +
     // web-access declare their egress in their manifests now — no per-provider
     // special-case, and no first-party dependency in this test-support seam).
-    crate::runtime::local_dev::extension_surface::extension_network_policy(capability)
+    crate::runtime::extension_surface::extension_network_policy(capability)
 }
 
 /// Bundle returned by [`RebornRuntimeStores::local_dev_attachment_test_support_for_test`]

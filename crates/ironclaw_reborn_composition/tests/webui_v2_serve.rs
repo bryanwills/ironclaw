@@ -18,19 +18,19 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, InstallationState, NetworkMethod, Outcome, OutcomeRefs,
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
-    TerminateHint, ThreadId, ToolVerdict, UserId,
+    ActivityId, AgentId, NetworkMethod, Outcome, OutcomeRefs, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProjectId, Resolution,
+    ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId, TerminateHint, ThreadId,
+    ToolVerdict, UserId,
 };
 use ironclaw_product::{
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, ProductCreateThreadRequest, ProductListThreadsRequest,
-    ProductResolveGateRequest, ProductSubmitTurnRequest, RebornCancelRunResponse,
-    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornListThreadsResponse,
-    RebornSetupExtensionResponse, RebornSubmitTurnResponse, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
-    TIMELINE_VIEW, TRACE_CREDITS_VIEW,
+    LifecyclePackageRef, LifecyclePublicState, ProductCreateThreadRequest,
+    ProductListThreadsRequest, ProductResolveGateRequest, ProductSubmitTurnRequest,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornListThreadsResponse, RebornSetupExtensionResponse, RebornSubmitTurnResponse,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewQuery,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
 };
 use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -214,11 +214,10 @@ fn trace_credits_response(caller: &ProductSurfaceCaller) -> RebornTraceCreditsRe
 fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
     RebornSetupExtensionResponse {
         package_ref,
-        phase: InstallationState::Unsupported,
+        phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
         payload: None,
         secrets: Vec::new(),
-        fields: Vec::new(),
         onboarding: None,
     }
 }
@@ -2147,8 +2146,10 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
+    // #6520 three-state lifecycle: the facade projects setup_needed for an
+    // extension awaiting configuration (the "unsupported" literal is retired).
     assert!(
-        body.contains("\"phase\":\"unsupported\""),
+        body.contains("\"phase\":\"setup_needed\""),
         "setup_extension must surface lifecycle phase, got: {body}",
     );
     assert!(

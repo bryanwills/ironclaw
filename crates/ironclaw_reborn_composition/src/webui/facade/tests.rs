@@ -12,21 +12,20 @@ use super::*;
 use async_trait::async_trait;
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
+    ExtensionHealthSnapshot, ExtensionInstallation, ExtensionInstallationError,
+    ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifest,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
     FilesystemExtensionInstallationStore, ManifestSource,
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    ActivityId, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions,
-    MountView, ProductSurfaceCaller, ProductSurfaceError, Resolution, TenantId, UserId,
-    VirtualPath,
+    ActivityId, Blocked, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant,
+    MountPermissions, MountView, ProductSurfaceCaller, ProductSurfaceError, Resolution, TenantId,
+    UserId, VirtualPath,
 };
 use ironclaw_product::{
-    EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY,
-    OPERATOR_SERVICE_LIFECYCLE_COMMAND, ProductCapabilityDescriptor, RebornOperatorToolCatalog,
-    RebornOperatorToolInfo,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
+    ProductCapabilityDescriptor, RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
 use std::time::Duration;
 
@@ -112,7 +111,6 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
         .expect("manifest record")
     }
 
-    let operator = UserId::new("operator").expect("operator id");
     let alice = UserId::new("alice").expect("alice id");
     let bob = UserId::new("bob").expect("bob id");
 
@@ -134,7 +132,6 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
                 ExtensionInstallation::new(
                     ExtensionInstallationId::new(ext).expect("installation id"),
                     ext_id.clone(),
-                    ExtensionActivationState::Enabled,
                     ExtensionManifestRef::new(ext_id, None),
                     Vec::new(),
                     Utc::now(),
@@ -177,7 +174,6 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             Arc::new(ironclaw_trust::InvalidationBus::new()),
         ),
         None,
-        operator,
     ));
 
     let catalog = ActiveRegistryOperatorToolCatalog::new(registry, Vec::new(), Some(port));
@@ -308,12 +304,6 @@ impl ExtensionInstallationStore for OwnerReadFailingStore {
         self.inner.list_installations().await
     }
 
-    async fn list_enabled_installations(
-        &self,
-    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        self.inner.list_enabled_installations().await
-    }
-
     async fn get_installation(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -326,16 +316,6 @@ impl ExtensionInstallationStore for OwnerReadFailingStore {
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
         self.inner.upsert_installation(installation).await
-    }
-
-    async fn set_activation_state(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        state: ExtensionActivationState,
-    ) -> Result<(), ExtensionInstallationError> {
-        self.inner
-            .set_activation_state(installation_id, state)
-            .await
     }
 
     async fn delete_installation(
@@ -440,16 +420,8 @@ async fn product_surface_extension_lifecycle_remove_succeeds_after_activation() 
     .expect("install resolves");
     assert_success(install, "install");
 
-    let activate = invoke_lifecycle_product_capability(
-        &bundle,
-        caller.clone(),
-        EXTENSION_ACTIVATE_CAPABILITY,
-        serde_json::json!({"extension_id": "web-access"}),
-    )
-    .await
-    .expect("activate resolves");
-    assert_success(activate, "activate");
-
+    // #6520: install drives readiness — there is no separate activate
+    // capability to invoke between install and remove.
     let remove = invoke_lifecycle_product_capability(
         &bundle,
         caller,
@@ -845,4 +817,125 @@ fn scoped_skill_mounts(
 
 fn skill_content(name: &str, description: &str) -> String {
     format!("---\nname: {name}\ndescription: {description}\n---\nUse this skill.\n")
+}
+
+/// Live-repro regression (demo-stack defect): removing an installed CHANNEL
+/// extension through the real product-capability dispatch must actually tear
+/// the durable membership down — not resolve success while the installation
+/// row survives. The sibling test above asserts only the resolution verdict;
+/// this one demands the durable evidence (`tool-evidence.md`: installation
+/// mutations read back the durable lifecycle state).
+#[tokio::test]
+async fn product_surface_channel_extension_remove_deletes_the_durable_membership() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = crate::RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "channel-remove-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_runtime_policy(crate::local_dev_runtime_policy().expect("local-dev policy resolves")),
+    )
+    .with_identity(crate::RebornRuntimeIdentity {
+        tenant_id: "tenant-alpha".to_string(),
+        agent_id: "agent-alpha".to_string(),
+        source_binding_id: "webui-test-source".to_string(),
+        reply_target_binding_id: "webui-test-reply".to_string(),
+    });
+    let runtime = crate::build_reborn_runtime(input)
+        .await
+        .expect("runtime builds");
+    let bundle = build_webui_services(&runtime, None).expect("webui services build");
+    let caller = caller("channel-remove-owner");
+
+    let install = invoke_lifecycle_product_capability(
+        &bundle,
+        caller.clone(),
+        EXTENSION_INSTALL_CAPABILITY,
+        serde_json::json!({"extension_id": "telegram"}),
+    )
+    .await
+    .expect("install resolves");
+    // A channel extension's install parks on its pairing/auth requirement
+    // AFTER persisting the caller membership — the same Blocked(Auth)
+    // outcome the webui install handler accepts as "setup needed".
+    match install {
+        Resolution::Done(ref outcome) if outcome.verdict.is_success() => {}
+        Resolution::Blocked(Blocked::Auth(_)) => {}
+        other => panic!("telegram install failed: {other:?}"),
+    }
+    let installed = runtime
+        .extension_management
+        .installation_store_handle()
+        .get_installation(&ExtensionInstallationId::new("telegram").expect("installation id"))
+        .await
+        .expect("installation store read");
+    assert!(
+        installed.is_some(),
+        "telegram install must persist a durable installation row"
+    );
+
+    // Acceptance contract: membership is bound to the true product caller.
+    // The installer's caller-scoped WebUI projection lists telegram; another
+    // member of the same tenant does NOT see the private membership.
+    let installer_view: ironclaw_product::RebornExtensionListResponse =
+        ironclaw_product::EXTENSIONS_VIEW
+            .query_on(
+                &ironclaw_host_api::BoundProductSurface::new(
+                    Arc::clone(&bundle.product_surface),
+                    caller.clone(),
+                ),
+                serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("installer extensions view");
+    assert!(
+        installer_view
+            .extensions
+            .iter()
+            .any(|extension| extension.package_ref.id.as_str() == "telegram"),
+        "the installing member's projection must list telegram"
+    );
+    let other_member_view: ironclaw_product::RebornExtensionListResponse =
+        ironclaw_product::EXTENSIONS_VIEW
+            .query_on(
+                &ironclaw_host_api::BoundProductSurface::new(
+                    Arc::clone(&bundle.product_surface),
+                    caller_in_tenant("tenant-alpha", "channel-remove-bystander"),
+                ),
+                serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("bystander extensions view");
+    assert!(
+        !other_member_view.extensions.iter().any(|extension| {
+            extension.package_ref.id.as_str() == "telegram"
+                && extension.installation_state
+                    != ironclaw_product::LifecyclePublicState::Uninstalled
+        }),
+        "another member must not see the installer's private telegram membership"
+    );
+
+    let remove = invoke_lifecycle_product_capability(
+        &bundle,
+        caller,
+        EXTENSION_REMOVE_CAPABILITY,
+        serde_json::json!({"extension_id": "telegram"}),
+    )
+    .await
+    .expect("remove resolves");
+    assert_success(remove, "telegram remove");
+    let survivor = runtime
+        .extension_management
+        .installation_store_handle()
+        .get_installation(&ExtensionInstallationId::new("telegram").expect("installation id"))
+        .await
+        .expect("installation store read");
+    assert!(
+        survivor.is_none(),
+        "telegram remove reported success but the durable installation row survived: {survivor:?}"
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
 }

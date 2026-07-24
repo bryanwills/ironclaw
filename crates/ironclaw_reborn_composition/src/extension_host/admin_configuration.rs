@@ -22,6 +22,11 @@ use crate::extension_host::available_extensions::AdminConfigurationCatalogUse;
 
 pub(crate) type ComposedAdminConfigurationService =
     AdminConfigurationService<dyn RootFilesystem, dyn SecretStore>;
+pub(crate) type ComposedExtensionAdminConfigurationResolver =
+    ironclaw_extension_host::ExtensionAdminConfigurationResolver<
+        dyn RootFilesystem,
+        dyn SecretStore,
+    >;
 
 #[derive(Clone, Default)]
 pub(crate) struct AdminConfigurationViewProvider {
@@ -172,7 +177,9 @@ fn map_admin_configuration_error(
             tracing::error!(error = %source, "admin-configuration descriptor projection failed");
             ProductSurfaceError::internal_from("admin configuration descriptor is invalid")
         }
-        AdminConfigurationServiceError::Unavailable => {
+        AdminConfigurationServiceError::RuntimeReconciliationFailed
+        | AdminConfigurationServiceError::RuntimeRollbackFailed
+        | AdminConfigurationServiceError::Unavailable => {
             tracing::warn!(error = %source, "admin-configuration query service unavailable");
             ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Unavailable,

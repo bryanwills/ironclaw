@@ -105,6 +105,20 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   adapters. §14 refreshed against current `origin/main` after #6386 / #6396 /
   #6430 / #6432 / #6116 / #6438 / #6447.
 - **r12** 2026-07-23 — status-only update for channel ingress: extension/channel
+  ingress now admits verified normalized messages directly through
+  `ProductSurface` as the host-only `channel.admit_inbound` operation instead
+  of using a separate product workflow facade or constructing
+  `ProductInboundPayload` directly. `ProductInboundEnvelope` now carries `source_channel`, so WebUI,
+  CLI, and external channels converge on one source-channel stamp instead of a
+  separate channel-specific envelope. Slack gate/auth interaction classifiers
+  now return the channel-classification DTO consumed by ProductSurface
+  admission.
+- **r13** 2026-07-23 — status-only correction for the unified extension
+  lifecycle. The public product surface no longer exposes a distinct extension
+  activation action. Install establishes per-user membership; the manifest
+  auth recipe and durable credential/pairing readiness derive either
+  `setup_needed` or `active`; remove deletes that membership. This supersedes
+  the activation-specific status wording in r9 and refreshes mutable §14.
   ingress now admits verified normalized messages through
   `host_api::ChannelInboundProductSurface::admit_channel_inbound` instead of a
   generic ProductSurface command escape hatch or direct
@@ -2478,10 +2492,11 @@ loop-facing capability result and every result mirror is deleted.
   master switch uses `builtin.skill_auto_activate_learned_set`, an API-only
   product capability over the runtime selector flag. Extension install/remove
   routes now invoke `builtin.extension_install` and `builtin.extension_remove`
-  directly from the WebUI ProductSurface path; activation now invokes
-  `builtin.extension_activate`, reads back `EXTENSIONS_VIEW` for active state
-  after success, and maps auth-blocked outcomes onto the existing extension
-  onboarding response shape. Extension setup read now flows through the
+  directly from the WebUI ProductSurface path. Install establishes per-user
+  membership and returns the manifest-driven onboarding or blocked-auth result;
+  after auth completes, `EXTENSIONS_VIEW` derives `setup_needed` or `active`
+  from durable readiness. There is no separate public extension activation
+  capability or lifecycle transition. Extension setup read now flows through the
   descriptor-backed `extension_setup` view, and setup submit now invokes
   `builtin.extension_setup_submit` before reading back that view. Zip import now
   invokes `builtin.extension_import` with upload bytes encoded into an

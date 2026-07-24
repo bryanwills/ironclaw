@@ -238,7 +238,8 @@ pub(crate) fn build_webui_services_with_channel_connection(
         let mut lifecycle_facade = LifecycleFacade::new(Arc::clone(&runtime.skill_management));
         lifecycle_facade =
             lifecycle_facade.with_extension_management(runtime.extension_management.clone());
-        lifecycle_facade = lifecycle_facade.with_channel_config(runtime.channel_config.clone());
+        lifecycle_facade = lifecycle_facade
+            .with_admin_configuration_resolver(runtime.admin_configuration_resolver.clone());
         if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
@@ -250,14 +251,9 @@ pub(crate) fn build_webui_services_with_channel_connection(
         );
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
-    // The generic channel-config configure port: the setup facade renders
-    // manifest-declared channel-config fields and routes submitted values
-    // through it (extension-runtime §6.4).
-    api = api.with_channel_config_facade(Arc::new(
-        crate::extension_host::channel_config::RebornChannelConfigFacade::new(
-            runtime.channel_config.clone(),
-        ),
-    ));
+    // The manifest-declared administrator-configuration surface is rendered and
+    // routed through `admin_configuration_view` (built above from the canonical
+    // Admin Configuration service); no separate channel-config facade port.
     // Share the activation selector's live master switch when the selected skill
     // context reads it. Deployments without that selector pass `None`, so the
     // toggle reports unavailable rather than writing to an orphan flag.

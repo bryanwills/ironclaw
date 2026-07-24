@@ -116,6 +116,9 @@ pub fn build_channel_connection_for_test(
         credential_cleanup,
         account_status_reader,
         Some(runtime.channel_dm_target_store.clone()),
+        Arc::new(ironclaw_product::ChannelWorkflowStateService::new(
+            runtime.extension_filesystem.clone() as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+        )),
         runtime.channel_pairing.clone(),
     ));
     let disconnect_slot = &runtime.channel_facade_slot;
@@ -148,7 +151,7 @@ pub fn build_channel_connection_for_test(
     let identity_binding = ChannelIdentityBindingConfig {
         tenant_id: tenant_id.clone(),
         installation_store: Some(installation_store),
-        channel_config: Some(runtime.channel_config.clone()),
+        admin_configuration_resolver: Some(runtime.admin_configuration_resolver.clone()),
         binding_store: Arc::clone(&identity_store)
             as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)

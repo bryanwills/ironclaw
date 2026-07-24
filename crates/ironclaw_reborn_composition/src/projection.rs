@@ -1015,6 +1015,7 @@ impl ProductSurfaceProjectionBatch {
         {
             match runtime_item {
                 RuntimePayloadItem::Durable(durable) => {
+                    let durable = *durable;
                     return self.push_durable_runtime_payloads(
                         durable.final_cursor,
                         durable.item_cursor,
@@ -1024,7 +1025,7 @@ impl ProductSurfaceProjectionBatch {
                     );
                 }
                 RuntimePayloadItem::Live { cursor, payload } => {
-                    return Ok(self.push_live_payload(cursor, payload));
+                    return Ok(self.push_live_payload(cursor, *payload));
                 }
                 RuntimePayloadItem::CursorAdvance { cursor } => {
                     return Ok(self.push_runtime_cursor_advance(cursor));
@@ -1260,7 +1261,7 @@ fn live_update_payloads(
     let state = ProductProjectionState::new(scope.thread_id.to_string(), items)?;
     Ok(Some(RuntimePayloadItem::Live {
         cursor,
-        payload: ProductOutboundPayload::ProjectionUpdate { state },
+        payload: Box::new(ProductOutboundPayload::ProjectionUpdate { state }),
     }))
 }
 
@@ -1275,10 +1276,10 @@ struct DurableRuntimePayloadItem {
 
 #[derive(Debug)]
 enum RuntimePayloadItem {
-    Durable(DurableRuntimePayloadItem),
+    Durable(Box<DurableRuntimePayloadItem>),
     Live {
         cursor: EventProjectionCursor,
-        payload: ProductOutboundPayload,
+        payload: Box<ProductOutboundPayload>,
     },
     CursorAdvance {
         cursor: EventProjectionCursor,
@@ -1294,13 +1295,13 @@ fn durable_runtime_payload_item(
     total: usize,
     already_delivered: usize,
 ) -> RuntimePayloadItem {
-    RuntimePayloadItem::Durable(DurableRuntimePayloadItem {
+    RuntimePayloadItem::Durable(Box::new(DurableRuntimePayloadItem {
         final_cursor,
         item_cursor,
         payloads,
         total,
         already_delivered,
-    })
+    }))
 }
 
 async fn snapshot_payloads(
